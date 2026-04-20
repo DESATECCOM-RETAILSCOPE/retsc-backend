@@ -1,0 +1,8 @@
+SELECT TOP (1000) [User_id]
+      ,[User_name]
+      ,[Email]
+      ,[PasswordHash]
+      ,[Status]
+      ,[Created_date]
+      ,[ced_identidad]
+  FROM [RETAIL_SCOPE].[dbo].[RETSC_OP_USERS]
