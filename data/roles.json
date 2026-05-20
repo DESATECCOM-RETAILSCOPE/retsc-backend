@@ -1,0 +1,6 @@
+[
+  { "Role_id": 1, "Role_name": "Admin", "Description": "Administrador de empresa", "Status": 1 },
+  { "Role_id": 2, "Role_name": "Analista", "Description": "Analista de retail", "Status": 1 },
+  { "Role_id": 3, "Role_name": "Cliente", "Description": "Cliente final", "Status": 1 },
+  { "Role_id": 4, "Role_name": "Operador", "Description": "Operador de campo", "Status": 1 }
+]

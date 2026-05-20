@@ -1,0 +1,11 @@
+[
+  {
+    "User_id": 1,
+    "User_name": "Admin Demo",
+    "Email": "admin@retailscope.com",
+    "PasswordHash": "$2a$10$WYlDbAskVh4wqCzqH/emfelgRVr1EIwvMDCWZNSecIw1eib0de9tO",
+    "Status": 1,
+    "Created_date": "2026-05-20T02:35:50.361Z",
+    "ced_identidad": "000000000"
+  }
+]
