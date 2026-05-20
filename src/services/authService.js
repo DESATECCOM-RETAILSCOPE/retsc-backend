@@ -4,7 +4,9 @@ const bcrypt = require('bcryptjs');
 // const { getPool, sql } = require('../config/db');
 
 // --- JSON (activo: persistencia temporal en archivos JSON) ---
-const userRepo = require('../repositories/userRepo');
+const userRepo           = require('../repositories/userRepo');
+const userEnterpriseRepo = require('../repositories/userEnterpriseRepo');
+const roleRepo           = require('../repositories/roleRepo');
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -100,6 +102,37 @@ const validatePassword = async (plain, hash) => {
   return bcrypt.compare(plain, hash);
 };
 
+// Valida password y resuelve la relación activa usuario-empresa.
+// Lanza errores con .statusCode para que el controller los mapee a HTTP.
+const resolveLoginData = async (email, password) => {
+  const user = await userRepo.findByEmail(email);
+  if (!user) {
+    const err = new Error('Credenciales inválidas'); err.statusCode = 401; throw err;
+  }
+
+  const isValid = await bcrypt.compare(password, user.PasswordHash);
+  if (!isValid) {
+    const err = new Error('Credenciales inválidas'); err.statusCode = 401; throw err;
+  }
+
+  const relations = await userEnterpriseRepo.findActiveByUserId(user.User_id);
+  if (!relations.length) {
+    const err = new Error('El usuario no tiene empresas activas asignadas. Contacte al administrador.');
+    err.statusCode = 403; throw err;
+  }
+
+  // TODO: implementar selector de empresa cuando el frontend lo soporte
+  const relation = relations.reduce((min, r) => r.Id < min.Id ? r : min, relations[0]);
+
+  const role = await roleRepo.findById(relation.Role_id);
+  if (!role) {
+    const err = new Error('Rol del usuario no encontrado. Contacte al administrador.');
+    err.statusCode = 500; throw err;
+  }
+
+  return { user, relation, role };
+};
+
 module.exports = {
   findUserByEmail,
   findUserByUsername,
@@ -107,4 +140,5 @@ module.exports = {
   getAllUsers,
   createUser,
   validatePassword,
+  resolveLoginData,
 };

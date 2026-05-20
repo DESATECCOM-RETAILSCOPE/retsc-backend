@@ -17,4 +17,6 @@ const insert = (user) => repo.insert(TABLE, user, PK);
 
 const update = (id, partial) => repo.update(TABLE, id, partial, PK);
 
-module.exports = { findById, findByEmail, findByCedula, listAll, insert, update };
+const remove = (id) => repo.remove(TABLE, id, PK);
+
+module.exports = { findById, findByEmail, findByCedula, listAll, insert, update, remove };

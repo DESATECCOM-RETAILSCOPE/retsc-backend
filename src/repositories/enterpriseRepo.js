@@ -14,4 +14,6 @@ const insert = (enterprise) => repo.insert(TABLE, enterprise, PK);
 
 const update = (id, partial) => repo.update(TABLE, id, partial, PK);
 
-module.exports = { findById, findByFiscalId, listAll, insert, update };
+const remove = (id) => repo.remove(TABLE, id, PK);
+
+module.exports = { findById, findByFiscalId, listAll, insert, update, remove };

@@ -1,1 +1,22 @@
-[]
+[
+  {
+    "Id": 4,
+    "Enterprise_id": 1,
+    "Category_id": 2
+  },
+  {
+    "Id": 5,
+    "Enterprise_id": 1,
+    "Category_id": 4
+  },
+  {
+    "Id": 6,
+    "Enterprise_id": 1,
+    "Category_id": 6
+  },
+  {
+    "Id": 7,
+    "Enterprise_id": 1,
+    "Category_id": 7
+  }
+]

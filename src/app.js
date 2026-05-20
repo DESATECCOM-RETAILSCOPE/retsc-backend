@@ -1,6 +1,11 @@
 const express = require('express');
 const cors = require('cors');
-const authRoutes = require('./routes/authRoutes');
+const authRoutes               = require('./routes/authRoutes');
+const enterpriseRoutes         = require('./routes/enterpriseRoutes');
+const userRoutes               = require('./routes/userRoutes');
+const categoryRoutes           = require('./routes/categoryRoutes');
+const enterpriseCategoryRoutes = require('./routes/enterpriseCategoryRoutes');
+const authMiddleware           = require('./middlewares/authMiddleware');
 
 const app = express();
 
@@ -9,7 +14,11 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Rutas
-app.use('/api/auth', authRoutes);
+app.use('/api/auth',                       authRoutes);
+app.use('/api/enterprises',               enterpriseRoutes);
+app.use('/api/users',                     authMiddleware, userRoutes);
+app.use('/api/categories',                authMiddleware, categoryRoutes);
+app.use('/api/enterprises/me/categories', authMiddleware, enterpriseCategoryRoutes);
 
 // Health check
 app.get('/health', (req, res) => {

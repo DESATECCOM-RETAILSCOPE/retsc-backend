@@ -9,21 +9,19 @@ const login = async (req, res) => {
       return res.status(400).json({ message: 'Email y contraseña son requeridos' });
     }
 
-    const user = await authService.findUserByEmail(email.trim().toLowerCase());
-    if (!user) {
-      return res.status(401).json({ message: 'Credenciales inválidas' });
-    }
-
-    const isValid = await authService.validatePassword(password, user.PasswordHash);
-    if (!isValid) {
-      return res.status(401).json({ message: 'Credenciales inválidas' });
-    }
+    const { user, relation, role } = await authService.resolveLoginData(
+      email.trim().toLowerCase(),
+      password
+    );
 
     const token = jwt.sign(
       {
-        userId:   user.User_id,
-        email:    user.Email,
-        username: user.User_name,
+        userId:       user.User_id,
+        email:        user.Email,
+        username:     user.User_name,
+        enterpriseId: relation.Enterprise_id,
+        roleId:       role.Role_id,
+        roleName:     role.Role_name,
       },
       process.env.JWT_SECRET,
       { expiresIn: process.env.JWT_EXPIRES_IN || '24h' }
@@ -36,11 +34,15 @@ const login = async (req, res) => {
         username:     user.User_name,
         email:        user.Email,
         cedIdentidad: user.ced_identidad,
+        enterpriseId: relation.Enterprise_id,
+        roleId:       role.Role_id,
+        roleName:     role.Role_name,
       },
     });
   } catch (err) {
-    console.error('Login error:', err);
-    return res.status(500).json({ message: 'Error interno del servidor' });
+    const status = err.statusCode || 500;
+    if (status === 500) console.error('Login error:', err);
+    return res.status(status).json({ message: err.message });
   }
 };
 
