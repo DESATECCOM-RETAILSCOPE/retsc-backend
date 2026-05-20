@@ -5,6 +5,7 @@ const enterpriseRoutes         = require('./routes/enterpriseRoutes');
 const userRoutes               = require('./routes/userRoutes');
 const categoryRoutes           = require('./routes/categoryRoutes');
 const enterpriseCategoryRoutes = require('./routes/enterpriseCategoryRoutes');
+const productRoutes            = require('./routes/productRoutes');
 const authMiddleware           = require('./middlewares/authMiddleware');
 
 const app = express();
@@ -19,6 +20,7 @@ app.use('/api/enterprises',               enterpriseRoutes);
 app.use('/api/users',                     authMiddleware, userRoutes);
 app.use('/api/categories',                authMiddleware, categoryRoutes);
 app.use('/api/enterprises/me/categories', authMiddleware, enterpriseCategoryRoutes);
+app.use('/api/products',                  productRoutes);
 
 // Health check
 app.get('/health', (req, res) => {

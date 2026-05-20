@@ -3,9 +3,9 @@
     "User_id": 1,
     "User_name": "Admin Demo",
     "Email": "admin@retailscope.com",
-    "PasswordHash": "$2a$10$TMuMTzPJm0f8a2thcVffkOG.UiXznk96U9N2qtGfnSpNgF2mAFcHO",
+    "PasswordHash": "$2a$10$CmoroGI2S.6dN.8dtzEoheSWViQY0gVxU3sqmXkiPiUNE.UvCgP/m",
     "Status": 1,
-    "Created_date": "2026-05-20T03:11:30.571Z",
+    "Created_date": "2026-05-20T19:04:00.481Z",
     "ced_identidad": "000000000"
   }
 ]

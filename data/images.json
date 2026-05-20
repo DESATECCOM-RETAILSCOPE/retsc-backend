@@ -1,1 +1,38 @@
-[]
+[
+  {
+    "Product_id": 1,
+    "Enterprise_id": 1,
+    "Hash": "4e0705327480ad2323cb03d9c450ffcae4a98bf3a5382fa0c7882145ed620e49",
+    "Blob_url": "data/blob-mock/snacks/7501031311309.jpg",
+    "Status": 1,
+    "Created_date": "2026-05-20T19:00:04.950Z",
+    "Image_id": 1
+  },
+  {
+    "Product_id": 1,
+    "Enterprise_id": 1,
+    "Hash": "db8d886cdb4c0a207be8fb7f726289436b3ae789fd2bb0c0457b6a3a3b4e039d",
+    "Blob_url": "data/blob-mock/snacks/7501031311309.jpg",
+    "Status": 1,
+    "Created_date": "2026-05-20T19:07:01.923Z",
+    "Image_id": 2
+  },
+  {
+    "Product_id": 2,
+    "Enterprise_id": 1,
+    "Hash": "5eeab4f70a5bac96a4751294b0b5e350d9627048af89961eea37aa51c3f1550f",
+    "Blob_url": "data/blob-mock/snacks/7501031318100.jpg",
+    "Status": 1,
+    "Created_date": "2026-05-20T19:07:01.923Z",
+    "Image_id": 3
+  },
+  {
+    "Product_id": 3,
+    "Enterprise_id": 1,
+    "Hash": "89e43964ee67b4c16a3f4823cbfba31458ebcb00311c4cb2bf78b86fb78dbcac",
+    "Blob_url": "data/blob-mock/abarrotes/036000291452.jpg",
+    "Status": 1,
+    "Created_date": "2026-05-20T19:07:01.923Z",
+    "Image_id": 4
+  }
+]
