@@ -8,11 +8,16 @@ const enterpriseCategoryRoutes = require('./routes/enterpriseCategoryRoutes');
 const productRoutes            = require('./routes/productRoutes');
 const authMiddleware           = require('./middlewares/authMiddleware');
 
+const path = require('path');
+
 const app = express();
 
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// Imágenes mock servidas como estáticos
+app.use('/blob-mock', express.static(path.join(__dirname, '..', 'data', 'blob-mock')));
 
 // Rutas
 app.use('/api/auth',                       authRoutes);

@@ -1,10 +1,20 @@
-const repo = require('./jsonRepo');
+const { getPool, sql } = require('../config/db');
 
-const TABLE = 'cats';
-const PK = 'Category_id';
+const TABLE = 'RETSC_OP_CATEGORIES';
 
-const findById = (id) => repo.readById(TABLE, id, PK);
+const findById = async (id) => {
+  const pool = await getPool();
+  const r = await pool.request()
+    .input('id', sql.Int, id)
+    .query(`SELECT * FROM ${TABLE} WHERE Category_id = @id`);
+  return r.recordset[0] ?? null;
+};
 
-const listActive = () => repo.findMany(TABLE, r => r.Status === 1);
+const listActive = async () => {
+  const pool = await getPool();
+  const r = await pool.request()
+    .query(`SELECT * FROM ${TABLE} WHERE Status = 1`);
+  return r.recordset;
+};
 
 module.exports = { findById, listActive };

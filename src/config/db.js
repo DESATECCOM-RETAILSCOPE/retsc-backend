@@ -1,14 +1,14 @@
 const sql = require('mssql');
 
 const config = {
-  server: process.env.DB_SERVER,
-  port: parseInt(process.env.DB_PORT) || 1435,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME,
+  server: process.env.SQL_SERVER,
+  port: parseInt(process.env.SQL_PORT) || 1433,
+  user: process.env.SQL_USER,
+  password: process.env.SQL_PASSWORD,
+  database: process.env.SQL_DATABASE,
   options: {
-    encrypt: false,
-    trustServerCertificate: true,
+    encrypt: true,
+    trustServerCertificate: false,
     enableArithAbort: true,
   },
   pool: {

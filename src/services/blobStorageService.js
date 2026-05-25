@@ -55,8 +55,7 @@ async function uploadImage(buffer, relativePath, filename) {
   await fs.mkdir(dir, { recursive: true });
   const dest = path.join(dir, filename);
   await fs.writeFile(dest, buffer);
-  const relUrl = path.join(process.env.BLOB_MOCK_BASE_PATH || 'data/blob-mock', relativePath, filename)
-    .replace(/\\/g, '/');
+  const relUrl = '/blob-mock/' + path.join(relativePath, filename).replace(/\\/g, '/');
   return { url: relUrl, mode: 'mock' };
 }
 
