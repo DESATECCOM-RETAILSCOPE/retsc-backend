@@ -1,5 +1,11 @@
 const enterpriseService = require('../services/enterpriseService');
 
+function handleError(res, err) {
+  const status = err.statusCode || 500;
+  if (status === 500) console.error('[enterprise]', err);
+  return res.status(status).json({ success: false, message: err.message });
+}
+
 const registerEnterprise = async (req, res) => {
   try {
     const result = await enterpriseService.registerEnterprise(req.body);
@@ -23,10 +29,39 @@ const registerEnterprise = async (req, res) => {
     }
 
     return res.status(201).json(response);
-  } catch (err) {
-    const status = err.statusCode || 500;
-    return res.status(status).json({ success: false, message: err.message });
-  }
+  } catch (err) { return handleError(res, err); }
 };
 
-module.exports = { registerEnterprise };
+// GET /api/enterprises/list
+const listEnterprises = async (req, res) => {
+  try {
+    const enterprises = await enterpriseService.listAll();
+    return res.json({ success: true, enterprises });
+  } catch (err) { return handleError(res, err); }
+};
+
+// GET /api/enterprises/:id
+const getEnterprise = async (req, res) => {
+  try {
+    const enterprise = await enterpriseService.findById(Number(req.params.id));
+    return res.json({ success: true, enterprise });
+  } catch (err) { return handleError(res, err); }
+};
+
+// POST /api/enterprises/create
+const createEnterprise = async (req, res) => {
+  try {
+    const enterprise = await enterpriseService.createEnterprise(req.body);
+    return res.status(201).json({ success: true, enterprise });
+  } catch (err) { return handleError(res, err); }
+};
+
+// PUT /api/enterprises/:id
+const updateEnterprise = async (req, res) => {
+  try {
+    const enterprise = await enterpriseService.updateEnterprise(Number(req.params.id), req.body);
+    return res.json({ success: true, enterprise });
+  } catch (err) { return handleError(res, err); }
+};
+
+module.exports = { registerEnterprise, listEnterprises, getEnterprise, createEnterprise, updateEnterprise };

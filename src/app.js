@@ -6,6 +6,7 @@ const userRoutes               = require('./routes/userRoutes');
 const categoryRoutes           = require('./routes/categoryRoutes');
 const enterpriseCategoryRoutes = require('./routes/enterpriseCategoryRoutes');
 const productRoutes            = require('./routes/productRoutes');
+const roleRoutes               = require('./routes/roleRoutes');
 const authMiddleware           = require('./middlewares/authMiddleware');
 
 const path = require('path');
@@ -26,6 +27,7 @@ app.use('/api/users',                     authMiddleware, userRoutes);
 app.use('/api/categories',                authMiddleware, categoryRoutes);
 app.use('/api/enterprises/me/categories', authMiddleware, enterpriseCategoryRoutes);
 app.use('/api/products',                  productRoutes);
+app.use('/api/roles',                     authMiddleware, roleRoutes);
 
 // Health check
 app.get('/health', (req, res) => {
