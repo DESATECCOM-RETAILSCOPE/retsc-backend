@@ -1,9 +1,9 @@
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
-const enterpriseRepo    = require('../repositories/enterpriseRepo');
-const userRepo          = require('../repositories/userRepo');
+const enterpriseRepo     = require('../repositories/enterpriseRepo');
+const userRepo           = require('../repositories/userRepo');
 const userEnterpriseRepo = require('../repositories/userEnterpriseRepo');
-const roleRepo          = require('../repositories/roleRepo');
+const roleRepo           = require('../repositories/roleRepo');
 
 const VALID_TYPES = ['Proveedor', 'Detallista', 'Empresa de servicios'];
 
@@ -28,10 +28,12 @@ const registerEnterprise = async (payload) => {
     adminCedula, adminName, adminEmail, adminPhone,
   } = payload;
 
-  // Validar campos obligatorios
+  // ───── Validación de campos obligatorios ─────
+  // adminName y adminEmail ahora son SIEMPRE requeridos
   const required = {
     fiscalId, enterpriseDsc, country, state, county, city,
-    telephone, address, invoiceMail, contact, contactMail, contactPhone, type, adminCedula,
+    telephone, address, invoiceMail, contact, contactMail, contactPhone, type,
+    adminCedula, adminName, adminEmail,
   };
   const missing = Object.entries(required).filter(([, v]) => !v).map(([k]) => k);
   if (missing.length > 0) {
@@ -42,21 +44,51 @@ const registerEnterprise = async (payload) => {
     throw serviceError(`El campo type debe ser uno de: ${VALID_TYPES.join(', ')}`, 400);
   }
 
-  // Verificar duplicado de fiscalId
+  // ───── Fail-fast: verificar duplicados ANTES de cualquier insert ─────
+
+  // 1. Empresa: fiscalId único
   if (await enterpriseRepo.findByFiscalId(fiscalId)) {
     throw serviceError('Ya existe una empresa registrada con ese fiscalId', 409);
   }
 
-  // Buscar o crear usuario administrador
-  let user = await userRepo.findByCedula(adminCedula);
+  // 2. Email único en RETSC_OP_USERS
+  //    (puede pertenecer al mismo usuario que estamos reactivando — lo validamos abajo)
+  const userByEmail = await userRepo.findByEmail(adminEmail);
+
+  // 3. Cédula: si existe, no debe tener relaciones activas
+  const userByCedula = await userRepo.findByCedula(adminCedula);
+
+  if (userByCedula) {
+    const activeRelations = await userEnterpriseRepo.findActiveByUserId(userByCedula.User_id);
+    if (activeRelations.length > 0) {
+      throw serviceError(
+        'El administrador con esa cédula ya tiene una empresa activa asignada. Debe ser desactivado en su empresa anterior antes de registrarlo en una nueva.',
+        409
+      );
+    }
+  }
+
+  // 4. Si el email ya existe, debe pertenecer al MISMO usuario (cédula).
+  //    Si pertenece a otro usuario distinto, lo rechazamos.
+  if (userByEmail && (!userByCedula || userByEmail.User_id !== userByCedula.User_id)) {
+    throw serviceError('Ya existe un usuario con ese email en el sistema', 409);
+  }
+
+  // ───── Fail-fast: rol Admin debe existir antes de tocar nada ─────
+  const adminRole = await roleRepo.findByName('Admin');
+  if (!adminRole) {
+    throw serviceError('Rol "Admin" no encontrado. Verifique que el seed se ejecutó correctamente.', 500);
+  }
+
+  // ───── Crear o actualizar usuario admin ─────
+  let user = userByCedula;
   let isNewUser = false;
   let generatedPassword = null;
   let insertedUserId = null;
+  let updatedExistingUser = false;
 
   if (!user) {
-    if (!adminName || !adminEmail) {
-      throw serviceError('adminName y adminEmail son requeridos cuando el administrador no existe en el sistema', 400);
-    }
+    // Caso A: usuario nuevo
     generatedPassword = generatePassword();
     const passwordHash = await bcrypt.hash(generatedPassword, 10);
     const inserted = await userRepo.insert({
@@ -70,9 +102,22 @@ const registerEnterprise = async (payload) => {
     user = inserted;
     insertedUserId = inserted.User_id;
     isNewUser = true;
+  } else {
+    // Caso B: usuario existente sin relaciones activas → reactivación con nuevos datos de trabajo
+    generatedPassword = generatePassword();
+    const passwordHash = await bcrypt.hash(generatedPassword, 10);
+    const updated = await userRepo.update(user.User_id, {
+      User_name:    adminName,
+      Email:        adminEmail,
+      PasswordHash: passwordHash,
+      Status:       1,
+    });
+    user = updated || user;
+    updatedExistingUser = true;
+    isNewUser = true; // semánticamente "nuevo" porque entrega un password fresco
   }
 
-  // Insertar empresa
+  // ───── Insertar empresa ─────
   let insertedEnterprise = null;
   try {
     insertedEnterprise = await enterpriseRepo.insert({
@@ -95,15 +140,7 @@ const registerEnterprise = async (payload) => {
     throw err;
   }
 
-  // Obtener rol Admin
-  const adminRole = await roleRepo.findByName('Admin');
-  if (!adminRole) {
-    await enterpriseRepo.remove(insertedEnterprise.Enterprise_id).catch(() => {});
-    if (insertedUserId) await userRepo.remove(insertedUserId).catch(() => {});
-    throw serviceError('Rol "Admin" no encontrado. Verifique que el seed se ejecutó correctamente.', 500);
-  }
-
-  // Insertar relación usuario-empresa
+  // ───── Insertar relación usuario-empresa ─────
   try {
     await userEnterpriseRepo.insert({
       User_id:            user.User_id,
@@ -120,10 +157,11 @@ const registerEnterprise = async (payload) => {
   }
 
   return {
-    enterpriseId:      insertedEnterprise.Enterprise_id,
-    userId:            user.User_id,
+    enterpriseId:        insertedEnterprise.Enterprise_id,
+    userId:              user.User_id,
     isNewUser,
-    generatedPassword, // null si isNewUser === false
+    updatedExistingUser, // true cuando reactivamos un usuario existente
+    generatedPassword,
   };
 };
 
