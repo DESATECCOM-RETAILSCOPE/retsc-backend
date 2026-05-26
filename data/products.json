@@ -1,0 +1,41 @@
+[
+  {
+    "Enterprise_id": 1,
+    "GTIN": "7501031311309",
+    "Description": "Chips Originales 100g",
+    "Category_name": "Snacks",
+    "Subcategory": "Papas Fritas",
+    "Segment": "Original",
+    "Brand": "Barcel",
+    "Primary_image_url": "data/blob-mock/snacks/7501031311309.jpg",
+    "Status": 1,
+    "Created_date": "2026-05-20T19:00:04.948Z",
+    "Product_id": 1
+  },
+  {
+    "Enterprise_id": 1,
+    "GTIN": "7501031318100",
+    "Description": "Chips Chile Limón 100g",
+    "Category_name": "Snacks",
+    "Subcategory": "Papas Fritas",
+    "Segment": "Chile",
+    "Brand": "Barcel",
+    "Primary_image_url": "data/blob-mock/snacks/7501031318100.jpg",
+    "Status": 1,
+    "Created_date": "2026-05-20T19:07:01.917Z",
+    "Product_id": 2
+  },
+  {
+    "Enterprise_id": 1,
+    "GTIN": "036000291452",
+    "Description": "Campbell's Soup 305g",
+    "Category_name": "Abarrotes",
+    "Subcategory": "Sopas",
+    "Segment": "Enlatados",
+    "Brand": "Campbell's",
+    "Primary_image_url": "data/blob-mock/abarrotes/036000291452.jpg",
+    "Status": 1,
+    "Created_date": "2026-05-20T19:07:01.918Z",
+    "Product_id": 3
+  }
+]

@@ -1,6 +1,14 @@
 const express = require('express');
 const cors = require('cors');
-const authRoutes = require('./routes/authRoutes');
+const authRoutes               = require('./routes/authRoutes');
+const enterpriseRoutes         = require('./routes/enterpriseRoutes');
+const userRoutes               = require('./routes/userRoutes');
+const categoryRoutes           = require('./routes/categoryRoutes');
+const enterpriseCategoryRoutes = require('./routes/enterpriseCategoryRoutes');
+const productRoutes            = require('./routes/productRoutes');
+const authMiddleware           = require('./middlewares/authMiddleware');
+
+const path = require('path');
 
 const app = express();
 
@@ -8,8 +16,16 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// Imágenes mock servidas como estáticos
+app.use('/blob-mock', express.static(path.join(__dirname, '..', 'data', 'blob-mock')));
+
 // Rutas
-app.use('/api/auth', authRoutes);
+app.use('/api/auth',                       authRoutes);
+app.use('/api/enterprises',               enterpriseRoutes);
+app.use('/api/users',                     authMiddleware, userRoutes);
+app.use('/api/categories',                authMiddleware, categoryRoutes);
+app.use('/api/enterprises/me/categories', authMiddleware, enterpriseCategoryRoutes);
+app.use('/api/products',                  productRoutes);
 
 // Health check
 app.get('/health', (req, res) => {

@@ -1,0 +1,22 @@
+[
+  {
+    "Id": 8,
+    "Enterprise_id": 1,
+    "Category_id": 7
+  },
+  {
+    "Id": 9,
+    "Enterprise_id": 1,
+    "Category_id": 2
+  },
+  {
+    "Id": 10,
+    "Enterprise_id": 1,
+    "Category_id": 5
+  },
+  {
+    "Id": 11,
+    "Enterprise_id": 1,
+    "Category_id": 6
+  }
+]
