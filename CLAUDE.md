@@ -7,7 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 npm run dev     # Start development server with nodemon (auto-reload)
 npm start       # Start production server
-node scripts/seed.js  # Seed JSON data files with a demo user and enterprise
+node scripts/create-test-data.js  # Generate test Excel and images under test-data/
+node src/utils/gtinValidator.js   # Run inline GTIN self-tests
 ```
 
 No lint or test commands are configured.
@@ -17,16 +18,16 @@ No lint or test commands are configured.
 Copy `.env.example` to `.env` and fill in values. Required variables:
 
 - `PORT` — server port
-- `DB_SERVER`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` — MSSQL credentials (DB runs on port 1435, not the default 1433; only used by legacy auth service)
+- `SQL_SERVER`, `SQL_DATABASE`, `SQL_USER`, `SQL_PASSWORD`, `SQL_PORT` — Azure SQL credentials
 - `JWT_SECRET`, `JWT_EXPIRES_IN` — token signing and expiry (default 24h)
-- `BLOB_STORAGE_MODE` — `mock` (default) or `azure`; mock writes files to `data/blob-mock/` and serves them at `/blob-mock/`
+- `BLOB_STORAGE_MODE` — `mock` (default) or `azure`; mock writes to `data/blob-mock/` and serves at `/blob-mock/`
 - `AZURE_STORAGE_CONNECTION_STRING`, `AZURE_BLOB_CONTAINER` — required only when `BLOB_STORAGE_MODE=azure`
 - `BLOB_MOCK_BASE_PATH` — override mock storage root (default: `data/blob-mock`)
 - `BLOB_HIERARCHY_THRESHOLD` — folder-split threshold for blob paths (default: 500)
 
 ## Architecture
 
-Express layered architecture with two distinct persistence layers:
+Express layered architecture. All persistence is **Azure SQL (MSSQL)** via a single connection pool in `src/config/db.js`. There is no JSON flat-file persistence.
 
 ```
 server.js                     Entry point
@@ -34,59 +35,90 @@ src/app.js                    CORS, body parsing, route mounting, 404/error hand
 src/routes/                   Route definitions
 src/controllers/              Input validation, calls services, formats HTTP responses
 src/services/                 Business logic
-src/repositories/             Data access — all DB reads/writes go here
-src/middlewares/authMiddleware.js  JWT verification; attaches decoded payload to req.user
-src/config/db.js              MSSQL connection pool (legacy, only used by authService)
-data/*.json                   JSON flat-file storage (current primary persistence)
+src/repositories/             Data access — all SQL reads/writes go here
+src/middlewares/authMiddleware.js   JWT verification; attaches decoded payload to req.user
+src/middlewares/requireAdmin.js    Role check; requires req.user.roleName === 'Admin'
+src/config/db.js              MSSQL connection pool (shared by all repositories)
 data/blob-mock/               Local mock blob storage, served as static files
 uploads-temp/                 Temporary files during pipeline runs; auto-cleaned after job
 ```
 
-### Dual persistence layers
+### Database tables
 
-The codebase is mid-migration from MSSQL to JSON flat files:
+Each file in `src/repositories/` maps to one SQL table:
 
-- **JSON layer** (`src/repositories/jsonRepo.js`): All current feature code uses this. Provides `readAll`, `readById`, `findOne`, `findMany`, `insert`, `update`, `remove`, `transaction`. Per-file write locks prevent race conditions. Each "table" is a `data/<name>.json` file.
-- **MSSQL layer** (`src/config/db.js`): Used only by `authService.js` — login/register against `RETSC_OP_USERS`. All other repos delegate to `jsonRepo`.
+| Repository | Table |
+|---|---|
+| `userRepo.js` | `RETSC_OP_USERS` |
+| `enterpriseRepo.js` | `RETSC_OP_ENTERPRISE` |
+| `userEnterpriseRepo.js` | `RETSC_OP_USRSXENTERP` |
+| `roleRepo.js` | `RETSC_OP_ROLES` |
+| `categoryRepo.js` | `RETSC_OP_CATEGORIES` |
+| `enterpriseCategoryRepo.js` | `RETSC_OP_ENTERPRISE_CATEGORIES` |
+| `productRepo.js` | `RETSC_OP_PRODUCTS` |
+| `imageRepo.js` | `RETSC_LOG_IMAGE_UPLOAD` |
+| `loadStateRepo.js` | `RETSC_LOG_SKU_UPLOAD` |
+| `aiModelRepo.js` | `RETSC_AI_DETECTION_MODELS` |
 
-All repository files in `src/repositories/` are thin wrappers over `jsonRepo` that define the table name, primary key field, and any domain-specific filter queries.
+### Auth flow
+
+JWT payload: `{ userId, email, username, enterpriseId, roleId, roleName }`. Use `req.user.roleName` for permission checks. `requireAdmin` middleware enforces `roleName === 'Admin'` and must be applied after `authMiddleware`.
 
 ### API routes
 
 | Route | Auth | Notes |
 |---|---|---|
-| `POST /api/auth/register` | No | bcrypt hash, MSSQL insert |
-| `POST /api/auth/login` | No | MSSQL lookup, returns JWT `{userId, email, username}` |
-| `GET /api/auth/me`, `GET /api/auth/users` | Bearer JWT | MSSQL |
-| `POST /api/enterprises` | No | JSON file |
-| `GET/PUT /api/users/*` | Bearer JWT | JSON file |
-| `GET /api/categories` | Bearer JWT | JSON file |
-| `GET /api/enterprises/me/categories` | Bearer JWT | JSON file |
-| `GET /api/products` | Bearer JWT | JSON file; `?enterpriseId`, `?categoryId`, `?search`, `?page`, `?limit` |
-| `POST /api/products/upload-excel` | Bearer JWT | Parses `.xlsx`; returns parsed rows + validation errors |
-| `POST /api/products/upload-images` | Bearer JWT | Up to 200 images; stored under `uploads-temp/<tmpId>/` |
-| `POST /api/products/process/:jobId` | Bearer JWT | Kicks off async pipeline |
-| `GET /api/products/processing-status/:jobId` | Bearer JWT | Polls pipeline state |
+| `POST /api/auth/register` | No | bcrypt hash, SQL insert |
+| `POST /api/auth/login` | No | SQL lookup, returns JWT |
+| `GET /api/auth/me` | Bearer | Current user |
+| `GET /api/auth/users` | Bearer | All users |
+| `POST /api/enterprises` | No | Register enterprise + admin user |
+| `GET /api/enterprises/list` | Bearer + Admin | List all enterprises |
+| `GET /api/enterprises/:id` | Bearer + Admin | Enterprise detail |
+| `POST /api/enterprises/create` | Bearer + Admin | Create enterprise (no admin user) |
+| `PUT /api/enterprises/:id` | Bearer + Admin | Update enterprise |
+| `GET /api/users` | Bearer | Users of the authenticated enterprise |
+| `GET /api/users/by-cedula/:ced` | Bearer | Find user by ID number |
+| `POST /api/users` | Bearer | Create user and assign to enterprise |
+| `POST /api/users/assign` | Bearer | Assign existing user to enterprise |
+| `PUT /api/users/:id` | Bearer | Update user |
+| `PUT /api/users/:userId/enterprises/:enterpriseId` | Bearer | Update user-enterprise relation |
+| `GET /api/roles` | Bearer | List all roles |
+| `GET /api/roles/:id` | Bearer | Role detail |
+| `POST /api/roles` | Bearer | Create role |
+| `PUT /api/roles/:id` | Bearer | Update role |
+| `PATCH /api/roles/:id/status` | Bearer | Activate/deactivate role |
+| `GET /api/categories` | Bearer | Global category tree |
+| `GET /api/enterprises/me/categories` | Bearer | Enterprise's selected categories |
+| `GET /api/products` | Bearer | Products with pagination/search |
+| `POST /api/products/upload-excel` | Bearer | Parse `.xlsx`; returns rows + errors |
+| `POST /api/products/upload-images` | Bearer | Up to 200 images → `uploads-temp/<jobId>/` |
+| `POST /api/products/process/:jobId` | Bearer | Start async pipeline |
+| `GET /api/products/processing-status/:jobId` | Bearer | Poll pipeline state |
 | `GET /health` | No | `{status, timestamp}` |
 
 ### Product ingestion pipeline
 
-`src/services/pipelineOrchestrator.js` runs an async 7-step job tracked in `data/loadstates.json`:
+`src/services/pipelineOrchestrator.js` runs an async 7-step job tracked in `RETSC_LOG_SKU_UPLOAD`:
 
 1. **validating_gtins** — filters rows against EAN8/UPC12/EAN13 check digits
-2. **hashing** — SHA-based dedup against `data/images.json` and within the batch
-3. **matching** — GTIN extracted from image filename prefix (e.g., `0123456789012_front.jpg` → GTIN `0123456789012`) matched to Excel rows
-4. **hierarchy** — decides blob storage subfolder depth based on product counts vs. `BLOB_HIERARCHY_THRESHOLD`
-5. **uploading** — `blobStorageService` uploads to Azure or mock; fails job if >50% fail
-6. **persisting** — upserts products and inserts image records into JSON files
-7. **ai_tracking** — records `pending_training` entries in `data/aimodels.json` per category
+2. **hashing** — SHA-256 dedup against `RETSC_LOG_IMAGE_UPLOAD` and within the batch
+3. **matching** — GTIN from image filename prefix (e.g. `0123456789012_front.jpg`) matched to Excel rows
+4. **hierarchy** — calculates blob subfolder depth based on product counts vs. `BLOB_HIERARCHY_THRESHOLD`
+5. **uploading** — uploads to Azure or mock in batches of 10 with exponential-backoff retry; fails job if >50% fail
+6. **persisting** — upserts products into `RETSC_OP_PRODUCTS`; inserts image records into `RETSC_LOG_IMAGE_UPLOAD`
+7. **ai_tracking** — records `pending_training` entries in `RETSC_AI_DETECTION_MODELS` per category
 
-The pipeline is fire-and-forget: `POST /process/:jobId` returns immediately; clients poll `/processing-status/:jobId`.
+Pipeline is fire-and-forget: `POST /process/:jobId` returns immediately; clients poll `/processing-status/:jobId`.
 
 ### Excel parsing
 
-`src/services/excelService.js` reads only the first sheet. Required columns: `gtin`, `description`, `category`. Optional: `subcategory`, `segment`, `brand`. Column headers are matched case-insensitively with accent normalization, so Spanish variants (`descripción`, `categoría`, etc.) are accepted.
+`src/services/excelService.js` reads only the first sheet. Required columns: `gtin`, `description`, `category`. Optional: `subcategory`, `segment`, `brand`. Headers matched case-insensitively with accent normalization (e.g. `descripción`, `categoría`). GTINs with a leading zero preserved if total length is 12 or 13 digits.
+
+### Column naming convention — critical
+
+MSSQL repositories return raw SQL column names in Pascal_Case (`Role_id`, `Role_name`, `Description`, `Status`). **Services must always map these to camelCase before returning to controllers.** Use a local `toDTO(row)` function — see `roleService.js` for the established pattern. The frontend and JWT payload always use camelCase (`roleId`, `roleName`, `description`, `status`).
 
 ### Adding new features
 
-Follow the existing pattern: route → controller → service → repository (extending `jsonRepo`). Keep all DB/file access out of controllers and services — repositories only.
+Follow the existing pattern: route → controller → service → repository. All SQL access belongs in repositories only — controllers and services must not call `db.js` directly. When a repository returns MSSQL rows, always map them to camelCase in the service via a `toDTO()` function. Errors need a `statusCode` property for `handleError()` to forward the correct HTTP status — use the `svcError(msg, statusCode)` pattern found in every service.
