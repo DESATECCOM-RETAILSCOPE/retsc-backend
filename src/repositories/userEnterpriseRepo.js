@@ -52,13 +52,16 @@ const insert = async (relation) => {
   return r.recordset[0];
 };
 
-const update = async (id, partial) => {
+const update = async (userId, enterpriseId, partial) => {
   const pool = await getPool();
-  const req = pool.request().input('id', sql.Int, id);
+  const req = pool.request()
+    .input('userId',       sql.Int, userId)
+    .input('enterpriseId', sql.Int, enterpriseId);
   const set = [];
 
   if (partial.Status !== undefined)             { req.input('status',       sql.Int,         partial.Status);             set.push('Status = @status'); }
   if (partial.Role_id !== undefined)            { req.input('roleId',       sql.Int,         partial.Role_id);            set.push('Role_id = @roleId'); }
+  if (partial.Fecha_activacion !== undefined)   { req.input('activation',   sql.VarChar(50), partial.Fecha_activacion);   set.push('Fecha_activacion = @activation'); }
   if (partial.Fecha_inactivacion !== undefined) { req.input('inactivation', sql.VarChar(50), partial.Fecha_inactivacion); set.push('Fecha_inactivacion = @inactivation'); }
 
   if (set.length === 0) return null;
@@ -66,7 +69,7 @@ const update = async (id, partial) => {
   const r = await req.query(`
     UPDATE ${TABLE} SET ${set.join(', ')}
     OUTPUT INSERTED.*
-    WHERE Id = @id
+    WHERE User_id = @userId AND Enterprise_id = @enterpriseId
   `);
   return r.recordset[0] ?? null;
 };

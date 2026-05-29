@@ -12,11 +12,9 @@ function svcError(msg, statusCode) {
 // ── 1.1 ──────────────────────────────────────────────────────────────────────
 const listByEnterprise = async (enterpriseId) => {
   const relations = await userEnterpriseRepo.findByEnterprise(enterpriseId);
-  // Solo relaciones activas
-  const active = relations.filter(r => r.Status === 1);
 
   const enriched = await Promise.all(
-    active.map(async (r) => {
+    relations.map(async (r) => {
       const user = await userRepo.findById(r.User_id);
       const role = await roleRepo.findById(r.Role_id);
       return {
@@ -26,7 +24,7 @@ const listByEnterprise = async (enterpriseId) => {
         cedIdentidad:      user?.ced_identidad ?? null,
         roleId:            role?.Role_id ?? r.Role_id,
         roleName:          role?.Role_name ?? null,
-        status:            r.Status,
+        status:            (r.Status === 1 || r.Status === true) ? 1 : 0,
         fechaActivacion:   r.Fecha_activacion,
         fechaInactivacion: r.Fecha_inactivacion,
       };
@@ -111,11 +109,11 @@ const assignToEnterprise = async (userId, roleId, enterpriseId) => {
   const existing = await userEnterpriseRepo.findByUserAndEnterprise(userId, enterpriseId);
 
   if (existing) {
-    if (existing.Status === 1) {
+    if (existing.Status === 1 || existing.Status === true) {
       throw svcError('El usuario ya está asignado a esta empresa.', 409);
     }
     // Relación inactiva — reactivar
-    await userEnterpriseRepo.update(existing.Id, {
+    await userEnterpriseRepo.update(userId, enterpriseId, {
       Role_id:            role.Role_id,
       Status:             1,
       Fecha_activacion:   new Date().toISOString(),
@@ -182,7 +180,7 @@ const updateUserEnterprise = async (userId, enterpriseId, payload) => {
   if (status != null)            partial.Status             = status;
   if (fechaInactivacion != null) partial.Fecha_inactivacion = fechaInactivacion;
 
-  const updated = await userEnterpriseRepo.update(relation.Id, partial);
+  const updated = await userEnterpriseRepo.update(userId, enterpriseId, partial);
   return updated;
 };
 
