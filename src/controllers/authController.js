@@ -35,7 +35,10 @@ const login = async (req, res) => {
     });
   } catch (err) {
     const status = err.statusCode || 500;
-    if (status === 500) console.error('Login error:', err);
+    // DEBUG TEMPORAL — borrar después de resolver el problema
+    console.error('[LOGIN DEBUG] statusCode:', err.statusCode);
+    console.error('[LOGIN DEBUG] message:', err.message);
+    console.error('[LOGIN DEBUG] error completo:', err);
     return res.status(status).json({ message: err.message });
   }
 };

@@ -19,7 +19,8 @@ Copy `.env.example` to `.env` and fill in values. Required variables:
 
 - `PORT` — server port
 - `SQL_SERVER`, `SQL_DATABASE`, `SQL_USER`, `SQL_PASSWORD`, `SQL_PORT` — Azure SQL credentials
-- `JWT_SECRET`, `JWT_EXPIRES_IN` — token signing and expiry (default 24h)
+- `JWT_SECRET`, `JWT_EXPIRES_IN` — access token signing and expiry (default 1h)
+- `JWT_REFRESH_SECRET`, `JWT_REFRESH_EXPIRES_IN` — refresh token signing and expiry (default 30d)
 - `BLOB_STORAGE_MODE` — `mock` (default) or `azure`; mock writes to `data/blob-mock/` and serves at `/blob-mock/`
 - `AZURE_STORAGE_CONNECTION_STRING`, `AZURE_BLOB_CONTAINER` — required only when `BLOB_STORAGE_MODE=azure`
 - `BLOB_MOCK_BASE_PATH` — override mock storage root (default: `data/blob-mock`)
@@ -27,7 +28,7 @@ Copy `.env.example` to `.env` and fill in values. Required variables:
 
 ## Architecture
 
-Express layered architecture. All persistence is **Azure SQL (MSSQL)** via a single connection pool in `src/config/db.js`. There is no JSON flat-file persistence.
+Express layered architecture. All persistence is **Azure SQL (MSSQL)** via a single lazy-initialized connection pool in `src/config/db.js`. There is no JSON flat-file persistence.
 
 ```
 server.js                     Entry point
@@ -38,7 +39,9 @@ src/services/                 Business logic
 src/repositories/             Data access — all SQL reads/writes go here
 src/middlewares/authMiddleware.js   JWT verification; attaches decoded payload to req.user
 src/middlewares/requireAdmin.js    Role check; requires req.user.roleName === 'Admin'
-src/config/db.js              MSSQL connection pool (shared by all repositories)
+src/config/db.js              MSSQL connection pool (max 10, lazy init on first getPool() call)
+src/utils/gtinValidator.js    EAN8/UPC12/EAN13 check-digit validation
+src/utils/imageHasher.js      SHA-256 hashing for dedup
 data/blob-mock/               Local mock blob storage, served as static files
 uploads-temp/                 Temporary files during pipeline runs; auto-cleaned after job
 ```
@@ -60,16 +63,24 @@ Each file in `src/repositories/` maps to one SQL table:
 | `loadStateRepo.js` | `RETSC_LOG_SKU_UPLOAD` |
 | `aiModelRepo.js` | `RETSC_AI_DETECTION_MODELS` |
 
+`loadStateRepo.js` stores pipeline metadata (Excel rows, image file lists, metrics) as JSON serialized into `NVarChar` columns and parsed back on read.
+
 ### Auth flow
 
+Login issues two tokens: a short-lived `accessToken` and a long-lived `refreshToken`. The login response also includes `token` as an alias for `accessToken` for legacy frontend compatibility.
+
 JWT payload: `{ userId, email, username, enterpriseId, roleId, roleName }`. Use `req.user.roleName` for permission checks. `requireAdmin` middleware enforces `roleName === 'Admin'` and must be applied after `authMiddleware`.
+
+Refresh flow: `POST /api/auth/refresh` takes `{ refreshToken }` in the body and returns a new `accessToken`. Logout is stateless — no server-side token revocation.
 
 ### API routes
 
 | Route | Auth | Notes |
 |---|---|---|
 | `POST /api/auth/register` | No | bcrypt hash, SQL insert |
-| `POST /api/auth/login` | No | SQL lookup, returns JWT |
+| `POST /api/auth/login` | No | SQL lookup, returns accessToken + refreshToken |
+| `POST /api/auth/refresh` | No | returns new accessToken |
+| `POST /api/auth/logout` | No | stateless response |
 | `GET /api/auth/me` | Bearer | Current user |
 | `GET /api/auth/users` | Bearer | All users |
 | `POST /api/enterprises` | No | Register enterprise + admin user |
@@ -90,6 +101,7 @@ JWT payload: `{ userId, email, username, enterpriseId, roleId, roleName }`. Use 
 | `PATCH /api/roles/:id/status` | Bearer | Activate/deactivate role |
 | `GET /api/categories` | Bearer | Global category tree |
 | `GET /api/enterprises/me/categories` | Bearer | Enterprise's selected categories |
+| `PUT /api/enterprises/me/categories` | Bearer | Atomically replace enterprise category selection |
 | `GET /api/products` | Bearer | Products with pagination/search |
 | `POST /api/products/upload-excel` | Bearer | Parse `.xlsx`; returns rows + errors |
 | `POST /api/products/upload-images` | Bearer | Up to 200 images → `uploads-temp/<jobId>/` |
@@ -103,9 +115,9 @@ JWT payload: `{ userId, email, username, enterpriseId, roleId, roleName }`. Use 
 
 1. **validating_gtins** — filters rows against EAN8/UPC12/EAN13 check digits
 2. **hashing** — SHA-256 dedup against `RETSC_LOG_IMAGE_UPLOAD` and within the batch
-3. **matching** — GTIN from image filename prefix (e.g. `0123456789012_front.jpg`) matched to Excel rows
+3. **matching** — GTIN from image filename prefix (e.g. `0123456789012_front.jpg`) matched to Excel rows; one image per GTIN
 4. **hierarchy** — calculates blob subfolder depth based on product counts vs. `BLOB_HIERARCHY_THRESHOLD`
-5. **uploading** — uploads to Azure or mock in batches of 10 with exponential-backoff retry; fails job if >50% fail
+5. **uploading** — uploads to Azure or mock in batches of 10 with exponential-backoff retry (1s/2s/4s, 3 attempts); fails job if >50% fail
 6. **persisting** — upserts products into `RETSC_OP_PRODUCTS`; inserts image records into `RETSC_LOG_IMAGE_UPLOAD`
 7. **ai_tracking** — records `pending_training` entries in `RETSC_AI_DETECTION_MODELS` per category
 
@@ -113,12 +125,18 @@ Pipeline is fire-and-forget: `POST /process/:jobId` returns immediately; clients
 
 ### Excel parsing
 
-`src/services/excelService.js` reads only the first sheet. Required columns: `gtin`, `description`, `category`. Optional: `subcategory`, `segment`, `brand`. Headers matched case-insensitively with accent normalization (e.g. `descripción`, `categoría`). GTINs with a leading zero preserved if total length is 12 or 13 digits.
+`src/services/excelService.js` reads only the first sheet. Required columns: `gtin`, `description`, `category`. Optional: `subcategory`, `segment`, `brand`. Headers matched case-insensitively with accent normalization (e.g. `descripción`, `categoría`). GTINs with a leading zero preserved if total length is 12 or 13 digits. The xlsx library sometimes casts numeric GTINs to floats; excelService corrects this.
 
 ### Column naming convention — critical
 
 MSSQL repositories return raw SQL column names in Pascal_Case (`Role_id`, `Role_name`, `Description`, `Status`). **Services must always map these to camelCase before returning to controllers.** Use a local `toDTO(row)` function — see `roleService.js` for the established pattern. The frontend and JWT payload always use camelCase (`roleId`, `roleName`, `description`, `status`).
 
+MSSQL `BIT` columns come back as JS booleans. Normalize them to `1`/`0` integers in `toDTO()` (e.g. `status: row.Status ? 1 : 0`) to keep the API contract consistent.
+
 ### Adding new features
 
 Follow the existing pattern: route → controller → service → repository. All SQL access belongs in repositories only — controllers and services must not call `db.js` directly. When a repository returns MSSQL rows, always map them to camelCase in the service via a `toDTO()` function. Errors need a `statusCode` property for `handleError()` to forward the correct HTTP status — use the `svcError(msg, statusCode)` pattern found in every service.
+
+When an operation must be atomic across multiple inserts/deletes (e.g. replacing a category set), use an explicit SQL transaction inside the repository — see `enterpriseCategoryRepo.js` for the pattern.
+
+HTTP responses always follow `{ success: true, ...data }` on success and `{ success: false, message: "..." }` on error.
