@@ -28,7 +28,7 @@ Copy `.env.example` to `.env` and fill in values. Required variables:
 
 ## Architecture
 
-Express layered architecture. All persistence is **Azure SQL (MSSQL)** via a single lazy-initialized connection pool in `src/config/db.js`. There is no JSON flat-file persistence.
+Express layered architecture. All persistence is **Azure SQL (MSSQL)** via a single lazy-initialized connection pool in `src/config/db.js`.
 
 ```
 server.js                     Entry point
@@ -45,6 +45,8 @@ src/utils/imageHasher.js      SHA-256 hashing for dedup
 data/blob-mock/               Local mock blob storage, served as static files
 uploads-temp/                 Temporary files during pipeline runs; auto-cleaned after job
 ```
+
+`src/repositories/jsonRepo.js` is dead code — it exists but no repository imports it. All real persistence uses MSSQL.
 
 ### Database tables
 
@@ -67,11 +69,15 @@ Each file in `src/repositories/` maps to one SQL table:
 
 ### Auth flow
 
-Login issues two tokens: a short-lived `accessToken` and a long-lived `refreshToken`. The login response also includes `token` as an alias for `accessToken` for legacy frontend compatibility.
+Login issues two tokens: a short-lived `accessToken` and a long-lived `refreshToken`. The login response also includes `token` as an alias for `accessToken` for legacy frontend compatibility — do not remove it until the frontend migrates.
 
 JWT payload: `{ userId, email, username, enterpriseId, roleId, roleName }`. Use `req.user.roleName` for permission checks. `requireAdmin` middleware enforces `roleName === 'Admin'` and must be applied after `authMiddleware`.
 
 Refresh flow: `POST /api/auth/refresh` takes `{ refreshToken }` in the body and returns a new `accessToken`. Logout is stateless — no server-side token revocation.
+
+### Middleware mounting pattern
+
+`src/app.js` applies `authMiddleware` globally for some route groups (e.g. `/api/users`, `/api/categories`, `/api/roles`), but other groups (`/api/enterprises`, `/api/products`) do **not** receive it at mount time — those route files apply `authMiddleware` inline per protected route. When adding a new route file, check whether to apply auth at the app level or per route. `requireAdmin` is always applied inline after `authMiddleware`, never globally.
 
 ### API routes
 
@@ -108,6 +114,12 @@ Refresh flow: `POST /api/auth/refresh` takes `{ refreshToken }` in the body and 
 | `POST /api/products/process/:jobId` | Bearer | Start async pipeline |
 | `GET /api/products/processing-status/:jobId` | Bearer | Poll pipeline state |
 | `GET /health` | No | `{status, timestamp}` |
+
+### Enterprise registration
+
+`POST /api/enterprises` creates an enterprise plus an admin user in one operation. The `type` field must be one of: `"Proveedor"`, `"Detallista"`, `"Empresa de servicios"`. If the admin user already exists by `cédula` with no active relations, the user is reactivated with a fresh generated password instead of creating a new record.
+
+This operation is **not** wrapped in a SQL transaction — it uses manual compensating rollbacks (delete enterprise then delete user) if a later step fails. This is unlike `enterpriseCategoryRepo.js`, which uses an explicit `pool.transaction()`. Be aware of this gap when modifying the registration flow.
 
 ### Product ingestion pipeline
 

@@ -8,6 +8,7 @@ const requireAdmin   = require('../middlewares/requireAdmin');
 router.post('/', c.registerEnterprise);
 
 // Protegidas — solo Admin
+router.get('/',        authMiddleware, requireAdmin, c.listEnterprises);
 router.get('/list',    authMiddleware, requireAdmin, c.listEnterprises);
 router.post('/create', authMiddleware, requireAdmin, c.createEnterprise);
 router.get('/:id',     authMiddleware, requireAdmin, c.getEnterprise);
