@@ -2,6 +2,7 @@ const bcrypt = require('bcryptjs');
 const userRepo           = require('../repositories/userRepo');
 const userEnterpriseRepo = require('../repositories/userEnterpriseRepo');
 const roleRepo           = require('../repositories/roleRepo');
+const { isValidEmail }   = require('../utils/validators');
 
 function svcError(msg, statusCode) {
   const err = new Error(msg);
@@ -58,6 +59,7 @@ const createAndAssign = async (payload, enterpriseId) => {
   if (missing.length) throw svcError(`Campos requeridos faltantes: ${missing.join(', ')}`, 400);
 
   if (password.length < 8) throw svcError('La contraseña debe tener al menos 8 caracteres', 400);
+  if (!isValidEmail(email)) throw svcError('Formato de email inválido', 400);
 
   if (await userRepo.findByCedula(cedIdentidad)) {
     throw svcError('La cédula ya existe. Use POST /api/users/assign para asignar el usuario existente.', 409);
@@ -147,6 +149,7 @@ const updateUser = async (userId, payload, enterpriseId) => {
 
   if (email != null) {
     const normalized = email.trim().toLowerCase();
+    if (!isValidEmail(normalized)) throw svcError('Formato de email inválido', 400);
     const taken = await userRepo.findByEmail(normalized);
     if (taken && taken.User_id !== userId) throw svcError('El email ya está en uso por otro usuario.', 409);
     partial.Email = normalized;

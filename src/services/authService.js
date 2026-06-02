@@ -3,6 +3,7 @@ const jwt    = require('jsonwebtoken');
 const userRepo           = require('../repositories/userRepo');
 const userEnterpriseRepo = require('../repositories/userEnterpriseRepo');
 const roleRepo           = require('../repositories/roleRepo');
+const { isValidEmail }   = require('../utils/validators');
 
 // ────────────── Helpers ──────────────
 
@@ -66,6 +67,7 @@ const getAllUsers = async () => {
 };
 
 const createUser = async ({ username, email, password, cedIdentidad }) => {
+  if (!isValidEmail(email)) throw serviceError('Formato de email inválido', 400);
   const passwordHash = await bcrypt.hash(password, 10);
   const inserted = await userRepo.insert({
     User_name:     username,

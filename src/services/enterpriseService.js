@@ -4,6 +4,7 @@ const enterpriseRepo = require("../repositories/enterpriseRepo");
 const userRepo = require("../repositories/userRepo");
 const userEnterpriseRepo = require("../repositories/userEnterpriseRepo");
 const roleRepo = require("../repositories/roleRepo");
+const { isValidEmail } = require("../utils/validators");
 
 const VALID_TYPES = ["Proveedor", "Detallista", "Empresa de servicios"];
 
@@ -80,6 +81,10 @@ const registerEnterprise = async (payload) => {
       400,
     );
   }
+
+  if (!isValidEmail(invoiceMail)) throw serviceError('Formato de invoiceMail inválido', 400);
+  if (!isValidEmail(contactMail)) throw serviceError('Formato de contactMail inválido', 400);
+  if (!isValidEmail(adminEmail))  throw serviceError('Formato de adminEmail inválido', 400);
 
   // ───── Fail-fast: verificar duplicados ANTES de cualquier insert ─────
 
@@ -308,6 +313,9 @@ const createEnterprise = async (payload) => {
     );
   }
 
+  if (!isValidEmail(invoiceMail)) throw serviceError('Formato de invoiceMail inválido', 400);
+  if (!isValidEmail(contactMail)) throw serviceError('Formato de contactMail inválido', 400);
+
   if (await enterpriseRepo.findByFiscalId(fiscalId)) {
     throw serviceError(
       "Ya existe una empresa registrada con ese fiscalId",
@@ -348,6 +356,11 @@ const updateEnterprise = async (enterpriseId, payload) => {
       400,
     );
   }
+
+  if (payload.invoiceMail !== undefined && !isValidEmail(payload.invoiceMail))
+    throw serviceError('Formato de invoiceMail inválido', 400);
+  if (payload.contactMail !== undefined && !isValidEmail(payload.contactMail))
+    throw serviceError('Formato de contactMail inválido', 400);
 
   const partial = {};
   if (payload.enterpriseDsc !== undefined)
