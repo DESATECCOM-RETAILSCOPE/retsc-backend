@@ -10,7 +10,7 @@ const login = async (req, res) => {
       return res.status(400).json({ message: 'Email y contraseña son requeridos' });
     }
 
-    const { user, relation, role } = await authService.resolveLoginData(
+    const { user, relation, role, enterprise } = await authService.resolveLoginData(
       email.trim().toLowerCase(),
       password
     );
@@ -24,13 +24,14 @@ const login = async (req, res) => {
       accessToken,
       refreshToken,
       user: {
-        id:           user.User_id,
-        username:     user.User_name,
-        email:        user.Email,
-        cedIdentidad: user.ced_identidad,
-        enterpriseId: relation.Enterprise_id,
-        roleId:       role.Role_id,
-        roleName:     role.Role_name,
+        id:            user.User_id,
+        username:      user.User_name,
+        email:         user.Email,
+        cedIdentidad:  user.ced_identidad,
+        enterpriseId:  relation.Enterprise_id,
+        enterpriseDsc: enterprise?.Enterprise_dsc ?? null,
+        roleId:        role.Role_id,
+        roleName:      role.Role_name,
       },
     });
   } catch (err) {
@@ -132,4 +133,18 @@ const getUsers = async (req, res) => {
   }
 };
 
-module.exports = { login, refresh, logout, register, getMe, getUsers };
+const forgotPassword = async (req, res) => {
+  try {
+    const { identifier } = req.body;
+    if (!identifier?.trim()) {
+      return res.status(400).json({ success: false, message: 'Email o usuario requerido' });
+    }
+    const result = await authService.forgotPassword(identifier.trim());
+    return res.json({ success: true, message: result.message });
+  } catch (err) {
+    console.error('ForgotPassword error:', err);
+    return res.status(500).json({ success: false, message: 'Error interno del servidor' });
+  }
+};
+
+module.exports = { login, refresh, logout, register, getMe, getUsers, forgotPassword };
