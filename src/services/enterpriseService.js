@@ -233,6 +233,7 @@ function toDTO(row, activeUsersCount = undefined) {
     contactMail: row.Contact_mail,
     contactPhone: row.Contact_phone,
     type: row.Type,
+    status: row.status ? 1 : 0,
   };
   if (activeUsersCount !== undefined) dto.activeUsersCount = activeUsersCount;
   return dto;
@@ -245,7 +246,7 @@ const listAll = async () => {
       const relations = await userEnterpriseRepo.findByEnterprise(
         e.Enterprise_id,
       );
-      const activeUsersCount = relations.filter((r) => r.Status === 1).length;
+      const activeUsersCount = relations.filter((r) => !!r.Status).length;
       return toDTO(e, activeUsersCount);
     }),
   );
@@ -255,7 +256,7 @@ const findById = async (enterpriseId) => {
   const e = await enterpriseRepo.findById(enterpriseId);
   if (!e) throw serviceError("Empresa no encontrada", 404);
   const relations = await userEnterpriseRepo.findByEnterprise(e.Enterprise_id);
-  const activeUsersCount = relations.filter((r) => r.Status === 1).length;
+  const activeUsersCount = relations.filter((r) => !!r.Status).length;
   return toDTO(e, activeUsersCount);
 };
 
@@ -365,6 +366,7 @@ const updateEnterprise = async (enterpriseId, payload) => {
   if (payload.contactPhone !== undefined)
     partial.Contact_phone = payload.contactPhone;
   if (payload.type !== undefined) partial.Type = payload.type;
+  if (payload.status !== undefined) partial.Status = payload.status ? 1 : 0;
 
   if (Object.keys(partial).length === 0) return toDTO(existing);
 
