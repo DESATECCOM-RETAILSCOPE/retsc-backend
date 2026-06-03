@@ -25,6 +25,7 @@ Copy `.env.example` to `.env` and fill in values. Required variables:
 - `AZURE_STORAGE_CONNECTION_STRING`, `AZURE_BLOB_CONTAINER` — required only when `BLOB_STORAGE_MODE=azure`
 - `BLOB_MOCK_BASE_PATH` — override mock storage root (default: `data/blob-mock`)
 - `BLOB_HIERARCHY_THRESHOLD` — folder-split threshold for blob paths (default: 500)
+- `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM` — email delivery; leave `SMTP_HOST` empty for mock mode (logs to console)
 
 ## Architecture
 
@@ -42,6 +43,8 @@ src/middlewares/requireAdmin.js    Role check; requires req.user.roleName === 'A
 src/config/db.js              MSSQL connection pool (max 10, lazy init on first getPool() call)
 src/utils/gtinValidator.js    EAN8/UPC12/EAN13 check-digit validation
 src/utils/imageHasher.js      SHA-256 hashing for dedup
+src/utils/validators.js       Shared input validators (isValidEmail)
+src/utils/mailer.js           Email delivery via nodemailer; mock mode when SMTP_HOST is unset
 data/blob-mock/               Local mock blob storage, served as static files
 uploads-temp/                 Temporary files during pipeline runs; auto-cleaned after job
 ```
@@ -71,9 +74,13 @@ Each file in `src/repositories/` maps to one SQL table:
 
 Login issues two tokens: a short-lived `accessToken` and a long-lived `refreshToken`. The login response also includes `token` as an alias for `accessToken` for legacy frontend compatibility — do not remove it until the frontend migrates.
 
+Login response includes `user.enterpriseDsc` so the frontend can display the enterprise name without an extra fetch.
+
 JWT payload: `{ userId, email, username, enterpriseId, roleId, roleName }`. Use `req.user.roleName` for permission checks. `requireAdmin` middleware enforces `roleName === 'Admin'` and must be applied after `authMiddleware`.
 
 Refresh flow: `POST /api/auth/refresh` takes `{ refreshToken }` in the body and returns a new `accessToken`. Logout is stateless — no server-side token revocation.
+
+Forgot password flow: `POST /api/auth/forgot-password` accepts `{ identifier }` (email or username), generates a new 10-character password, updates it in the DB, and emails it to the user. Always returns the same generic message regardless of whether the user exists (prevents user enumeration).
 
 ### Middleware mounting pattern
 
@@ -84,16 +91,18 @@ Refresh flow: `POST /api/auth/refresh` takes `{ refreshToken }` in the body and 
 | Route | Auth | Notes |
 |---|---|---|
 | `POST /api/auth/register` | No | bcrypt hash, SQL insert |
-| `POST /api/auth/login` | No | SQL lookup, returns accessToken + refreshToken |
+| `POST /api/auth/login` | No | returns accessToken + refreshToken + user (includes enterpriseDsc) |
 | `POST /api/auth/refresh` | No | returns new accessToken |
 | `POST /api/auth/logout` | No | stateless response |
+| `POST /api/auth/forgot-password` | No | generates new password, emails it |
 | `GET /api/auth/me` | Bearer | Current user |
 | `GET /api/auth/users` | Bearer | All users |
 | `POST /api/enterprises` | No | Register enterprise + admin user |
+| `GET /api/enterprises` | Bearer + Admin | List all enterprises (alias of /list) |
 | `GET /api/enterprises/list` | Bearer + Admin | List all enterprises |
 | `GET /api/enterprises/:id` | Bearer + Admin | Enterprise detail |
 | `POST /api/enterprises/create` | Bearer + Admin | Create enterprise (no admin user) |
-| `PUT /api/enterprises/:id` | Bearer + Admin | Update enterprise |
+| `PUT /api/enterprises/:id` | Bearer + Admin | Update enterprise (accepts status field) |
 | `GET /api/users` | Bearer | Users of the authenticated enterprise |
 | `GET /api/users/by-cedula/:ced` | Bearer | Find user by ID number |
 | `POST /api/users` | Bearer | Create user and assign to enterprise |
@@ -106,6 +115,12 @@ Refresh flow: `POST /api/auth/refresh` takes `{ refreshToken }` in the body and 
 | `PUT /api/roles/:id` | Bearer | Update role |
 | `PATCH /api/roles/:id/status` | Bearer | Activate/deactivate role |
 | `GET /api/categories` | Bearer | Global category tree |
+| `GET /api/categories/roots` | Bearer | Root categories only |
+| `GET /api/categories/:id/children` | Bearer | Children of a category |
+| `GET /api/categories/:id` | Bearer | Single category |
+| `POST /api/categories` | Bearer | Create category |
+| `PUT /api/categories/:id` | Bearer | Update category |
+| `DELETE /api/categories/:id` | Bearer | Soft-delete category + cascade |
 | `GET /api/enterprises/me/categories` | Bearer | Enterprise's selected categories |
 | `PUT /api/enterprises/me/categories` | Bearer | Atomically replace enterprise category selection |
 | `GET /api/products` | Bearer | Products with pagination/search |
@@ -120,6 +135,10 @@ Refresh flow: `POST /api/auth/refresh` takes `{ refreshToken }` in the body and 
 `POST /api/enterprises` creates an enterprise plus an admin user in one operation. The `type` field must be one of: `"Proveedor"`, `"Detallista"`, `"Empresa de servicios"`. If the admin user already exists by `cédula` with no active relations, the user is reactivated with a fresh generated password instead of creating a new record.
 
 This operation is **not** wrapped in a SQL transaction — it uses manual compensating rollbacks (delete enterprise then delete user) if a later step fails. This is unlike `enterpriseCategoryRepo.js`, which uses an explicit `pool.transaction()`. Be aware of this gap when modifying the registration flow.
+
+### Enterprise status
+
+`RETSC_OP_ENTERPRISE` has a `status` column (lowercase, BIT). Note: unlike other tables in the project that use `Status` (Pascal case), this column is lowercase — always reference it as `row.status` in the repository layer, not `row.Status`.
 
 ### Product ingestion pipeline
 
@@ -139,11 +158,15 @@ Pipeline is fire-and-forget: `POST /process/:jobId` returns immediately; clients
 
 `src/services/excelService.js` reads only the first sheet. Required columns: `gtin`, `description`, `category`. Optional: `subcategory`, `segment`, `brand`. Headers matched case-insensitively with accent normalization (e.g. `descripción`, `categoría`). GTINs with a leading zero preserved if total length is 12 or 13 digits. The xlsx library sometimes casts numeric GTINs to floats; excelService corrects this.
 
+### Input validation
+
+All email fields are validated with `isValidEmail()` from `src/utils/validators.js` before any DB operation. This applies to: auth register, user create/update, enterprise register/create/update. Returns HTTP 400 with message `'Formato de email inválido'` on failure.
+
 ### Column naming convention — critical
 
 MSSQL repositories return raw SQL column names in Pascal_Case (`Role_id`, `Role_name`, `Description`, `Status`). **Services must always map these to camelCase before returning to controllers.** Use a local `toDTO(row)` function — see `roleService.js` for the established pattern. The frontend and JWT payload always use camelCase (`roleId`, `roleName`, `description`, `status`).
 
-MSSQL `BIT` columns come back as JS booleans. Normalize them to `1`/`0` integers in `toDTO()` (e.g. `status: row.Status ? 1 : 0`) to keep the API contract consistent.
+MSSQL `BIT` columns come back as JS booleans. Normalize them to `1`/`0` integers in `toDTO()` (e.g. `status: row.Status ? 1 : 0`) to keep the API contract consistent. Exception: `RETSC_OP_USRSXENTERP.Status` uses `!!r.Status` for the active-relations filter since it can be `true`, `1`, or `null`.
 
 ### Adding new features
 
