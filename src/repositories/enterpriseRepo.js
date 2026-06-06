@@ -69,6 +69,7 @@ const update = async (id, partial) => {
   if (partial.Contact_mail !== undefined)   { req.input('contactMail',   sql.VarChar(120),  partial.Contact_mail);   set.push('Contact_mail = @contactMail'); }
   if (partial.Contact_phone !== undefined)  { req.input('contactPhone',  sql.VarChar(30),   partial.Contact_phone);  set.push('Contact_phone = @contactPhone'); }
   if (partial.Type !== undefined)           { req.input('type',          sql.VarChar(50),   partial.Type);           set.push('Type = @type'); }
+  if (partial.Status !== undefined)         { req.input('status',        sql.Bit,            partial.Status);         set.push('status = @status'); }
 
   if (set.length === 0) return null;
 

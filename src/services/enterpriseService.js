@@ -4,6 +4,7 @@ const enterpriseRepo = require("../repositories/enterpriseRepo");
 const userRepo = require("../repositories/userRepo");
 const userEnterpriseRepo = require("../repositories/userEnterpriseRepo");
 const roleRepo = require("../repositories/roleRepo");
+const { isValidEmail } = require("../utils/validators");
 
 const VALID_TYPES = ["Proveedor", "Detallista", "Empresa de servicios"];
 
@@ -80,6 +81,10 @@ const registerEnterprise = async (payload) => {
       400,
     );
   }
+
+  if (!isValidEmail(invoiceMail)) throw serviceError('Formato de invoiceMail inválido', 400);
+  if (!isValidEmail(contactMail)) throw serviceError('Formato de contactMail inválido', 400);
+  if (!isValidEmail(adminEmail))  throw serviceError('Formato de adminEmail inválido', 400);
 
   // ───── Fail-fast: verificar duplicados ANTES de cualquier insert ─────
 
@@ -233,6 +238,7 @@ function toDTO(row, activeUsersCount = undefined) {
     contactMail: row.Contact_mail,
     contactPhone: row.Contact_phone,
     type: row.Type,
+    status: row.status ? 1 : 0,
   };
   if (activeUsersCount !== undefined) dto.activeUsersCount = activeUsersCount;
   return dto;
@@ -245,7 +251,7 @@ const listAll = async () => {
       const relations = await userEnterpriseRepo.findByEnterprise(
         e.Enterprise_id,
       );
-      const activeUsersCount = relations.filter((r) => r.Status === 1).length;
+      const activeUsersCount = relations.filter((r) => !!r.Status).length;
       return toDTO(e, activeUsersCount);
     }),
   );
@@ -255,7 +261,7 @@ const findById = async (enterpriseId) => {
   const e = await enterpriseRepo.findById(enterpriseId);
   if (!e) throw serviceError("Empresa no encontrada", 404);
   const relations = await userEnterpriseRepo.findByEnterprise(e.Enterprise_id);
-  const activeUsersCount = relations.filter((r) => r.Status === 1).length;
+  const activeUsersCount = relations.filter((r) => !!r.Status).length;
   return toDTO(e, activeUsersCount);
 };
 
@@ -307,6 +313,9 @@ const createEnterprise = async (payload) => {
     );
   }
 
+  if (!isValidEmail(invoiceMail)) throw serviceError('Formato de invoiceMail inválido', 400);
+  if (!isValidEmail(contactMail)) throw serviceError('Formato de contactMail inválido', 400);
+
   if (await enterpriseRepo.findByFiscalId(fiscalId)) {
     throw serviceError(
       "Ya existe una empresa registrada con ese fiscalId",
@@ -348,6 +357,11 @@ const updateEnterprise = async (enterpriseId, payload) => {
     );
   }
 
+  if (payload.invoiceMail !== undefined && !isValidEmail(payload.invoiceMail))
+    throw serviceError('Formato de invoiceMail inválido', 400);
+  if (payload.contactMail !== undefined && !isValidEmail(payload.contactMail))
+    throw serviceError('Formato de contactMail inválido', 400);
+
   const partial = {};
   if (payload.enterpriseDsc !== undefined)
     partial.Enterprise_dsc = payload.enterpriseDsc;
@@ -365,6 +379,7 @@ const updateEnterprise = async (enterpriseId, payload) => {
   if (payload.contactPhone !== undefined)
     partial.Contact_phone = payload.contactPhone;
   if (payload.type !== undefined) partial.Type = payload.type;
+  if (payload.status !== undefined) partial.Status = payload.status ? 1 : 0;
 
   if (Object.keys(partial).length === 0) return toDTO(existing);
 
