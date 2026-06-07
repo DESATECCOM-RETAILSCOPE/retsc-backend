@@ -2,6 +2,34 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Code commenting conventions
+
+Every developer (and Claude) **debe comentar activamente el código** siguiendo estas reglas. El objetivo es que cualquier desarrollador pueda escanear el archivo y entender qué está completo, qué es temporal y qué falta.
+
+### Marcadores estandarizados
+
+| Marcador | Cuándo usarlo |
+|---|---|
+| `// TEMPORAL — <razón>` | Código que funciona pero debe reemplazarse (e.g. workaround de columna faltante en DB, logs de debug) |
+| `// TODO: <descripción>` | Funcionalidad incompleta o pendiente de implementar |
+| `// OPTIMIZAR: <descripción>` | Código que funciona pero tiene un camino mejor cuando haya tiempo/datos |
+| `// NOTA: <descripción>` | Decisión no obvia o invariante que sorprendería a un lector |
+
+### Dónde poner comentarios de bloque (header de archivo)
+
+Cada archivo nuevo debe comenzar con un comentario que explique:
+1. Para qué sirve (una línea)
+2. Si tiene dependencias externas pendientes (credenciales, columnas de DB, SDKs)
+3. TODOs conocidos al momento de crearlo
+
+Ver [src/services/customVisionService.js](src/services/customVisionService.js) y [src/repositories/globalBlobContainerRepo.js](src/repositories/globalBlobContainerRepo.js) como ejemplos del estilo esperado.
+
+### Qué NO comentar
+
+No comentar lo que el nombre del identificador ya dice. El comentario debe explicar el *por qué*, no el *qué*.
+
+---
+
 ## Commands
 
 ```bash
@@ -51,6 +79,27 @@ uploads-temp/                 Temporary files during pipeline runs; auto-cleaned
 
 `src/repositories/jsonRepo.js` is dead code — it exists but no repository imports it. All real persistence uses MSSQL.
 
+### Smart category AI infrastructure (Issue 3.1.1)
+
+When a category is created or updated with `is_smart_dtc=1`, the system automatically provisions AI infrastructure in background (fire-and-forget, does not block the HTTP response):
+
+```
+categoryService.createCategory()
+  └─► aiInfrastructureService.provisionForCategory()   [background]
+        ├─► blobStorageService.createMarker()           → global-sku-training/dtc-{slug}/.keep
+        ├─► globalBlobContainerRepo.insert()            → RETSC_INF_GLOBAL_BLOB_CONTAINERS
+        ├─► aiModelRepo.insert()                        → RETSC_AI_DETECTION_MODELS (status=PENDING)
+        └─► customVisionService.createProject()         → null (stub, credenciales pendientes)
+```
+
+Key files:
+- `src/utils/categoryNameNormalizer.js` — slug generator for blob prefix names (e.g. `"Vino Tinto"` → `"vino-tinto"`)
+- `src/services/aiInfrastructureService.js` — orchestrator; never throws, returns `{ status, errors[] }`
+- `src/services/customVisionService.js` — stub; all functions return null until credentials arrive
+- `src/repositories/globalBlobContainerRepo.js` — wraps `RETSC_INF_GLOBAL_BLOB_CONTAINERS`; prefix stored in `description` field (TEMPORAL, see pending #7)
+
+Blob prefix format: `dtc-{slug}` inside the `AZURE_GLOBAL_TRAINING_CONTAINER` container (default: `global-sku-training`). The `.keep` marker file makes the prefix visible in the Azure Portal as a folder.
+
 ### Database tables
 
 Each file in `src/repositories/` maps to one SQL table:
@@ -78,9 +127,15 @@ Login response includes `user.enterpriseDsc` so the frontend can display the ent
 
 JWT payload: `{ userId, email, username, enterpriseId, roleId, roleName }`. Use `req.user.roleName` for permission checks. `requireAdmin` middleware enforces `roleName === 'Admin'` and must be applied after `authMiddleware`.
 
+Refresh token payload is minimal `{ userId, type: 'refresh' }` — the `type` field is checked during refresh verification to prevent access tokens from being used as refresh tokens. Refresh endpoint validates both signature and `type === 'refresh'`; throws 401 if either fails.
+
+Login security: the password check runs before the user-existence check (timing-attack defense). Both "user not found" and "wrong password" return the same generic 401. If a user has multiple active enterprise relations, the one with the lowest `Id` is selected (legacy behavior). Users with `Status != 1` or no active enterprise relations are rejected at login.
+
+All email inputs are normalized via `email.trim().toLowerCase()` before processing in login, register, and forgot-password.
+
 Refresh flow: `POST /api/auth/refresh` takes `{ refreshToken }` in the body and returns a new `accessToken`. Logout is stateless — no server-side token revocation.
 
-Forgot password flow: `POST /api/auth/forgot-password` accepts `{ identifier }` (email or username), generates a new 10-character password, updates it in the DB, and emails it to the user. Always returns the same generic message regardless of whether the user exists (prevents user enumeration).
+Forgot password flow: `POST /api/auth/forgot-password` accepts `{ identifier }` (email or username), generates a new 10-character password (from an alphabet that excludes ambiguous chars like `0/O`, `1/I/l`), updates it in the DB, and emails it to the user. Always returns the same generic message regardless of whether the user exists (prevents user enumeration). There is no change-password endpoint — only this forgot-password flow exists.
 
 ### Middleware mounting pattern
 
@@ -129,6 +184,7 @@ Forgot password flow: `POST /api/auth/forgot-password` accepts `{ identifier }` 
 | `POST /api/products/process/:jobId` | Bearer | Start async pipeline |
 | `GET /api/products/processing-status/:jobId` | Bearer | Poll pipeline state |
 | `GET /health` | No | `{status, timestamp}` |
+| `POST /api/categories/:id/retry-ai-infra` | Bearer + Admin | Reintenta provisioning IA de categoría smart |
 
 ### Enterprise registration
 
@@ -170,8 +226,63 @@ MSSQL `BIT` columns come back as JS booleans. Normalize them to `1`/`0` integers
 
 ### Adding new features
 
-Follow the existing pattern: route → controller → service → repository. All SQL access belongs in repositories only — controllers and services must not call `db.js` directly. When a repository returns MSSQL rows, always map them to camelCase in the service via a `toDTO()` function. Errors need a `statusCode` property for `handleError()` to forward the correct HTTP status — use the `svcError(msg, statusCode)` pattern found in every service.
+Follow the existing pattern: route → controller → service → repository. All SQL access belongs in repositories only — controllers and services must not call `db.js` directly. When a repository returns MSSQL rows, always map them to camelCase in the service via a `toDTO()` function. Errors need a `statusCode` property for `handleError()` to forward the correct HTTP status — use the `svcError(msg, statusCode)` pattern found in every service. Note: some services (e.g. `authService.js`) define this helper as `serviceError` instead of `svcError` — both work identically. Standardize on `svcError` when adding new services.
 
-When an operation must be atomic across multiple inserts/deletes (e.g. replacing a category set), use an explicit SQL transaction inside the repository — see `enterpriseCategoryRepo.js` for the pattern.
+When an operation must be atomic across multiple inserts/deletes (e.g. replacing a category set), use an explicit SQL transaction inside the repository — see `enterpriseCategoryRepo.js` for the pattern: `pool.transaction() → begin() → DELETE + INSERT loop → commit() / rollback()`. `enterpriseCategoryRepo.js` is the **only** repository in the codebase using explicit transactions.
+
+File uploads (Excel and images) use `multer` middleware configured in the route files. Excel upload is single-file; image upload accepts up to 200 files at once, stored under `uploads-temp/<jobId>/` before the pipeline runs.
 
 HTTP responses always follow `{ success: true, ...data }` on success and `{ success: false, message: "..." }` on error.
+
+## Pending Work (TODOs)
+
+These are known gaps tracked in the code. When implementing any of them, follow the architecture conventions above.
+
+### 1. Cambiar contraseña (Change Password) — NOT IMPLEMENTED
+
+There is no `change-password` endpoint. The only password-recovery mechanism is `POST /api/auth/forgot-password`, which generates a temporary password and emails it.
+
+What needs to be built:
+- **Route**: `PUT /api/auth/change-password` — protected with `authMiddleware`
+- **Controller**: validate `{ currentPassword, newPassword }` body fields; enforce minimum length (currently 6 chars per `register` logic)
+- **Service** (`authService.js`): verify `currentPassword` against the stored hash via `bcrypt.compare`, then hash the new password and call the repo
+- **Repository** (`userRepo.js`): add `updatePassword(userId, hashedPassword)` — a simple `UPDATE RETSC_OP_USERS SET Password_hash = @hash WHERE User_id = @id`
+
+### 2. `token` alias in login response — pending frontend migration
+
+`src/controllers/authController.js:22-23` — The login response sends both `token` (legacy alias) and `accessToken` for the same value. The TODO comment reads: *"coordinar con frontend la migración a accessToken/refreshToken"*. Once the frontend stops reading `token`, remove the alias from the response object.
+
+### 3. Login debug logs — must be removed
+
+`src/controllers/authController.js:39-42` — Three `console.error('[LOGIN DEBUG] ...')` lines are marked *"borrar después de resolver el problema"*. Remove them once the login issue they were diagnosing is confirmed resolved.
+
+### 4. Token revocation on logout — stateless by design, but flagged for future
+
+`src/controllers/authController.js:66-68` — The logout handler is intentionally stateless. The comment explicitly notes: if real session-kill is needed in the future, add a revoked-tokens table and mark the `refreshToken` from the request body as revoked. No implementation is needed now, but be aware that blacklisting refresh tokens will require a new DB table and a check inside `authService.refreshAccessToken()`.
+
+### 6. Custom Vision — integración pendiente de credenciales
+
+`src/services/customVisionService.js` — El servicio es un **stub completo**. `isConfigured()` devuelve `false` hasta que se agreguen `CUSTOM_VISION_TRAINING_KEY` y `CUSTOM_VISION_ENDPOINT` al `.env`. Cuando lleguen las credenciales:
+- Instalar SDKs: `npm install @azure/cognitiveservices-customvision-training @azure/cognitiveservices-customvision-prediction @azure/ms-rest-js`
+- Completar `createProject()` y agregar `triggerTraining()`, `getPublishedIterations()`
+- Correr el backfill: `node scripts/backfill-smart-categories.js` (crear este script)
+- Los modelos en `RETSC_AI_DETECTION_MODELS` con `status='PENDING'` se actualizarán mediante `POST /api/categories/:id/retry-ai-infra`
+
+### 7. Columna `prefix` pendiente en `RETSC_INF_GLOBAL_BLOB_CONTAINERS`
+
+`src/repositories/globalBlobContainerRepo.js` — El campo `prefix` no existe aún como columna en la tabla. Se guarda codificado en `description` con el formato `prefix=<valor>`. Cuando María agregue la columna:
+- Agregar `req.input('prefix', sql.VarChar(100), prefix)` en `insert()`
+- Agregar `WHERE prefix = @prefix` en `findByName()` (actualmente filtra en memoria)
+- Eliminar las funciones `buildDescription()` y `extractPrefixFromDescription()`
+
+### 8. Backfill de categorías smart existentes — script pendiente de crear
+
+Las categorías con `is_smart_dtc=1` que ya existían en la DB antes de esta implementación no tienen registros en `RETSC_INF_GLOBAL_BLOB_CONTAINERS` ni en `RETSC_AI_DETECTION_MODELS`. Se necesita un script `scripts/backfill-smart-categories.js` que:
+- Busque todas las categorías con `is_smart_dtc=1`
+- Llame a `aiInfrastructureService.provisionForCategory()` para cada una
+- Reporte resultados por consola
+- **NO ejecutarlo automáticamente** — requiere confirmación manual y que el servidor tenga acceso a Azure
+
+### 9. Enterprise registration not wrapped in a SQL transaction
+
+`src/services/enterpriseService.js` — The `POST /api/enterprises` flow (enterprise + admin user creation) uses manual compensating rollbacks instead of a real DB transaction. If a step fails mid-way, the service manually deletes the already-inserted enterprise or user. This is a known gap. If this flow is expanded, consider wrapping it in `pool.transaction()` following the `enterpriseCategoryRepo.js` pattern.
