@@ -173,4 +173,31 @@ async function ensureContainerExists(containerName) {
   await fs.mkdir(dir, { recursive: true });
 }
 
-module.exports = { uploadImage, uploadImagesBatch, createMarker, prefixExists, ensureContainerExists };
+// Sube un buffer a una ruta arbitraria dentro de cualquier container.
+// Usado por skuImageService para subir imágenes de SKU a 'global-sku-training'.
+//
+// En mock: guarda en data/blob-mock/{containerName}/{blobPath}
+// Retorna: { url: string, mode: 'azure'|'mock' }
+async function uploadToContainer({ containerName, blobPath, buffer, contentType }) {
+  const mode = getMode();
+
+  if (mode === 'azure') {
+    return withRetry(async () => {
+      const container = getAzureContainerByName(containerName);
+      const blobClient = container.getBlockBlobClient(blobPath);
+      await blobClient.uploadData(buffer, {
+        blobHTTPHeaders: { blobContentType: contentType || 'application/octet-stream' },
+      });
+      return { url: blobClient.url, mode: 'azure' };
+    }, blobPath);
+  }
+
+  // mock
+  const fullPath = path.join(getMockBasePath(), containerName, blobPath);
+  await fs.mkdir(path.dirname(fullPath), { recursive: true });
+  await fs.writeFile(fullPath, buffer);
+  const relUrl = '/blob-mock/' + path.join(containerName, blobPath).replace(/\\/g, '/');
+  return { url: relUrl, mode: 'mock' };
+}
+
+module.exports = { uploadImage, uploadImagesBatch, createMarker, prefixExists, ensureContainerExists, uploadToContainer };
