@@ -126,10 +126,21 @@ const deactivateCategory = async (req, res) => {
   }
 };
 
+// GET /api/enterprises/me/enterprise-categories
+const listCommercialCategories = async (req, res) => {
+  try {
+    const categories = await categoryService.listCommercialCategories(req.user.enterpriseId);
+    return res.json({ success: true, categories });
+  } catch (err) {
+    return handleError(res, err);
+  }
+};
+
 module.exports = {
   listGlobal,
   listByEnterprise,
   replaceForEnterprise,
+  listCommercialCategories,
   getRoots,
   getChildren,
   getById,

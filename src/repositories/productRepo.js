@@ -23,19 +23,39 @@ const listByEnterprise = async (enterpriseId, filters = {}) => {
   const pool = await getPool();
   const req = pool.request().input('enterpriseId', sql.Int, enterpriseId);
 
-  let where = 'WHERE Enterprise_id = @enterpriseId';
+  let whereExtra = '';
 
   if (filters.categoryId != null) {
     req.input('categoryId', sql.Int, filters.categoryId);
-    where += ' AND Category_id = @categoryId';
+    whereExtra += ' AND es.selected_category_id = @categoryId';
   }
 
   if (filters.search) {
     req.input('search', sql.NVarChar(200), `%${filters.search}%`);
-    where += ' AND (GTIN LIKE @search OR Description LIKE @search)';
+    whereExtra += ' AND (sk.EAN LIKE @search OR p.Product_dsc LIKE @search)';
   }
 
-  const r = await req.query(`SELECT * FROM ${TABLE} ${where}`);
+  const r = await req.query(`
+    SELECT DISTINCT
+      sk.EAN,
+      sk.SKU_ID,
+      sk.image_url,
+      p.product_id,
+      p.Product_dsc,
+      p.Category_id,
+      p.status,
+      ec_cat.Category_dsc AS commercial_category_dsc
+    FROM RETSC_OP_ENTERPRISE_SKUS es
+    JOIN RETSC_OP_SKUS sk           ON sk.SKU_ID    = es.sku_id
+    JOIN RETSC_OP_PRODUCTS p        ON p.product_id = sk.product_id
+    LEFT JOIN RETSC_OP_ENTERPRISE_CATEGORIES entcat
+           ON entcat.enterprise_category_id = es.selected_category_id
+    LEFT JOIN RETSC_OP_CATEGORIES ec_cat
+           ON ec_cat.Category_id = entcat.selected_category_id
+    WHERE es.enterprise_id = @enterpriseId
+    ${whereExtra}
+    ORDER BY p.Product_dsc ASC
+  `);
   return r.recordset;
 };
 

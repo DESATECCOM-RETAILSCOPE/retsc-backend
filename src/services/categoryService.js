@@ -29,7 +29,7 @@ const listByEnterprise = async (enterpriseId) => {
   const relations = await enterpriseCategoryRepo.findByEnterprise(enterpriseId);
   const enriched = await Promise.all(
     relations.map(async (r) => {
-      const cat = await categoryRepo.findById(r.Category_id);
+      const cat = await categoryRepo.findById(r.selected_category_id);
       return cat ? toDTO(cat) : null;
     }),
   );
@@ -190,10 +190,21 @@ const deactivateCategory = async (categoryId) => {
   };
 };
 
+const listCommercialCategories = async (enterpriseId) => {
+  const rows = await enterpriseCategoryRepo.listCommercialCategories(enterpriseId);
+  return rows.map((r) => ({
+    id:                      r.enterprise_category_id,
+    enterpriseCategoryId:    r.enterprise_category_id,
+    name:                    r.enterprise_category_dsc,
+    enterprise_category_dsc: r.enterprise_category_dsc,
+  }));
+};
+
 module.exports = {
   listGlobal,
   listByEnterprise,
   replaceForEnterprise,
+  listCommercialCategories,
   getRoots,
   getChildren,
   getById,

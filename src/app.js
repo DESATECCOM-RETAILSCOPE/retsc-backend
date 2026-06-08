@@ -4,10 +4,12 @@ const authRoutes               = require('./routes/authRoutes');
 const enterpriseRoutes         = require('./routes/enterpriseRoutes');
 const userRoutes               = require('./routes/userRoutes');
 const categoryRoutes           = require('./routes/categoryRoutes');
-const enterpriseCategoryRoutes = require('./routes/enterpriseCategoryRoutes');
-const productRoutes            = require('./routes/productRoutes');
-const roleRoutes               = require('./routes/roleRoutes');
-const authMiddleware           = require('./middlewares/authMiddleware');
+const enterpriseCategoryRoutes           = require('./routes/enterpriseCategoryRoutes');
+const enterpriseCommercialCategoryRoutes = require('./routes/enterpriseCommercialCategoryRoutes');
+const productRoutes                      = require('./routes/productRoutes');
+const skuRoutes                          = require('./routes/skuRoutes');
+const roleRoutes                         = require('./routes/roleRoutes');
+const authMiddleware                     = require('./middlewares/authMiddleware');
 
 const path = require('path');
 
@@ -25,9 +27,11 @@ app.use('/api/auth',                       authRoutes);
 app.use('/api/enterprises',               enterpriseRoutes);
 app.use('/api/users',                     authMiddleware, userRoutes);
 app.use('/api/categories',                authMiddleware, categoryRoutes);
-app.use('/api/enterprises/me/categories', authMiddleware, enterpriseCategoryRoutes);
-app.use('/api/products',                  productRoutes);
-app.use('/api/roles',                     authMiddleware, roleRoutes);
+app.use('/api/enterprises/me/categories',          authMiddleware, enterpriseCategoryRoutes);
+app.use('/api/enterprises/me/enterprise-categories', authMiddleware, enterpriseCommercialCategoryRoutes);
+app.use('/api/products',                            productRoutes);
+app.use('/api/skus',                                skuRoutes);
+app.use('/api/roles',                               authMiddleware, roleRoutes);
 
 // Health check
 app.get('/health', (req, res) => {

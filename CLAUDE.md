@@ -65,10 +65,19 @@ Each file in `src/repositories/` maps to one SQL table:
 | `enterpriseCategoryRepo.js` | `RETSC_OP_ENTERPRISE_CATEGORIES` |
 | `productRepo.js` | `RETSC_OP_PRODUCTS` |
 | `imageRepo.js` | `RETSC_LOG_IMAGE_UPLOAD` |
-| `loadStateRepo.js` | `RETSC_LOG_SKU_UPLOAD` |
+| `loadStateRepo.js` | `RETSC_LOG_SKU_UPLOAD` (⚠ broken — see below) |
+| `skuRepo.js` | `RETSC_OP_PRODUCTS`, `RETSC_OP_SKUS`, `RETSC_OP_ENTERPRISE_SKUS`, `RETSC_LOG_SKU_UPLOAD` |
 | `aiModelRepo.js` | `RETSC_AI_DETECTION_MODELS` |
 
-`loadStateRepo.js` stores pipeline metadata (Excel rows, image file lists, metrics) as JSON serialized into `NVarChar` columns and parsed back on read.
+**CRITICAL — real column names (verified from Azure SQL, June 2026):**
+
+`RETSC_OP_PRODUCTS` has only 7 columns: `product_id`, `Product_dsc`, `Category_id`, `Checklist`, `creationdate`, `product_key`, `status`. There is NO `Brand`, `Subcategory`, `Segment`, `Enterprise_id`, `GTIN`, or `Description`. Enterprise-specific metadata (Brand, client_category, etc.) lives in `RETSC_OP_ENTERPRISE_PRODUCT_SEG`.
+
+`RETSC_LOG_IMAGE_UPLOAD` real columns: `image_log_id`, `enterprise_id`, `upload_batch_id` (NOT NULL), `sku_id`, `ean`, `image_name`, `image_url`, `image_hash`, `image_status`, `process_status` (NOT NULL), `ocr_status`, `embeddings_status`, `error_code`, `error_message`, `created_at`. No `Product_id`, `Hash`, `Blob_url`, or `Status`.
+
+`RETSC_LOG_SKU_UPLOAD` real columns: `log_id`, `enterprise_id`, `upload_batch_id` (NOT NULL), `row_number`, `ean`, `sku_description`, `selected_category_id`, `detection_category_id`, `process_status` (NOT NULL), `error_code`, `error_message`, `created_at`. **`loadStateRepo.js` uses `Job_id`, `Excel_data`, `Image_files`, `Metrics` — none of these columns exist. The old image-pipeline flow (`pipelineOrchestrator`) is non-functional and requires a DB schema redesign.**
+
+When in doubt about column names, query: `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '<table>'`.
 
 ### Auth flow
 
