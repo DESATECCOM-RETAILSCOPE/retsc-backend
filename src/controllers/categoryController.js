@@ -6,7 +6,7 @@ function handleError(res, err) {
   return res.status(status).json({ success: false, message: err.message });
 }
 
-// ────────────── Issues 2.x (sin cambios de lógica) ──────────────
+// ────────────── Issues 2.x ──────────────
 
 // GET /api/categories
 const listGlobal = async (req, res) => {
@@ -30,18 +30,21 @@ const listByEnterprise = async (req, res) => {
   }
 };
 
-// PUT /api/enterprises/me/categories
+// PUT /api/enterprises/me/categories  — agrega categorías (no reemplaza, no duplica)
 const replaceForEnterprise = async (req, res) => {
   try {
     const { categoryIds } = req.body;
-    const count = await categoryService.replaceForEnterprise(
+    const result = await categoryService.replaceForEnterprise(
       req.user.enterpriseId,
       categoryIds,
     );
     return res.json({
       success: true,
-      count,
-      message: "Selección de categorías actualizada.",
+      added: result.added,
+      alreadyExisted: result.alreadyExisted,
+      message: result.changed
+        ? `${result.added} categoría(s) agregada(s).`
+        : "Las categorías seleccionadas ya estaban guardadas.",
     });
   } catch (err) {
     return handleError(res, err);

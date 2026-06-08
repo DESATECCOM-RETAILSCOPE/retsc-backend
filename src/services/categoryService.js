@@ -18,7 +18,73 @@ function toDTO(c) {
   };
 }
 
-// ────────────── Issues 2.x (corregidos) ──────────────
+// ────────────── Algoritmo de resolución para IA ──────────────
+
+async function resolveCategory(selectedCategoryId) {
+  const cat = await categoryRepo.findById(selectedCategoryId);
+  if (!cat) return [];
+
+  // Caso 1: DIRECT — la categoría seleccionada es inteligente
+  const isSmartDtc = cat.is_smart_dtc === 1 || cat.is_smart_dtc === true;
+  if (isSmartDtc) {
+    return [
+      {
+        selected_category_id: selectedCategoryId,
+        resolved_category_id: selectedCategoryId,
+        resolution_type: "DIRECT",
+      },
+    ];
+  }
+
+  // Caso 2: EXPAND — buscar descendientes con is_smart_dtc=1
+  const allDescendants =
+    await categoryRepo.findActiveDescendants(selectedCategoryId);
+  const smartDescendants = [];
+  for (const descId of allDescendants) {
+    const desc = await categoryRepo.findById(descId);
+    if (desc && (desc.is_smart_dtc === 1 || desc.is_smart_dtc === true)) {
+      smartDescendants.push(descId);
+    }
+  }
+
+  if (smartDescendants.length > 0) {
+    return smartDescendants.map((resolvedId) => ({
+      selected_category_id: selectedCategoryId,
+      resolved_category_id: resolvedId,
+      resolution_type: "EXPAND",
+    }));
+  }
+
+  // Caso 3: COLLAPSE — subir al padre hasta encontrar uno con is_smart_dtc=1
+  let current = cat;
+  while (current.parent_category_id) {
+    const parent = await categoryRepo.findById(current.parent_category_id);
+    if (!parent) break;
+    const parentIsSmart =
+      parent.is_smart_dtc === 1 || parent.is_smart_dtc === true;
+    if (parentIsSmart) {
+      return [
+        {
+          selected_category_id: selectedCategoryId,
+          resolved_category_id: parent.Category_id,
+          resolution_type: "COLLAPSE",
+        },
+      ];
+    }
+    current = parent;
+  }
+
+  // Caso 4: No se encontró ninguna categoría inteligente
+  return [
+    {
+      selected_category_id: selectedCategoryId,
+      resolved_category_id: null,
+      resolution_type: null,
+    },
+  ];
+}
+
+// ────────────── Issues 2.x ──────────────
 
 const listGlobal = async () => {
   const cats = await categoryRepo.listActive();
@@ -27,18 +93,26 @@ const listGlobal = async () => {
 
 const listByEnterprise = async (enterpriseId) => {
   const relations = await enterpriseCategoryRepo.findByEnterprise(enterpriseId);
+  // Deduplicar por selected_category_id (puede haber varios resolved por uno seleccionado)
+  const uniqueSelectedIds = [
+    ...new Set(relations.map((r) => r.selected_category_id)),
+  ];
   const enriched = await Promise.all(
-    relations.map(async (r) => {
-      const cat = await categoryRepo.findById(r.Category_id);
+    uniqueSelectedIds.map(async (selectedId) => {
+      const cat = await categoryRepo.findById(selectedId);
       return cat ? toDTO(cat) : null;
     }),
   );
   return enriched.filter(Boolean);
 };
 
+// Solo AGREGA categorías nuevas — no inactiva nada, no duplica
 const replaceForEnterprise = async (enterpriseId, categoryIds) => {
-  if (!Array.isArray(categoryIds))
+  if (!Array.isArray(categoryIds)) {
     throw svcError("categoryIds debe ser un array", 400);
+  }
+
+  // Validar que cada categoría existe y está activa
   for (const id of categoryIds) {
     const cat = await categoryRepo.findById(id);
     if (!cat || cat.status !== "ACTIVE") {
@@ -48,8 +122,36 @@ const replaceForEnterprise = async (enterpriseId, categoryIds) => {
       );
     }
   }
-  await enterpriseCategoryRepo.replaceForEnterprise(enterpriseId, categoryIds);
-  return categoryIds.length;
+
+  // Categorías que la empresa ya tiene guardadas (ACTIVE)
+  const currentRelations =
+    await enterpriseCategoryRepo.findByEnterprise(enterpriseId);
+  const alreadySelected = new Set(
+    currentRelations.map((r) => r.selected_category_id),
+  );
+
+  // Filtrar solo las categorías NUEVAS (que no están ya guardadas)
+  const newCategoryIds = categoryIds.filter((id) => !alreadySelected.has(id));
+
+  if (newCategoryIds.length === 0) {
+    return { added: 0, alreadyExisted: categoryIds.length, changed: false };
+  }
+
+  // Resolver las categorías inteligentes solo para las nuevas
+  const records = [];
+  for (const id of newCategoryIds) {
+    const resolved = await resolveCategory(id);
+    records.push(...resolved);
+  }
+
+  // Insertar solo las nuevas (sin tocar las existentes)
+  await enterpriseCategoryRepo.addForEnterprise(enterpriseId, records);
+
+  return {
+    added: newCategoryIds.length,
+    alreadyExisted: categoryIds.length - newCategoryIds.length,
+    changed: true,
+  };
 };
 
 // ────────────── Issue 3: árbol de categorías ──────────────
@@ -125,7 +227,6 @@ const updateCategory = async (categoryId, payload) => {
     partial.is_smart_dtc = isSmartDtc ? 1 : 0;
   }
 
-  // ← Fix: status ahora se acepta y valida
   if (status !== undefined) {
     const validStatuses = ["ACTIVE", "INACTIVE"];
     if (!validStatuses.includes(status)) {
