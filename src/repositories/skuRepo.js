@@ -28,16 +28,22 @@ const findProductByKey = async (productKey) => {
 const insertProduct = async (data) => {
   const pool = await getPool();
   const r = await pool.request()
-    .input('productDsc', sql.VarChar(100), data.productDsc)
-    .input('categoryId', sql.Int,          data.categoryId ?? null)
-    .input('productKey', sql.VarChar(100), data.productKey)
-    .input('status',     sql.VarChar(20),  'active')
+    .input('productDsc',        sql.VarChar(100), data.productDsc)
+    .input('categoryId',        sql.Int,          data.categoryId ?? null)
+    .input('productKey',        sql.VarChar(100), data.productKey)
+    .input('brand',             sql.VarChar(200), data.brand             ?? null)
+    .input('clientCategory',    sql.VarChar(200), data.clientCategory    ?? null)
+    .input('clientSubcategory', sql.VarChar(200), data.clientSubcategory ?? null)
+    .input('supplier',          sql.VarChar(200), data.supplier          ?? null)
+    .input('status',            sql.VarChar(20),  'active')
     .query(`
       INSERT INTO RETSC_OP_PRODUCTS
-        (Product_dsc, Category_id, product_key, status, creationdate)
+        (Product_dsc, Category_id, product_key, Brand,
+         client_category, client_subcategory, Supplier, status, creationdate)
       OUTPUT INSERTED.*
       VALUES
-        (@productDsc, @categoryId, @productKey, @status, GETDATE())
+        (@productDsc, @categoryId, @productKey, @brand,
+         @clientCategory, @clientSubcategory, @supplier, @status, GETDATE())
     `);
   return r.recordset[0];
 };
@@ -48,8 +54,24 @@ const updateProduct = async (productId, partial) => {
   const set  = [];
 
   if (partial.productDsc !== undefined) {
-    req.input('dsc',   sql.VarChar(100), partial.productDsc);
+    req.input('dsc',             sql.VarChar(100), partial.productDsc);
     set.push('Product_dsc = @dsc');
+  }
+  if (partial.brand !== undefined) {
+    req.input('brand',           sql.VarChar(200), partial.brand             ?? null);
+    set.push('Brand = @brand');
+  }
+  if (partial.clientCategory !== undefined) {
+    req.input('clientCategory',  sql.VarChar(200), partial.clientCategory    ?? null);
+    set.push('client_category = @clientCategory');
+  }
+  if (partial.clientSubcategory !== undefined) {
+    req.input('clientSubcategory', sql.VarChar(200), partial.clientSubcategory ?? null);
+    set.push('client_subcategory = @clientSubcategory');
+  }
+  if (partial.supplier !== undefined) {
+    req.input('supplier',        sql.VarChar(200), partial.supplier          ?? null);
+    set.push('Supplier = @supplier');
   }
   if (set.length === 0) return null;
 
@@ -70,7 +92,8 @@ const findSkuByEan = async (ean) => {
     .input('ean', sql.VarChar(18), ean)
     .query(`
       SELECT s.SKU_ID, s.EAN, s.product_id,
-             p.Product_dsc, p.Category_id
+             p.Product_dsc, p.Category_id, p.Brand,
+             p.client_category, p.client_subcategory, p.Supplier
       FROM RETSC_OP_SKUS s
       LEFT JOIN RETSC_OP_PRODUCTS p ON p.product_id = s.product_id
       WHERE s.EAN = @ean

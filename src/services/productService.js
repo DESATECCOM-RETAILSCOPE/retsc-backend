@@ -8,6 +8,7 @@ function toProductDTO(row) {
     gtin:         row.EAN,
     description:  row.Product_dsc,
     categoryName: row.commercial_category_dsc ?? null,
+    brand:        row.Brand ?? null,
     status:       row.status,
     primaryImage: row.image_url ?? null,
   };

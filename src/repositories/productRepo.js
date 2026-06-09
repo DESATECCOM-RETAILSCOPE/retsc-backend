@@ -27,7 +27,9 @@ const listByEnterprise = async (enterpriseId, filters = {}) => {
 
   if (filters.categoryId != null) {
     req.input('categoryId', sql.Int, filters.categoryId);
-    whereExtra += ' AND es.selected_category_id = @categoryId';
+    whereExtra += `
+      AND COALESCE(ec_cat.Category_dsc, p.client_category) =
+          (SELECT Category_dsc FROM RETSC_OP_CATEGORIES WHERE Category_id = @categoryId)`;
   }
 
   if (filters.search) {
@@ -43,8 +45,10 @@ const listByEnterprise = async (enterpriseId, filters = {}) => {
       p.product_id,
       p.Product_dsc,
       p.Category_id,
+      p.Brand,
+      p.client_category,
       p.status,
-      ec_cat.Category_dsc AS commercial_category_dsc
+      COALESCE(ec_cat.Category_dsc, p.client_category) AS commercial_category_dsc
     FROM RETSC_OP_ENTERPRISE_SKUS es
     JOIN RETSC_OP_SKUS sk           ON sk.SKU_ID    = es.sku_id
     JOIN RETSC_OP_PRODUCTS p        ON p.product_id = sk.product_id

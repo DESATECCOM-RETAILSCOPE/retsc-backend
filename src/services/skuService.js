@@ -19,9 +19,12 @@ function normalizeHeader(h) {
 }
 
 const COLUMN_ALIASES = {
-  gtin:        ['gtin', 'ean', 'ean/gtin', 'codigo', 'codigo ean', 'barcode', 'upc', 'code'],
-  description: ['description', 'descripcion', 'descripcion', 'nombre', 'name', 'product name', 'product_name'],
-  brand:       ['brand', 'marca', 'fabricante', 'manufacturer'],
+  gtin:         ['gtin', 'ean', 'ean/gtin', 'codigo', 'codigo ean', 'barcode', 'upc', 'code'],
+  description:  ['description', 'descripcion', 'descripcion', 'nombre', 'name', 'product name', 'product_name'],
+  brand:        ['brand', 'marca'],
+  manufacturer: ['manufacturer', 'fabricante', 'proveedor', 'supplier'],
+  category:     ['category', 'categoria'],
+  subcategory:  ['subcategory', 'subcategoria'],
 };
 const REQUIRED_KEYS = ['gtin', 'description'];
 
@@ -79,12 +82,13 @@ function parseSkuExcel(filePath) {
   }
 
   return rawRows.map((raw, i) => ({
-    _rowNum:     i + 2,
-    gtin:        normalizeGTIN(raw[headerMap['gtin']]),
-    description: raw[headerMap['description']] ? String(raw[headerMap['description']]).trim() : null,
-    brand:       headerMap['brand'] && raw[headerMap['brand']]
-                   ? String(raw[headerMap['brand']]).trim()
-                   : null,
+    _rowNum:      i + 2,
+    gtin:         normalizeGTIN(raw[headerMap['gtin']]),
+    description:  raw[headerMap['description']] ? String(raw[headerMap['description']]).trim() : null,
+    brand:        headerMap['brand']        && raw[headerMap['brand']]        ? String(raw[headerMap['brand']]).trim()        : null,
+    manufacturer: headerMap['manufacturer'] && raw[headerMap['manufacturer']] ? String(raw[headerMap['manufacturer']]).trim() : null,
+    category:     headerMap['category']     && raw[headerMap['category']]     ? String(raw[headerMap['category']]).trim()     : null,
+    subcategory:  headerMap['subcategory']  && raw[headerMap['subcategory']]  ? String(raw[headerMap['subcategory']]).trim()  : null,
   }));
 }
 
@@ -152,9 +156,13 @@ const processSkuExcel = async (filePath, enterpriseCategoryId, enterpriseId) => 
 
       if (!product) {
         product = await skuRepo.insertProduct({
-          productDsc: safeDesc,
-          categoryId: null,
-          productKey: row.gtin,
+          productDsc:        safeDesc,
+          categoryId:        null,
+          productKey:        row.gtin,
+          brand:             row.brand         ?? null,
+          clientCategory:    row.category      ?? null,
+          clientSubcategory: row.subcategory   ?? null,
+          supplier:          row.manufacturer  ?? null,
         });
         metrics.productsCreated++;
       }
@@ -166,12 +174,25 @@ const processSkuExcel = async (filePath, enterpriseCategoryId, enterpriseId) => 
       metrics.skusCreated++;
 
       skuRow = { SKU_ID: sku.SKU_ID, EAN: sku.EAN, product_id: sku.product_id,
-                 Product_dsc: product.Product_dsc };
+                 Product_dsc: product.Product_dsc, Brand: product.Brand };
 
-    } else if (skuRow.product_id && safeDesc && safeDesc !== skuRow.Product_dsc) {
-      // SKU existente con producto: actualizar descripción si cambió
-      await skuRepo.updateProduct(skuRow.product_id, { productDsc: safeDesc });
-      metrics.skusUpdated++;
+    } else if (skuRow.product_id) {
+      // SKU existente: actualizar campos si cambiaron
+      const descChanged     = safeDesc           && safeDesc          !== skuRow.Product_dsc;
+      const brandChanged    = row.brand    != null && row.brand        !== skuRow.Brand;
+      const catChanged      = row.category != null && row.category     !== skuRow.client_category;
+      const subCatChanged   = row.subcategory != null && row.subcategory !== skuRow.client_subcategory;
+      const supplierChanged = row.manufacturer != null && row.manufacturer !== skuRow.Supplier;
+      if (descChanged || brandChanged || catChanged || subCatChanged || supplierChanged) {
+        await skuRepo.updateProduct(skuRow.product_id, {
+          ...(descChanged     && { productDsc:        safeDesc }),
+          ...(brandChanged    && { brand:             row.brand }),
+          ...(catChanged      && { clientCategory:    row.category }),
+          ...(subCatChanged   && { clientSubcategory: row.subcategory }),
+          ...(supplierChanged && { supplier:          row.manufacturer }),
+        });
+        metrics.skusUpdated++;
+      }
     }
 
     // ── 3. Segmentación enterprise ─────────────────────────────────────────
