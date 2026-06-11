@@ -66,6 +66,11 @@ const countBySku = async (skuId) => {
   return r.recordset[0].cnt;
 };
 
+// Alias semántico de countBySku: todas las filas en RETSC_AI_SKU_FEATURES son "activas"
+// (la tabla no tiene soft-delete). Usar este cuando la intención es verificar si el SKU
+// ya tiene imágenes antes de decidir isPrimary.
+const countActiveBySku = countBySku;
+
 // ─── Escritura ────────────────────────────────────────────────────────────────
 
 // Inserta un nuevo registro de imagen de SKU.
@@ -134,6 +139,7 @@ module.exports = {
   findBySkuIdAndHash,
   findBySkuId,
   countBySku,
+  countActiveBySku,
   insert,
   insertMetadata,
   setPrimary,

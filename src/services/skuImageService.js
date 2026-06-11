@@ -14,9 +14,10 @@
 //   - Cuando se crea el SKU → resolveOrphansForSku lo adopta retroactivamente
 //
 // Blob paths (container 'global-sku-training'):
-//   - Categoría smart:    dtc-{slug}/{EAN}_{vista}.{ext}
-//   - Categoría no-smart: sin-categoria-smart/{EAN}_{vista}.{ext}
-//   - Huérfana:           huerfanas/{EAN}_{vista}.{ext}
+//   - Categoría smart, primary:   dtc-{slug}/{EAN}.{ext}              — sin sufijo de vista
+//   - Categoría smart, secundaria: dtc-{slug}/{EAN}_{vista}.{ext}
+//   - Categoría no-smart:         sin-categoria-smart/{EAN}_{vista}.{ext}
+//   - Huérfana:                   huerfanas/{EAN}_{vista}.{ext}        — siempre con sufijo
 
 const fs                    = require('fs').promises;
 const crypto                = require('crypto');
@@ -44,20 +45,37 @@ async function findSkuByEan(ean) {
 // Resuelve el prefijo de blob para un SKU según la categoría de su producto.
 // Reutiliza normalizeName de Pasada 1 para garantizar que el slug coincida
 // con el prefix creado por aiInfrastructureService.
-async function getBlobPrefixForSku(skuId) {
+//
+// En producción todos los SKUs deberían tener categoría smart. Si no la tienen,
+// loguea un warning estructurado para detectar el problema sin bloquear el upload.
+async function getBlobPrefixForSku(skuId, ean) {
   const pool = await getPool();
   const r = await pool.request()
     .input('skuId', sql.Int, skuId)
     .query(`
-      SELECT c.Category_dsc, c.is_smart_dtc
+      SELECT c.Category_dsc, c.is_smart_dtc, c.Category_id, p.product_id
       FROM RETSC_OP_SKUS s
       JOIN RETSC_OP_PRODUCTS p ON p.product_id = s.product_id
       LEFT JOIN RETSC_OP_CATEGORIES c ON c.Category_id = p.Category_id
       WHERE s.SKU_ID = @skuId
     `);
   const row = r.recordset[0];
-  if (!row || !row.Category_dsc || !row.is_smart_dtc) return 'sin-categoria-smart';
-  return `dtc-${normalizeName(row.Category_dsc)}`;
+
+  if (row && row.Category_dsc && row.is_smart_dtc) {
+    return `dtc-${normalizeName(row.Category_dsc)}`;
+  }
+
+  // Fallback: producto sin categoría smart asignada.
+  // En producción esto NO debería ocurrir — todos los productos deben tener categoría smart.
+  console.warn('[skuImage] Producto sin categoría smart asignada', {
+    skuId,
+    ean,
+    productId:   row?.product_id   ?? null,
+    categoryId:  row?.Category_id  ?? null,
+    categoryDsc: row?.Category_dsc ?? null,
+    isSmartDtc:  row?.is_smart_dtc ?? null,
+  });
+  return 'sin-categoria-smart';
 }
 
 // Actualiza image_url y has_visual_variant al subir la primera imagen de un SKU.
@@ -87,7 +105,6 @@ async function insertStandardMetadata(featureId, { uploadedBy, originalFilename,
   await skuFeatureRepo.insertMetadata(featureId, [
     { key: 'uploaded_by',        value: uploadedBy },
     { key: 'original_filename',  value: originalFilename },
-    // Gap 4: generated_filename guardado explícitamente
     { key: 'generated_filename', value: generatedFilename },
     { key: 'perspective',        value: view },
     { key: 'upload_date',        value: uploadDate },
@@ -102,11 +119,21 @@ async function insertStandardMetadata(featureId, { uploadedBy, originalFilename,
 // files:        array de { originalname, path, size } (multer)
 // uploadedBy:   req.user.userId
 // enterpriseId: req.user.enterpriseId (auditoría)
+// onProgress:   callback opcional async (counts) → llamado cada 5 archivos y al final.
+//               Recibe { processed, orphans, duplicates, errors, warnings }.
+//               Si no se pasa, el comportamiento es idéntico al modo síncrono original.
 //
-// Retorna: { processed, orphans, duplicates, errors, details, batchId }
-const processBatch = async ({ files, uploadedBy, enterpriseId }) => {
+// Retorna: { processed, orphans, duplicates, errors, warnings: { noSmartCategory }, details, batchId }
+const processBatch = async ({ files, uploadedBy, enterpriseId, onProgress }) => {
   const batchId = newBatchId();
-  const summary = { processed: 0, orphans: 0, duplicates: 0, errors: [], details: [] };
+  const summary = {
+    processed: 0,
+    orphans: 0,
+    duplicates: 0,
+    errors: [],
+    warnings: { noSmartCategory: 0 },
+    details: [],
+  };
 
   for (const file of files) {
     const detail = { originalFilename: file.originalname, status: null };
@@ -128,9 +155,8 @@ const processBatch = async ({ files, uploadedBy, enterpriseId }) => {
         continue;
       }
 
-      const { ean, view, ext }  = parsed;
-      const generatedFilename   = generateFilename({ ean, view, ext });
-      const uploadDate          = new Date().toISOString();
+      const { ean, view, ext } = parsed;
+      const uploadDate         = new Date().toISOString();
 
       // 2. Hash SHA-256
       const hash = await hashFile(file.path);
@@ -139,8 +165,10 @@ const processBatch = async ({ files, uploadedBy, enterpriseId }) => {
       const sku = await findSkuByEan(ean);
 
       if (!sku) {
-        // ── Gap 1+2: Huérfana → subir blob + log con process_status='ORPHAN' ──
-        const blobPath = `huerfanas/${generatedFilename}`;
+        // ── Huérfana: sin SKU → blob con sufijo de vista, log ORPHAN ──
+        // Las huérfanas SIEMPRE llevan sufijo (isPrimary no aplica sin SKU).
+        const orphanFilename = generateFilename({ ean, view, ext, isPrimary: false });
+        const blobPath = `huerfanas/${orphanFilename}`;
         const buffer   = await fs.readFile(file.path);
         const { url }  = await uploadToContainer({
           containerName: TRAINING_CONTAINER(),
@@ -184,11 +212,20 @@ const processBatch = async ({ files, uploadedBy, enterpriseId }) => {
         continue;
       }
 
-      // 5. Prefijo de blob según categoría
-      const prefix   = await getBlobPrefixForSku(sku.SKU_ID);
-      const blobPath = `${prefix}/${generatedFilename}`;
+      // 5. Determinar isPrimary ANTES de generar el filename (Mini Pasada 2.1):
+      //    La primera imagen activa del SKU se guarda sin sufijo de vista.
+      const existingCount = await skuFeatureRepo.countActiveBySku(sku.SKU_ID);
+      const isPrimary     = existingCount === 0;
 
-      // 6. Subir a Blob Storage
+      // 6. Prefijo de blob según categoría
+      const prefix   = await getBlobPrefixForSku(sku.SKU_ID, ean);
+      if (prefix === 'sin-categoria-smart') summary.warnings.noSmartCategory++;
+
+      // 7. Generar filename con la regla de primary
+      const generatedFilename = generateFilename({ ean, view, ext, isPrimary });
+      const blobPath          = `${prefix}/${generatedFilename}`;
+
+      // 8. Subir a Blob Storage
       const buffer  = await fs.readFile(file.path);
       const { url } = await uploadToContainer({
         containerName: TRAINING_CONTAINER(),
@@ -197,16 +234,13 @@ const processBatch = async ({ files, uploadedBy, enterpriseId }) => {
         contentType: contentTypeForExt(ext),
       });
 
-      // 7. Primera imagen del SKU → is_primary
-      const imageCount = await skuFeatureRepo.countBySku(sku.SKU_ID);
-      const isPrimary  = imageCount === 0 ? 1 : 0;
-
-      // 8. Insert en RETSC_AI_SKU_FEATURES
+      // 9. Insert en RETSC_AI_SKU_FEATURES
       const feature = await skuFeatureRepo.insert({
-        skuId: sku.SKU_ID, imageUrl: url, imageHash: hash, isPrimary,
+        skuId: sku.SKU_ID, imageUrl: url, imageHash: hash,
+        isPrimary: isPrimary ? 1 : 0,
       });
 
-      // 9. Gap 4: metadata incluye generated_filename
+      // 10. Metadata estándar
       await insertStandardMetadata(feature.feature_id, {
         uploadedBy,
         originalFilename:  file.originalname,
@@ -216,10 +250,10 @@ const processBatch = async ({ files, uploadedBy, enterpriseId }) => {
         fileSizeKb: Math.round((file.size || buffer.length) / 1024),
       });
 
-      // 10. Actualizar RETSC_OP_SKUS si es primera imagen
+      // 11. Actualizar RETSC_OP_SKUS si es primera imagen
       if (isPrimary) await markSkuFirstImage(sku.SKU_ID, url);
 
-      // 11. Log de éxito
+      // 12. Log de éxito
       await skuImageLogRepo.insertLog({
         enterpriseId, uploadBatchId: batchId,
         skuId: sku.SKU_ID, ean, imageName: file.originalname,
@@ -233,10 +267,10 @@ const processBatch = async ({ files, uploadedBy, enterpriseId }) => {
       detail.blobUrl   = url;
       detail.prefix    = prefix;
       detail.view      = view;
-      detail.isPrimary = isPrimary === 1;
+      detail.isPrimary = isPrimary;
       summary.processed++;
 
-      console.log(`[skuImage] OK EAN=${ean} SKU=${sku.SKU_ID} prefix=${prefix} enterprise=${enterpriseId}`);
+      console.log(`[skuImage] OK EAN=${ean} SKU=${sku.SKU_ID} prefix=${prefix} primary=${isPrimary} enterprise=${enterpriseId}`);
 
     } catch (err) {
       detail.status  = 'error';
@@ -254,27 +288,53 @@ const processBatch = async ({ files, uploadedBy, enterpriseId }) => {
     }
 
     summary.details.push(detail);
+
+    // Llamar onProgress cada 5 archivos (si fue provisto)
+    if (onProgress && summary.details.length % 5 === 0) {
+      await onProgress({
+        processed:  summary.processed,
+        orphans:    summary.orphans,
+        duplicates: summary.duplicates,
+        errors:     summary.errors.length,
+        warnings:   Object.values(summary.warnings).reduce((a, b) => a + b, 0),
+      }).catch(() => {});
+    }
+  }
+
+  // Llamada final de progreso (para asegurar que el último partial chunk quede reflejado)
+  if (onProgress) {
+    await onProgress({
+      processed:  summary.processed,
+      orphans:    summary.orphans,
+      duplicates: summary.duplicates,
+      errors:     summary.errors.length,
+      warnings:   Object.values(summary.warnings).reduce((a, b) => a + b, 0),
+    }).catch(() => {});
   }
 
   return { ...summary, batchId };
 };
 
-// ─── Gap 3: resolveOrphansForSku ─────────────────────────────────────────────
+// ─── resolveOrphansForSku ─────────────────────────────────────────────────────
 
 // Adopta huérfanas del log (process_status='ORPHAN') para un EAN dado.
 // Llamar cuando se crea un nuevo SKU con ese EAN.
 //
 // Flujo por cada huérfana:
 //   a. Lee image_url, image_hash y perspective del log (perspective: parsea image_name)
-//   b. NO mueve el blob (image_url queda apuntando a huerfanas/ — OK)
+//   b. NO mueve el blob (image_url queda apuntando a huerfanas/ — OK por ahora)
 //   c. INSERT en RETSC_AI_SKU_FEATURES (sku_id, image_url, image_hash, is_primary)
 //   d. INSERT en RETSC_AI_SKU_IMAGE_METADATA
 //   e. Marca el log como process_status='ADOPTED'
 //
-// TODO: enganchar al servicio de creación de SKUs cuando exista ese endpoint.
+// TODO: renombrar el blob de la primera huérfana adoptada (primary) para quitarle
+//   el sufijo de vista: copiar de 'huerfanas/{ean}_front.jpg' a 'dtc-{cat}/{ean}.jpg'
+//   y eliminar el original. Actualizar image_url en SKU_FEATURES.
+//   Requiere acceso a blobStorageService.copyBlob() y blobStorageService.deleteBlob()
+//   que no existen aún. Dejar para una pasada posterior.
 //
 // NOTA: uploaded_by no está disponible en RETSC_LOG_IMAGE_UPLOAD (solo enterprise_id).
-// Se guarda NULL para ese campo de metadata en las huérfanas adoptadas.
+//   Se guarda NULL para ese campo de metadata en las huérfanas adoptadas.
 //
 // Retorna: número de huérfanas adoptadas.
 const resolveOrphansForSku = async (skuId, ean) => {
@@ -285,18 +345,18 @@ const resolveOrphansForSku = async (skuId, ean) => {
 
   for (const orphan of orphans) {
     try {
-      // Recuperar perspective parseando image_name del log
-      const parsed = parseFilename(orphan.image_name || '');
-      const view             = parsed?.view || 'front';
+      const parsed            = parseFilename(orphan.image_name || '');
+      const view              = parsed?.view || 'front';
       const generatedFilename = parsed
-        ? generateFilename({ ean: parsed.ean, view: parsed.view, ext: parsed.ext })
+        ? generateFilename({ ean: parsed.ean, view: parsed.view, ext: parsed.ext, isPrimary: false })
         : orphan.image_name;
 
       // Primera imagen del SKU → is_primary
-      const imageCount = await skuFeatureRepo.countBySku(skuId);
+      const imageCount = await skuFeatureRepo.countActiveBySku(skuId);
       const isPrimary  = imageCount === 0 ? 1 : 0;
 
       // INSERT en RETSC_AI_SKU_FEATURES
+      // NOTA: image_url apunta a huerfanas/ — blob rename pendiente (ver TODO arriba)
       const feature = await skuFeatureRepo.insert({
         skuId,
         imageUrl:  orphan.image_url,
@@ -306,7 +366,7 @@ const resolveOrphansForSku = async (skuId, ean) => {
 
       // INSERT metadata (uploaded_by=NULL: no disponible en el log)
       await insertStandardMetadata(feature.feature_id, {
-        uploadedBy:        null, // TODO: RETSC_LOG_IMAGE_UPLOAD no guarda user_id, solo enterprise_id
+        uploadedBy:        null,
         originalFilename:  orphan.image_name,
         generatedFilename,
         view,
@@ -314,10 +374,8 @@ const resolveOrphansForSku = async (skuId, ean) => {
         fileSizeKb:        null,
       });
 
-      // Si es la primera imagen, actualizar RETSC_OP_SKUS
       if (isPrimary) await markSkuFirstImage(skuId, orphan.image_url);
 
-      // Marcar log como adoptada
       await skuImageLogRepo.markAdopted(orphan.image_log_id, skuId);
 
       adopted++;
@@ -325,7 +383,6 @@ const resolveOrphansForSku = async (skuId, ean) => {
 
     } catch (err) {
       console.error(`[skuImage] error adoptando log_id=${orphan.image_log_id}`, err.message);
-      // No interrumpir el loop: intentar adoptar el resto
     }
   }
 

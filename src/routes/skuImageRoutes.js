@@ -33,12 +33,17 @@ function multerErrorHandler(err, req, res, next) {
   next();
 }
 
+// Upload → encola y devuelve 202
 router.post('/upload',
   authMiddleware,
   upload.array('images', 200),
   multerErrorHandler,
   c.uploadImages,
 );
+
+// Jobs: /jobs debe ir ANTES de /sku/:skuId para evitar ambigüedad en rutas
+router.get('/jobs',        authMiddleware, c.listMyJobs);
+router.get('/jobs/:jobId', authMiddleware, c.getJobStatus);
 
 router.get('/sku/:skuId', authMiddleware, c.listBySku);
 

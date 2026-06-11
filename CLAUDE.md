@@ -35,8 +35,12 @@ No comentar lo que el nombre del identificador ya dice. El comentario debe expli
 ```bash
 npm run dev     # Start development server with nodemon (auto-reload)
 npm start       # Start production server
-node scripts/create-test-data.js  # Generate test Excel and images under test-data/
-node src/utils/gtinValidator.js   # Run inline GTIN self-tests
+npm run backfill:smart-categories -- --dry-run  # List smart categories pending provisioning (no changes)
+npm run backfill:smart-categories               # Provision AI infra for all unprovisioned smart categories
+node scripts/create-test-data.js   # Generate test Excel and images under test-data/
+node scripts/test-sku-images.js    # Integration tests for SKU image module (no HTTP layer)
+node src/utils/gtinValidator.js    # Run inline GTIN self-tests
+node test-db.js                    # Validate Azure SQL connectivity
 ```
 
 No lint or test commands are configured.
@@ -54,6 +58,8 @@ Copy `.env.example` to `.env` and fill in values. Required variables:
 - `BLOB_MOCK_BASE_PATH` — override mock storage root (default: `data/blob-mock`)
 - `BLOB_HIERARCHY_THRESHOLD` — folder-split threshold for blob paths (default: 500)
 - `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM` — email delivery; leave `SMTP_HOST` empty for mock mode (logs to console)
+- `AZURE_GLOBAL_TRAINING_CONTAINER` — blob container for AI training images (default: `global-sku-training`); shared by both the category AI infra flow and the SKU image ingestion flow
+- `CUSTOM_VISION_TRAINING_KEY`, `CUSTOM_VISION_PREDICTION_KEY`, `CUSTOM_VISION_ENDPOINT`, `CUSTOM_VISION_PREDICTION_RESOURCE_ID` — Azure Custom Vision credentials; leave unset until credentials arrive (`customVisionService.js` is a stub that returns null when these are missing)
 
 ## Architecture
 
@@ -69,12 +75,15 @@ src/repositories/             Data access — all SQL reads/writes go here
 src/middlewares/authMiddleware.js   JWT verification; attaches decoded payload to req.user
 src/middlewares/requireAdmin.js    Role check; requires req.user.roleName === 'Admin'
 src/config/db.js              MSSQL connection pool (max 10, lazy init on first getPool() call)
-src/utils/gtinValidator.js    EAN8/UPC12/EAN13 check-digit validation
-src/utils/imageHasher.js      SHA-256 hashing for dedup
-src/utils/validators.js       Shared input validators (isValidEmail)
-src/utils/mailer.js           Email delivery via nodemailer; mock mode when SMTP_HOST is unset
-data/blob-mock/               Local mock blob storage, served as static files
-uploads-temp/                 Temporary files during pipeline runs; auto-cleaned after job
+src/utils/gtinValidator.js              EAN8/UPC12/EAN13 check-digit validation
+src/utils/imageHasher.js               SHA-256 hashing for dedup
+src/utils/validators.js                Shared input validators (isValidEmail)
+src/utils/mailer.js                    Email delivery via nodemailer; mock mode when SMTP_HOST is unset
+src/utils/categoryNameNormalizer.js    Slug generator used by both AI infra and SKU image blob paths
+src/utils/skuImageFilenameParser.js    Parses `{EAN}_{view}.{ext}` filenames; returns null on invalid names
+src/utils/skuImageFilenameGenerator.js Generates canonical blob filenames from { ean, view, ext }
+data/blob-mock/                        Local mock blob storage, served as static files
+uploads-temp/                          Temporary files during pipeline runs; auto-cleaned after job
 ```
 
 `src/repositories/jsonRepo.js` is dead code — it exists but no repository imports it. All real persistence uses MSSQL.
@@ -116,6 +125,11 @@ Each file in `src/repositories/` maps to one SQL table:
 | `imageRepo.js` | `RETSC_LOG_IMAGE_UPLOAD` |
 | `loadStateRepo.js` | `RETSC_LOG_SKU_UPLOAD` |
 | `aiModelRepo.js` | `RETSC_AI_DETECTION_MODELS` |
+| `skuFeatureRepo.js` | `RETSC_AI_SKU_FEATURES` + `RETSC_AI_SKU_IMAGE_METADATA` |
+| `skuImageLogRepo.js` | `RETSC_LOG_IMAGE_UPLOAD` (shared with `imageRepo.js`, different columns) |
+| `jobRepo.js` | `RETSC_LOG_JOBS` |
+
+`RETSC_OP_SKUS` is accessed directly by `skuImageService.js` (via inline SQL, no dedicated repo) for EAN lookups and updating `image_url`/`has_visual_variant` on first image upload.
 
 `loadStateRepo.js` stores pipeline metadata (Excel rows, image file lists, metrics) as JSON serialized into `NVarChar` columns and parsed back on read.
 
@@ -183,6 +197,10 @@ Forgot password flow: `POST /api/auth/forgot-password` accepts `{ identifier }` 
 | `POST /api/products/upload-images` | Bearer | Up to 200 images → `uploads-temp/<jobId>/` |
 | `POST /api/products/process/:jobId` | Bearer | Start async pipeline |
 | `GET /api/products/processing-status/:jobId` | Bearer | Poll pipeline state |
+| `POST /api/sku-images/upload` | Bearer | Enqueue image batch; returns **202** `{ jobId, status: 'QUEUED', totalFiles }` immediately |
+| `GET /api/sku-images/jobs` | Bearer | List caller's jobs (`?limit=&offset=`, max 50) |
+| `GET /api/sku-images/jobs/:jobId` | Bearer | Poll job state; 403 if job belongs to another user |
+| `GET /api/sku-images/sku/:skuId` | Bearer | List images for a SKU |
 | `GET /health` | No | `{status, timestamp}` |
 | `POST /api/categories/:id/retry-ai-infra` | Bearer + Admin | Reintenta provisioning IA de categoría smart |
 
@@ -209,6 +227,22 @@ This operation is **not** wrapped in a SQL transaction — it uses manual compen
 7. **ai_tracking** — records `pending_training` entries in `RETSC_AI_DETECTION_MODELS` per category
 
 Pipeline is fire-and-forget: `POST /process/:jobId` returns immediately; clients poll `/processing-status/:jobId`.
+
+### SKU image ingestion (`/api/sku-images`)
+
+`src/services/skuImageService.js` handles direct per-SKU image uploads (distinct from the Excel pipeline above). Files are uploaded one batch at a time; each file goes through:
+
+1. **Parse filename** — `skuImageFilenameParser.js` extracts `{EAN}_{view}.{ext}` (jpg/png/webp only, 10 MB max)
+2. **Hash** — SHA-256 dedup against `RETSC_AI_SKU_FEATURES`
+3. **SKU lookup** — queries `RETSC_OP_SKUS` by EAN; if no match → **orphan flow**
+4. **Blob prefix** — `dtc-{slug}` for smart-DTC categories, `sin-categoria-smart` otherwise, `huerfanas/` for orphans
+5. **Upload** — to `AZURE_GLOBAL_TRAINING_CONTAINER` (default `global-sku-training`)
+6. **Insert feature** — row in `RETSC_AI_SKU_FEATURES`; standard key-value metadata in `RETSC_AI_SKU_IMAGE_METADATA`
+7. **Log** — every attempt (processed/orphan/duplicate/error) goes to `RETSC_LOG_IMAGE_UPLOAD`
+
+**Orphan flow**: images with an EAN that has no matching SKU are uploaded to `huerfanas/{EAN}_{view}.{ext}` and logged with `process_status='ORPHAN'`. When a SKU is later created for that EAN, call `resolveOrphansForSku(skuId, ean)` to retroactively adopt them (inserts into `RETSC_AI_SKU_FEATURES`, marks log as `ADOPTED`). This hook is not yet wired to the SKU creation endpoint.
+
+The first image uploaded for a SKU sets `is_primary=1` and updates `image_url` + `has_visual_variant` on `RETSC_OP_SKUS`.
 
 ### Excel parsing
 
@@ -268,20 +302,13 @@ What needs to be built:
 - Correr el backfill: `node scripts/backfill-smart-categories.js` (crear este script)
 - Los modelos en `RETSC_AI_DETECTION_MODELS` con `status='PENDING'` se actualizarán mediante `POST /api/categories/:id/retry-ai-infra`
 
-### 7. Columna `prefix` pendiente en `RETSC_INF_GLOBAL_BLOB_CONTAINERS`
+### 7. ~~Columna `prefix` pendiente en `RETSC_INF_GLOBAL_BLOB_CONTAINERS`~~ — COMPLETADO
 
-`src/repositories/globalBlobContainerRepo.js` — El campo `prefix` no existe aún como columna en la tabla. Se guarda codificado en `description` con el formato `prefix=<valor>`. Cuando María agregue la columna:
-- Agregar `req.input('prefix', sql.VarChar(100), prefix)` en `insert()`
-- Agregar `WHERE prefix = @prefix` en `findByName()` (actualmente filtra en memoria)
-- Eliminar las funciones `buildDescription()` y `extractPrefixFromDescription()`
+Migración `migrations/003_add_prefix_to_global_blob_containers.sql` agrega la columna `prefix VARCHAR(100)` y migra los valores existentes. `globalBlobContainerRepo.js` ya usa la columna directamente — los helpers temporales `buildDescription()` y `extractPrefixFromDescription()` fueron eliminados.
 
-### 8. Backfill de categorías smart existentes — script pendiente de crear
+### 8. ~~Backfill de categorías smart existentes — script pendiente de crear~~ — COMPLETADO
 
-Las categorías con `is_smart_dtc=1` que ya existían en la DB antes de esta implementación no tienen registros en `RETSC_INF_GLOBAL_BLOB_CONTAINERS` ni en `RETSC_AI_DETECTION_MODELS`. Se necesita un script `scripts/backfill-smart-categories.js` que:
-- Busque todas las categorías con `is_smart_dtc=1`
-- Llame a `aiInfrastructureService.provisionForCategory()` para cada una
-- Reporte resultados por consola
-- **NO ejecutarlo automáticamente** — requiere confirmación manual y que el servidor tenga acceso a Azure
+Script creado en `scripts/backfill-smart-categories.js`. Correr con `npm run backfill:smart-categories -- --dry-run` primero, luego sin `--dry-run`. Pre-requisito: migración 003 debe estar aplicada. El script es idempotente.
 
 ### 9. Enterprise registration not wrapped in a SQL transaction
 
