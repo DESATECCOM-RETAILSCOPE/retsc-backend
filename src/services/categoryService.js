@@ -291,10 +291,22 @@ const deactivateCategory = async (categoryId) => {
   };
 };
 
+const listCommercialCategories = async (enterpriseId) => {
+  const rows =
+    await enterpriseCategoryRepo.listCommercialCategories(enterpriseId);
+  return rows.map((r) => ({
+    id: r.enterprise_category_id,
+    enterpriseCategoryId: r.enterprise_category_id,
+    name: r.enterprise_category_dsc,
+    enterprise_category_dsc: r.enterprise_category_dsc,
+  }));
+};
+
 module.exports = {
   listGlobal,
   listByEnterprise,
   replaceForEnterprise,
+  listCommercialCategories,
   getRoots,
   getChildren,
   getById,

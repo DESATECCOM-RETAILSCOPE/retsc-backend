@@ -8,6 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 npm run dev     # Start development server with nodemon (auto-reload)
 npm start       # Start production server
 node scripts/create-test-data.js  # Generate test Excel and images under test-data/
+node scripts/migrate-add-brand.js # Add Brand column to RETSC_OP_PRODUCTS (idempotent)
 node src/utils/gtinValidator.js   # Run inline GTIN self-tests
 ```
 
@@ -65,10 +66,27 @@ Each file in `src/repositories/` maps to one SQL table:
 | `enterpriseCategoryRepo.js` | `RETSC_OP_ENTERPRISE_CATEGORIES` |
 | `productRepo.js` | `RETSC_OP_PRODUCTS` |
 | `imageRepo.js` | `RETSC_LOG_IMAGE_UPLOAD` |
-| `loadStateRepo.js` | `RETSC_LOG_SKU_UPLOAD` |
+| `loadStateRepo.js` | `RETSC_LOG_SKU_UPLOAD` (⚠ broken — see below) |
+| `skuRepo.js` | `RETSC_OP_PRODUCTS`, `RETSC_OP_SKUS`, `RETSC_OP_ENTERPRISE_SKUS`, `RETSC_LOG_SKU_UPLOAD` |
 | `aiModelRepo.js` | `RETSC_AI_DETECTION_MODELS` |
 
-`loadStateRepo.js` stores pipeline metadata (Excel rows, image file lists, metrics) as JSON serialized into `NVarChar` columns and parsed back on read.
+`RETSC_OP_SKUS` columns: `SKU_ID`, `EAN`, `product_id` (FK → `RETSC_OP_PRODUCTS`), `creation_date`, `image_url`.
+
+`RETSC_OP_ENTERPRISE_SKUS` columns: `enterprise_id`, `sku_id` (FK → `RETSC_OP_SKUS`), `selected_category_id` (FK → `RETSC_OP_ENTERPRISE_CATEGORIES.enterprise_category_id`), `detection_category_id` (FK → `RETSC_OP_CATEGORIES.Category_id`, used for AI), `created_at`.
+
+`RETSC_OP_ENTERPRISE_CATEGORIES` columns: `enterprise_category_id` (PK), `enterprise_id`, `selected_category_id` (FK → `RETSC_OP_CATEGORIES`), `resolved_category_id` (nullable — DTC-resolved override; falls back to `selected_category_id` when null), `status` (`'ACTIVE'` or other).
+
+⚠ **`productRepo.js` partial dead code**: `findByGtinAndEnterprise`, `insert`, `insertMany`, and `update` use non-existent columns (`GTIN`, `Enterprise_id`, `Description`, etc.) — they are leftovers from the old pipeline and will fail at runtime. Only `findById` and `listByEnterprise` are functional.
+
+**CRITICAL — real column names (verified from Azure SQL, June 2026):**
+
+`RETSC_OP_PRODUCTS` columns: `product_id`, `Product_dsc`, `Category_id`, `Checklist`, `creationdate`, `product_key`, `status`, `Brand` (added via `scripts/migrate-add-brand.js`). There is NO `Subcategory`, `Segment`, `Enterprise_id`, `GTIN`, or `Description`. Enterprise-specific metadata lives in `RETSC_OP_ENTERPRISE_PRODUCT_SEG`.
+
+`RETSC_LOG_IMAGE_UPLOAD` real columns: `image_log_id`, `enterprise_id`, `upload_batch_id` (NOT NULL), `sku_id`, `ean`, `image_name`, `image_url`, `image_hash`, `image_status`, `process_status` (NOT NULL), `ocr_status`, `embeddings_status`, `error_code`, `error_message`, `created_at`. No `Product_id`, `Hash`, `Blob_url`, or `Status`.
+
+`RETSC_LOG_SKU_UPLOAD` real columns: `log_id`, `enterprise_id`, `upload_batch_id` (NOT NULL), `row_number`, `ean`, `sku_description`, `selected_category_id`, `detection_category_id`, `process_status` (NOT NULL), `error_code`, `error_message`, `created_at`. **`loadStateRepo.js` uses `Job_id`, `Excel_data`, `Image_files`, `Metrics` — none of these columns exist. The old image-pipeline flow (`pipelineOrchestrator`) is non-functional and requires a DB schema redesign.**
+
+When in doubt about column names, query: `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '<table>'`.
 
 ### Auth flow
 
@@ -123,11 +141,13 @@ Forgot password flow: `POST /api/auth/forgot-password` accepts `{ identifier }` 
 | `DELETE /api/categories/:id` | Bearer | Soft-delete category + cascade |
 | `GET /api/enterprises/me/categories` | Bearer | Enterprise's selected categories |
 | `PUT /api/enterprises/me/categories` | Bearer | Atomically replace enterprise category selection |
+| `GET /api/enterprises/me/enterprise-categories` | Bearer | Enterprise's commercial categories with `enterprise_category_id` (used for SKU upload) |
 | `GET /api/products` | Bearer | Products with pagination/search |
 | `POST /api/products/upload-excel` | Bearer | Parse `.xlsx`; returns rows + errors |
 | `POST /api/products/upload-images` | Bearer | Up to 200 images → `uploads-temp/<jobId>/` |
 | `POST /api/products/process/:jobId` | Bearer | Start async pipeline |
 | `GET /api/products/processing-status/:jobId` | Bearer | Poll pipeline state |
+| `POST /api/skus/upload-excel` | Bearer | Upload SKU Excel (multipart `file` + `enterpriseCategoryId`); synchronous; returns `{ metrics, errors }` |
 | `GET /health` | No | `{status, timestamp}` |
 
 ### Enterprise registration
@@ -154,7 +174,19 @@ This operation is **not** wrapped in a SQL transaction — it uses manual compen
 
 Pipeline is fire-and-forget: `POST /process/:jobId` returns immediately; clients poll `/processing-status/:jobId`.
 
-### Excel parsing
+### SKU ingestion flow (current)
+
+`POST /api/skus/upload-excel` is the **active** SKU upload path (replaces the old image-pipeline for product cataloguing). It is **synchronous** — the response includes final `{ metrics, errors }` in one call.
+
+Flow in `src/services/skuService.js`:
+1. Validate `enterpriseCategoryId` belongs to the authenticated enterprise (`RETSC_OP_ENTERPRISE_CATEGORIES`).
+2. Parse the Excel file — required columns: `gtin` (aliases: `ean`, `barcode`, `codigo`, etc.) and `description`; optional: `brand`. Headers are accent/case-normalized.
+3. For each row: validate EAN format (8, 12, or 13 numeric digits); upsert `RETSC_OP_PRODUCTS` (via `product_key = EAN`); upsert `RETSC_OP_SKUS`; insert into `RETSC_OP_ENTERPRISE_SKUS` if not already present; log to `RETSC_LOG_SKU_UPLOAD`.
+4. `detection_category_id` on `RETSC_OP_ENTERPRISE_SKUS` is set from `resolved_category_id ?? selected_category_id` of the enterprise category row.
+
+`skuService.js` uses GTIN length heuristics to fix leading-zero loss: a 7-digit string is padded to 8, an 11-digit string to 12.
+
+### Excel parsing (legacy product pipeline)
 
 `src/services/excelService.js` reads only the first sheet. Required columns: `gtin`, `description`, `category`. Optional: `subcategory`, `segment`, `brand`. Headers matched case-insensitively with accent normalization (e.g. `descripción`, `categoría`). GTINs with a leading zero preserved if total length is 12 or 13 digits. The xlsx library sometimes casts numeric GTINs to floats; excelService corrects this.
 
