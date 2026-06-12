@@ -135,7 +135,7 @@ const processSkuExcel = async (filePath, enterpriseCategoryId, enterpriseId) => 
         rowNumber:           row._rowNum,
         ean:                 row.gtin,
         skuDescription:      row.description,
-        selectedCategoryId:  Number(enterpriseCategoryId),
+        selectedCategoryId:  entCat.selected_category_id,
         detectionCategoryId,
         processStatus:       'ERROR',
         errorCode:           'INVALID_EAN',
@@ -202,7 +202,7 @@ const processSkuExcel = async (filePath, enterpriseCategoryId, enterpriseId) => 
       await skuRepo.insertEnterpriseSku({
         enterpriseId,
         skuId:               skuRow.SKU_ID,
-        selectedCategoryId:  Number(enterpriseCategoryId),
+        selectedCategoryId:  entCat.selected_category_id,
         detectionCategoryId,
       });
       metrics.enterpriseSkusCreated++;
@@ -218,7 +218,7 @@ const processSkuExcel = async (filePath, enterpriseCategoryId, enterpriseId) => 
       rowNumber:           row._rowNum,
       ean:                 row.gtin,
       skuDescription:      row.description,
-      selectedCategoryId:  Number(enterpriseCategoryId),
+      selectedCategoryId:  entCat.selected_category_id,
       detectionCategoryId,
       processStatus:       entSku ? 'SKIPPED' : 'OK',
     }).catch(() => {});
