@@ -1,5 +1,6 @@
-const categoryRepo = require("../repositories/categoryRepo");
-const enterpriseCategoryRepo = require("../repositories/enterpriseCategoryRepo");
+const categoryRepo              = require("../repositories/categoryRepo");
+const enterpriseCategoryRepo   = require("../repositories/enterpriseCategoryRepo");
+const aiInfrastructureService  = require("./aiInfrastructureService");
 
 function svcError(msg, statusCode) {
   const err = new Error(msg);
@@ -204,7 +205,26 @@ const createCategory = async (payload) => {
     status: "ACTIVE",
   });
 
-  return toDTO(inserted);
+  const dto = toDTO(inserted);
+
+  // Provisioning de infraestructura IA en background (fire-and-forget).
+  // La respuesta al usuario NO espera este proceso.
+  // Si falla, queda PENDING_AZURE o PENDING y puede reintentarse con
+  // POST /api/categories/:id/retry-ai-infra (solo Admin).
+  if (dto.isSmartDtc) {
+    aiInfrastructureService
+      .provisionForCategory({ categoryId: dto.categoryId, categoryName: dto.categoryDsc })
+      .then((result) => {
+        console.log('[aiInfra] provisioning completado', { categoryId: dto.categoryId, ...result });
+      })
+      .catch((err) => {
+        // Este catch solo captura errores inesperados del orquestador mismo.
+        // Los errores de Azure ya son manejados internamente por aiInfrastructureService.
+        console.error('[aiInfra] error inesperado en provisioning', { categoryId: dto.categoryId, err });
+      });
+  }
+
+  return dto;
 };
 
 const updateCategory = async (categoryId, payload) => {
@@ -266,7 +286,23 @@ const updateCategory = async (categoryId, payload) => {
   }
 
   const updated = await categoryRepo.update(categoryId, partial);
-  return toDTO(updated ?? existing);
+  const dto = toDTO(updated ?? existing);
+
+  // Si la actualización activó is_smart_dtc por primera vez, provisionar infraestructura IA.
+  // Condición: el campo cambió de 0→1 en esta operación.
+  const wasSmartBefore = existing.is_smart_dtc === 1 || existing.is_smart_dtc === true;
+  if (dto.isSmartDtc && !wasSmartBefore) {
+    aiInfrastructureService
+      .provisionForCategory({ categoryId: dto.categoryId, categoryName: dto.categoryDsc })
+      .then((result) => {
+        console.log('[aiInfra] provisioning por actualización', { categoryId: dto.categoryId, ...result });
+      })
+      .catch((err) => {
+        console.error('[aiInfra] error inesperado al actualizar categoría', { categoryId: dto.categoryId, err });
+      });
+  }
+
+  return dto;
 };
 
 const deactivateCategory = async (categoryId) => {
