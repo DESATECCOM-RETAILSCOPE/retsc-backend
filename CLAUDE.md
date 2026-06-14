@@ -73,6 +73,8 @@ Login issues two tokens: a short-lived `accessToken` and a long-lived `refreshTo
 
 JWT payload: `{ userId, email, username, enterpriseId, roleId, roleName }`. Use `req.user.roleName` for permission checks. `requireAdmin` middleware enforces `roleName === 'Admin'` and must be applied after `authMiddleware`.
 
+Login resolution: after password check, login queries all relations where `Status=1` and activation ≤ now < inactivation, then selects the one with the lowest `Id` to determine `enterpriseId` and `roleId`. If no active relation exists the login is rejected even if the user account itself is active.
+
 Refresh flow: `POST /api/auth/refresh` takes `{ refreshToken }` in the body and returns a new `accessToken`. Logout is stateless — no server-side token revocation.
 
 ### Middleware mounting pattern
@@ -106,6 +108,12 @@ Refresh flow: `POST /api/auth/refresh` takes `{ refreshToken }` in the body and 
 | `PUT /api/roles/:id` | Bearer | Update role |
 | `PATCH /api/roles/:id/status` | Bearer | Activate/deactivate role |
 | `GET /api/categories` | Bearer | Global category tree |
+| `GET /api/categories/roots` | Bearer | Top-level categories only |
+| `GET /api/categories/:id` | Bearer | Single category |
+| `GET /api/categories/:id/children` | Bearer | Direct children of a category |
+| `POST /api/categories` | Bearer | Create category (no Admin check — gap) |
+| `PUT /api/categories/:id` | Bearer | Update category (no Admin check — gap) |
+| `DELETE /api/categories/:id` | Bearer | Soft-delete + cascade to descendants (no Admin check — gap) |
 | `GET /api/enterprises/me/categories` | Bearer | Enterprise's selected categories |
 | `PUT /api/enterprises/me/categories` | Bearer | Atomically replace enterprise category selection |
 | `GET /api/products` | Bearer | Products with pagination/search |
@@ -128,7 +136,7 @@ This operation is **not** wrapped in a SQL transaction — it uses manual compen
 1. **validating_gtins** — filters rows against EAN8/UPC12/EAN13 check digits
 2. **hashing** — SHA-256 dedup against `RETSC_LOG_IMAGE_UPLOAD` and within the batch
 3. **matching** — GTIN from image filename prefix (e.g. `0123456789012_front.jpg`) matched to Excel rows; one image per GTIN
-4. **hierarchy** — calculates blob subfolder depth based on product counts vs. `BLOB_HIERARCHY_THRESHOLD`
+4. **hierarchy** — calculates blob subfolder depth based on product counts vs. `BLOB_HIERARCHY_THRESHOLD`; path segments are slugified (lowercase, accent-stripped, spaces → hyphens)
 5. **uploading** — uploads to Azure or mock in batches of 10 with exponential-backoff retry (1s/2s/4s, 3 attempts); fails job if >50% fail
 6. **persisting** — upserts products into `RETSC_OP_PRODUCTS`; inserts image records into `RETSC_LOG_IMAGE_UPLOAD`
 7. **ai_tracking** — records `pending_training` entries in `RETSC_AI_DETECTION_MODELS` per category
@@ -137,7 +145,7 @@ Pipeline is fire-and-forget: `POST /process/:jobId` returns immediately; clients
 
 ### Excel parsing
 
-`src/services/excelService.js` reads only the first sheet. Required columns: `gtin`, `description`, `category`. Optional: `subcategory`, `segment`, `brand`. Headers matched case-insensitively with accent normalization (e.g. `descripción`, `categoría`). GTINs with a leading zero preserved if total length is 12 or 13 digits. The xlsx library sometimes casts numeric GTINs to floats; excelService corrects this.
+`src/services/excelService.js` reads only the first sheet. Required columns: `gtin`, `description`, `category`. Optional: `subcategory`, `segment`, `brand`. Headers matched case-insensitively with accent normalization (e.g. `descripción`, `categoría`). GTINs with a leading zero preserved if total length is 12 or 13 digits; 7-digit values are padded to 8 (EAN8) and 11-digit to 12 (UPC12). The xlsx library sometimes casts numeric GTINs to floats; excelService corrects this.
 
 ### Column naming convention — critical
 
@@ -147,7 +155,15 @@ MSSQL `BIT` columns come back as JS booleans. Normalize them to `1`/`0` integers
 
 ### Adding new features
 
-Follow the existing pattern: route → controller → service → repository. All SQL access belongs in repositories only — controllers and services must not call `db.js` directly. When a repository returns MSSQL rows, always map them to camelCase in the service via a `toDTO()` function. Errors need a `statusCode` property for `handleError()` to forward the correct HTTP status — use the `svcError(msg, statusCode)` pattern found in every service.
+Follow the existing pattern: route → controller → service → repository. All SQL access belongs in repositories only — controllers and services must not call `db.js` directly. When a repository returns MSSQL rows, always map them to camelCase in the service via a `toDTO()` function. Errors need a `statusCode` property for `handleError()` to forward the correct HTTP status — every service defines a local helper:
+
+```js
+function svcError(msg, statusCode) {
+  const err = new Error(msg);
+  err.statusCode = statusCode;
+  return err;
+}
+```
 
 When an operation must be atomic across multiple inserts/deletes (e.g. replacing a category set), use an explicit SQL transaction inside the repository — see `enterpriseCategoryRepo.js` for the pattern.
 
