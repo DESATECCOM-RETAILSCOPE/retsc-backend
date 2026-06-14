@@ -115,7 +115,7 @@ const insertSku = async (data) => {
 };
 
 // ── RETSC_OP_ENTERPRISE_SKUS ───────────────────────────────────────────────
-// selected_category_id  → enterprise_category_id (PK de RETSC_OP_ENTERPRISE_CATEGORIES)
+// selected_category_id  → Category_id de RETSC_OP_CATEGORIES (FK_ENTSKU_SELECTEDCAT)
 // detection_category_id → Category_id de RETSC_OP_CATEGORIES para AI (resolved o selected)
 
 const findEnterpriseSku = async (enterpriseId, skuId) => {
@@ -135,8 +135,8 @@ const insertEnterpriseSku = async (data) => {
   const r = await pool.request()
     .input('enterpriseId',    sql.Int, data.enterpriseId)
     .input('skuId',           sql.Int, data.skuId)
-    .input('selectedCatId',   sql.Int, data.selectedCategoryId)   // PK de ENTERPRISE_CATEGORIES
-    .input('detectionCatId',  sql.Int, data.detectionCategoryId)  // Category_id de CATEGORIES (para AI)
+    .input('selectedCatId',   sql.Int, data.selectedCategoryId)   // Category_id de RETSC_OP_CATEGORIES
+    .input('detectionCatId',  sql.Int, data.detectionCategoryId)  // Category_id de RETSC_OP_CATEGORIES (para AI)
     .query(`
       INSERT INTO RETSC_OP_ENTERPRISE_SKUS
         (enterprise_id, sku_id, selected_category_id, detection_category_id, created_at)
