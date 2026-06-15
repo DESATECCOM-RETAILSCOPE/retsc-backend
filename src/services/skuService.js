@@ -288,7 +288,7 @@ const processSkuExcel = async (
       await skuRepo.insertEnterpriseSku({
         enterpriseId,
         skuId: skuRow.SKU_ID,
-        selectedCategoryId: entCat.selected_category_id,
+        selectedCategoryId: entCat.selected_category_id, // NOTA: FK→RETSC_OP_CATEGORIES.Category_id (no el enterprise_category_id)
         detectionCategoryId,
       });
       metrics.enterpriseSkusCreated++;

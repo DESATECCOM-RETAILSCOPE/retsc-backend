@@ -134,7 +134,7 @@ Each file in `src/repositories/` maps to one SQL table:
 
 `RETSC_OP_SKUS` columns: `SKU_ID`, `EAN`, `product_id` (FK → `RETSC_OP_PRODUCTS`), `creation_date`, `image_url`.
 
-`RETSC_OP_ENTERPRISE_SKUS` columns: `enterprise_id`, `sku_id` (FK → `RETSC_OP_SKUS`), `selected_category_id` (FK → `RETSC_OP_ENTERPRISE_CATEGORIES.enterprise_category_id`), `detection_category_id` (FK → `RETSC_OP_CATEGORIES.Category_id`, used for AI), `created_at`.
+`RETSC_OP_ENTERPRISE_SKUS` columns: `enterprise_id`, `sku_id` (FK → `RETSC_OP_SKUS`), `selected_category_id` (FK → `RETSC_OP_CATEGORIES.Category_id` — pass `entCat.selected_category_id`, NOT `enterprise_category_id`), `detection_category_id` (FK → `RETSC_OP_CATEGORIES.Category_id`, used for AI), `created_at`.
 
 `RETSC_OP_ENTERPRISE_CATEGORIES` columns: `enterprise_category_id` (PK), `enterprise_id`, `selected_category_id` (FK → `RETSC_OP_CATEGORIES`), `resolved_category_id` (nullable — DTC-resolved override; falls back to `selected_category_id` when null), `status` (`'ACTIVE'` or other).
 
