@@ -216,67 +216,25 @@ const processSkuExcel = async (
       continue;
     }
 
-    // ── 2. Buscar SKU global por EAN ──────────────────────────────────────
+    // ── 2. Buscar o crear SKU global por EAN ──────────────────────────────
+    // NOTA: RETSC_OP_PRODUCTS no existe; Product_dsc y Category_id viven
+    // directamente en RETSC_OP_SKUS.
     let skuRow = await skuRepo.findSkuByEan(row.gtin);
 
-    const safeDesc = row.description ? row.description.substring(0, 100) : null;
+    const safeDesc = row.description ? row.description.substring(0, 500) : null;
 
     if (!skuRow) {
-      // Recuperación ante fallo parcial: el producto pudo haberse insertado
-      // en un intento previo aunque el SKU no llegó a crearse
-      let product = await skuRepo.findProductByKey(row.gtin);
-
-      if (!product) {
-        product = await skuRepo.insertProduct({
-          productDsc: safeDesc,
-          categoryId: null,
-          productKey: row.gtin,
-          brand: row.brand ?? null,
-          clientCategory: row.category ?? null,
-          clientSubcategory: row.subcategory ?? null,
-          supplier: row.manufacturer ?? null,
-        });
-        metrics.productsCreated++;
-      }
-
-      const sku = await skuRepo.insertSku({
+      skuRow = await skuRepo.insertSku({
         ean: row.gtin,
-        productId: product.product_id,
+        productDsc: safeDesc,
+        categoryId: null,
       });
       metrics.skusCreated++;
-
-      skuRow = {
-        SKU_ID: sku.SKU_ID,
-        EAN: sku.EAN,
-        product_id: sku.product_id,
-        Product_dsc: product.Product_dsc,
-        Brand: product.Brand,
-      };
-    } else if (skuRow.product_id) {
-      // SKU existente: actualizar campos si cambiaron
+      metrics.productsCreated++;
+    } else {
       const descChanged = safeDesc && safeDesc !== skuRow.Product_dsc;
-      const brandChanged = row.brand != null && row.brand !== skuRow.Brand;
-      const catChanged =
-        row.category != null && row.category !== skuRow.client_category;
-      const subCatChanged =
-        row.subcategory != null &&
-        row.subcategory !== skuRow.client_subcategory;
-      const supplierChanged =
-        row.manufacturer != null && row.manufacturer !== skuRow.Supplier;
-      if (
-        descChanged ||
-        brandChanged ||
-        catChanged ||
-        subCatChanged ||
-        supplierChanged
-      ) {
-        await skuRepo.updateProduct(skuRow.product_id, {
-          ...(descChanged && { productDsc: safeDesc }),
-          ...(brandChanged && { brand: row.brand }),
-          ...(catChanged && { clientCategory: row.category }),
-          ...(subCatChanged && { clientSubcategory: row.subcategory }),
-          ...(supplierChanged && { supplier: row.manufacturer }),
-        });
+      if (descChanged) {
+        await skuRepo.updateSku(skuRow.SKU_ID, { productDsc: safeDesc });
         metrics.skusUpdated++;
       }
     }
