@@ -1,5 +1,6 @@
-const categoryRepo = require("../repositories/categoryRepo");
-const enterpriseCategoryRepo = require("../repositories/enterpriseCategoryRepo");
+const categoryRepo              = require("../repositories/categoryRepo");
+const enterpriseCategoryRepo   = require("../repositories/enterpriseCategoryRepo");
+const aiInfrastructureService  = require("./aiInfrastructureService");
 
 function svcError(msg, statusCode) {
   const err = new Error(msg);
@@ -18,7 +19,73 @@ function toDTO(c) {
   };
 }
 
-// ────────────── Issues 2.x (corregidos) ──────────────
+// ────────────── Algoritmo de resolución para IA ──────────────
+
+async function resolveCategory(selectedCategoryId) {
+  const cat = await categoryRepo.findById(selectedCategoryId);
+  if (!cat) return [];
+
+  // Caso 1: DIRECT — la categoría seleccionada es inteligente
+  const isSmartDtc = cat.is_smart_dtc === 1 || cat.is_smart_dtc === true;
+  if (isSmartDtc) {
+    return [
+      {
+        selected_category_id: selectedCategoryId,
+        resolved_category_id: selectedCategoryId,
+        resolution_type: "DIRECT",
+      },
+    ];
+  }
+
+  // Caso 2: EXPAND — buscar descendientes con is_smart_dtc=1
+  const allDescendants =
+    await categoryRepo.findActiveDescendants(selectedCategoryId);
+  const smartDescendants = [];
+  for (const descId of allDescendants) {
+    const desc = await categoryRepo.findById(descId);
+    if (desc && (desc.is_smart_dtc === 1 || desc.is_smart_dtc === true)) {
+      smartDescendants.push(descId);
+    }
+  }
+
+  if (smartDescendants.length > 0) {
+    return smartDescendants.map((resolvedId) => ({
+      selected_category_id: selectedCategoryId,
+      resolved_category_id: resolvedId,
+      resolution_type: "EXPAND",
+    }));
+  }
+
+  // Caso 3: COLLAPSE — subir al padre hasta encontrar uno con is_smart_dtc=1
+  let current = cat;
+  while (current.parent_category_id) {
+    const parent = await categoryRepo.findById(current.parent_category_id);
+    if (!parent) break;
+    const parentIsSmart =
+      parent.is_smart_dtc === 1 || parent.is_smart_dtc === true;
+    if (parentIsSmart) {
+      return [
+        {
+          selected_category_id: selectedCategoryId,
+          resolved_category_id: parent.Category_id,
+          resolution_type: "COLLAPSE",
+        },
+      ];
+    }
+    current = parent;
+  }
+
+  // Caso 4: No se encontró ninguna categoría inteligente
+  return [
+    {
+      selected_category_id: selectedCategoryId,
+      resolved_category_id: null,
+      resolution_type: null,
+    },
+  ];
+}
+
+// ────────────── Issues 2.x ──────────────
 
 const listGlobal = async () => {
   const cats = await categoryRepo.listActive();
@@ -27,18 +94,26 @@ const listGlobal = async () => {
 
 const listByEnterprise = async (enterpriseId) => {
   const relations = await enterpriseCategoryRepo.findByEnterprise(enterpriseId);
+  // Deduplicar por selected_category_id (puede haber varios resolved por uno seleccionado)
+  const uniqueSelectedIds = [
+    ...new Set(relations.map((r) => r.selected_category_id)),
+  ];
   const enriched = await Promise.all(
-    relations.map(async (r) => {
-      const cat = await categoryRepo.findById(r.Category_id);
+    uniqueSelectedIds.map(async (selectedId) => {
+      const cat = await categoryRepo.findById(selectedId);
       return cat ? toDTO(cat) : null;
     }),
   );
   return enriched.filter(Boolean);
 };
 
+// Solo AGREGA categorías nuevas — no inactiva nada, no duplica
 const replaceForEnterprise = async (enterpriseId, categoryIds) => {
-  if (!Array.isArray(categoryIds))
+  if (!Array.isArray(categoryIds)) {
     throw svcError("categoryIds debe ser un array", 400);
+  }
+
+  // Validar que cada categoría existe y está activa
   for (const id of categoryIds) {
     const cat = await categoryRepo.findById(id);
     if (!cat || cat.status !== "ACTIVE") {
@@ -48,8 +123,36 @@ const replaceForEnterprise = async (enterpriseId, categoryIds) => {
       );
     }
   }
-  await enterpriseCategoryRepo.replaceForEnterprise(enterpriseId, categoryIds);
-  return categoryIds.length;
+
+  // Categorías que la empresa ya tiene guardadas (ACTIVE)
+  const currentRelations =
+    await enterpriseCategoryRepo.findByEnterprise(enterpriseId);
+  const alreadySelected = new Set(
+    currentRelations.map((r) => r.selected_category_id),
+  );
+
+  // Filtrar solo las categorías NUEVAS (que no están ya guardadas)
+  const newCategoryIds = categoryIds.filter((id) => !alreadySelected.has(id));
+
+  if (newCategoryIds.length === 0) {
+    return { added: 0, alreadyExisted: categoryIds.length, changed: false };
+  }
+
+  // Resolver las categorías inteligentes solo para las nuevas
+  const records = [];
+  for (const id of newCategoryIds) {
+    const resolved = await resolveCategory(id);
+    records.push(...resolved);
+  }
+
+  // Insertar solo las nuevas (sin tocar las existentes)
+  await enterpriseCategoryRepo.addForEnterprise(enterpriseId, records);
+
+  return {
+    added: newCategoryIds.length,
+    alreadyExisted: categoryIds.length - newCategoryIds.length,
+    changed: true,
+  };
 };
 
 // ────────────── Issue 3: árbol de categorías ──────────────
@@ -102,7 +205,26 @@ const createCategory = async (payload) => {
     status: "ACTIVE",
   });
 
-  return toDTO(inserted);
+  const dto = toDTO(inserted);
+
+  // Provisioning de infraestructura IA en background (fire-and-forget).
+  // La respuesta al usuario NO espera este proceso.
+  // Si falla, queda PENDING_AZURE o PENDING y puede reintentarse con
+  // POST /api/categories/:id/retry-ai-infra (solo Admin).
+  if (dto.isSmartDtc) {
+    aiInfrastructureService
+      .provisionForCategory({ categoryId: dto.categoryId, categoryName: dto.categoryDsc })
+      .then((result) => {
+        console.log('[aiInfra] provisioning completado', { categoryId: dto.categoryId, ...result });
+      })
+      .catch((err) => {
+        // Este catch solo captura errores inesperados del orquestador mismo.
+        // Los errores de Azure ya son manejados internamente por aiInfrastructureService.
+        console.error('[aiInfra] error inesperado en provisioning', { categoryId: dto.categoryId, err });
+      });
+  }
+
+  return dto;
 };
 
 const updateCategory = async (categoryId, payload) => {
@@ -125,7 +247,6 @@ const updateCategory = async (categoryId, payload) => {
     partial.is_smart_dtc = isSmartDtc ? 1 : 0;
   }
 
-  // ← Fix: status ahora se acepta y valida
   if (status !== undefined) {
     const validStatuses = ["ACTIVE", "INACTIVE"];
     if (!validStatuses.includes(status)) {
@@ -165,7 +286,23 @@ const updateCategory = async (categoryId, payload) => {
   }
 
   const updated = await categoryRepo.update(categoryId, partial);
-  return toDTO(updated ?? existing);
+  const dto = toDTO(updated ?? existing);
+
+  // Si la actualización activó is_smart_dtc por primera vez, provisionar infraestructura IA.
+  // Condición: el campo cambió de 0→1 en esta operación.
+  const wasSmartBefore = existing.is_smart_dtc === 1 || existing.is_smart_dtc === true;
+  if (dto.isSmartDtc && !wasSmartBefore) {
+    aiInfrastructureService
+      .provisionForCategory({ categoryId: dto.categoryId, categoryName: dto.categoryDsc })
+      .then((result) => {
+        console.log('[aiInfra] provisioning por actualización', { categoryId: dto.categoryId, ...result });
+      })
+      .catch((err) => {
+        console.error('[aiInfra] error inesperado al actualizar categoría', { categoryId: dto.categoryId, err });
+      });
+  }
+
+  return dto;
 };
 
 const deactivateCategory = async (categoryId) => {
@@ -190,10 +327,22 @@ const deactivateCategory = async (categoryId) => {
   };
 };
 
+const listCommercialCategories = async (enterpriseId) => {
+  const rows =
+    await enterpriseCategoryRepo.listCommercialCategories(enterpriseId);
+  return rows.map((r) => ({
+    id: r.enterprise_category_id,
+    enterpriseCategoryId: r.enterprise_category_id,
+    name: r.enterprise_category_dsc,
+    enterprise_category_dsc: r.enterprise_category_dsc,
+  }));
+};
+
 module.exports = {
   listGlobal,
   listByEnterprise,
   replaceForEnterprise,
+  listCommercialCategories,
   getRoots,
   getChildren,
   getById,

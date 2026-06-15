@@ -1,8 +1,12 @@
+const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const jwt    = require('jsonwebtoken');
 const userRepo           = require('../repositories/userRepo');
 const userEnterpriseRepo = require('../repositories/userEnterpriseRepo');
 const roleRepo           = require('../repositories/roleRepo');
+const enterpriseRepo     = require('../repositories/enterpriseRepo');
+const { isValidEmail }   = require('../utils/validators');
+const { sendMail }       = require('../utils/mailer');
 
 // ────────────── Helpers ──────────────
 
@@ -66,6 +70,7 @@ const getAllUsers = async () => {
 };
 
 const createUser = async ({ username, email, password, cedIdentidad }) => {
+  if (!isValidEmail(email)) throw serviceError('Formato de email inválido', 400);
   const passwordHash = await bcrypt.hash(password, 10);
   const inserted = await userRepo.insert({
     User_name:     username,
@@ -118,7 +123,9 @@ const resolveLoginData = async (email, password) => {
     throw serviceError('Rol del usuario no encontrado. Contacte al administrador.', 500);
   }
 
-  return { user, relation, role };
+  const enterprise = await enterpriseRepo.findById(relation.Enterprise_id);
+
+  return { user, relation, role, enterprise };
 };
 
 const issueTokens = (user, relation, role) => {
@@ -183,6 +190,49 @@ if (user.Status !== 1 && user.Status !== true) {
   return { accessToken };
 };
 
+// ────────────── Forgot password ──────────────
+
+function generatePassword() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
+  const bytes = crypto.randomBytes(16);
+  let pwd = '';
+  for (let i = 0; i < 10; i++) pwd += chars[bytes[i] % chars.length];
+  return pwd;
+}
+
+const forgotPassword = async (identifier) => {
+  // Busca por email o username — misma respuesta genérica si no existe (evita enumeración)
+  const GENERIC_MSG = 'Si el usuario existe, recibirá una nueva contraseña por correo.';
+
+  let user = null;
+  if (isValidEmail(identifier)) {
+    user = await userRepo.findByEmail(identifier.trim().toLowerCase());
+  } else {
+    const all = await userRepo.listAll();
+    user = all.find(u => u.User_name === identifier.trim()) ?? null;
+  }
+
+  if (!user) return { message: GENERIC_MSG };
+
+  if (user.Status !== 1 && user.Status !== true) return { message: GENERIC_MSG };
+
+  const newPassword = generatePassword();
+  const passwordHash = await bcrypt.hash(newPassword, 10);
+  await userRepo.update(user.User_id, { PasswordHash: passwordHash });
+
+  await sendMail({
+    to:      user.Email,
+    subject: 'Tu nueva contraseña — RetailScope',
+    text:    `Hola ${user.User_name},\n\nTu nueva contraseña es: ${newPassword}\n\nTe recomendamos cambiarla después de iniciar sesión.\n\nEquipo RetailScope`,
+    html:    `<p>Hola <strong>${user.User_name}</strong>,</p>
+              <p>Tu nueva contraseña es: <strong>${newPassword}</strong></p>
+              <p>Te recomendamos cambiarla después de iniciar sesión.</p>
+              <p>Equipo RetailScope</p>`,
+  });
+
+  return { message: GENERIC_MSG };
+};
+
 module.exports = {
   findUserByEmail,
   findUserByUsername,
@@ -193,4 +243,5 @@ module.exports = {
   resolveLoginData,
   issueTokens,
   refreshAccessToken,
+  forgotPassword,
 };

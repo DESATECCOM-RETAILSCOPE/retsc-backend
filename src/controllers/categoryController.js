@@ -1,4 +1,5 @@
-const categoryService = require("../services/categoryService");
+const categoryService             = require("../services/categoryService");
+const aiInfrastructureService     = require("../services/aiInfrastructureService");
 
 function handleError(res, err) {
   const status = err.statusCode || 500;
@@ -6,7 +7,7 @@ function handleError(res, err) {
   return res.status(status).json({ success: false, message: err.message });
 }
 
-// ────────────── Issues 2.x (sin cambios de lógica) ──────────────
+// ────────────── Issues 2.x ──────────────
 
 // GET /api/categories
 const listGlobal = async (req, res) => {
@@ -30,18 +31,21 @@ const listByEnterprise = async (req, res) => {
   }
 };
 
-// PUT /api/enterprises/me/categories
+// PUT /api/enterprises/me/categories  — agrega categorías (no reemplaza, no duplica)
 const replaceForEnterprise = async (req, res) => {
   try {
     const { categoryIds } = req.body;
-    const count = await categoryService.replaceForEnterprise(
+    const result = await categoryService.replaceForEnterprise(
       req.user.enterpriseId,
       categoryIds,
     );
     return res.json({
       success: true,
-      count,
-      message: "Selección de categorías actualizada.",
+      added: result.added,
+      alreadyExisted: result.alreadyExisted,
+      message: result.changed
+        ? `${result.added} categoría(s) agregada(s).`
+        : "Las categorías seleccionadas ya estaban guardadas.",
     });
   } catch (err) {
     return handleError(res, err);
@@ -126,14 +130,56 @@ const deactivateCategory = async (req, res) => {
   }
 };
 
+// POST /api/categories/:id/retry-ai-infra  (solo Admin)
+// Reintenta el provisioning de infraestructura IA para una categoría smart que
+// quedó en estado PENDING o PENDING_AZURE (ej. por fallo temporal de Azure).
+const retryAiInfra = async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id))
+      return res.status(400).json({ success: false, message: "ID inválido" });
+
+    const result = await aiInfrastructureService.retryForCategory(id);
+
+    // Mapear el status interno a un mensaje más descriptivo para el cliente
+    const messages = {
+      PROVISIONED:    'Infraestructura provisionada exitosamente.',
+      PENDING:        'Reintento parcial: algunos componentes siguen pendientes. Ver campo errors.',
+      ALREADY_EXISTS: 'La infraestructura ya estaba provisionada correctamente.',
+      ERROR:          'Error al intentar el provisioning.',
+    };
+
+    const httpStatus = result.status === 'ERROR' ? 400 : 200;
+    return res.status(httpStatus).json({
+      success: result.status !== 'ERROR',
+      message: messages[result.status] ?? result.status,
+      ...result,
+    });
+  } catch (err) {
+    return handleError(res, err);
+  }
+};
+
+// GET /api/enterprises/me/enterprise-categories
+const listCommercialCategories = async (req, res) => {
+  try {
+    const categories = await categoryService.listCommercialCategories(req.user.enterpriseId);
+    return res.json({ success: true, categories });
+  } catch (err) {
+    return handleError(res, err);
+  }
+};
+
 module.exports = {
   listGlobal,
   listByEnterprise,
   replaceForEnterprise,
+  listCommercialCategories,
   getRoots,
   getChildren,
   getById,
   createCategory,
   updateCategory,
   deactivateCategory,
+  retryAiInfra,
 };

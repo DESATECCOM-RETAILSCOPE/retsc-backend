@@ -7,7 +7,11 @@ const categoryRoutes           = require('./routes/categoryRoutes');
 const enterpriseCategoryRoutes = require('./routes/enterpriseCategoryRoutes');
 const productRoutes            = require('./routes/productRoutes');
 const roleRoutes               = require('./routes/roleRoutes');
-const authMiddleware           = require('./middlewares/authMiddleware');
+const skuImageRoutes                    = require('./routes/skuImageRoutes');
+const skuRoutes                         = require('./routes/skuRoutes');
+const enterpriseCommercialCategoryRoutes = require('./routes/enterpriseCommercialCategoryRoutes');
+const authMiddleware                    = require('./middlewares/authMiddleware');
+const jobRepo                  = require('./repositories/jobRepo');
 
 const path = require('path');
 
@@ -28,6 +32,14 @@ app.use('/api/categories',                authMiddleware, categoryRoutes);
 app.use('/api/enterprises/me/categories', authMiddleware, enterpriseCategoryRoutes);
 app.use('/api/products',                  productRoutes);
 app.use('/api/roles',                     authMiddleware, roleRoutes);
+app.use('/api/sku-images',                         skuImageRoutes);
+app.use('/api/skus',                               skuRoutes);
+app.use('/api/enterprises/me/enterprise-categories', authMiddleware, enterpriseCommercialCategoryRoutes);
+
+// Recovery al startup: jobs que quedaron RUNNING de una ejecución anterior → FAILED
+jobRepo.failStaleRunning('Servidor reiniciado durante el procesamiento')
+  .then(n => { if (n > 0) console.warn(`[startup] ${n} job(s) RUNNING marcados como FAILED`); })
+  .catch(err => console.error('[startup] error en recovery de jobs:', err.message));
 
 // Health check
 app.get('/health', (req, res) => {
