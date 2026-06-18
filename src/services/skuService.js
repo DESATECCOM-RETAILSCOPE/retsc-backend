@@ -161,7 +161,7 @@ const processSkuExcel = async (
   enterpriseCategoryId,
   enterpriseId,
 ) => {
-  // Validar y cargar la categoría comercial — también provee detection_category_id
+  // Validar y cargar la categoría comercial — provee enterprise_category_id y resolved_category_id
   const entCat = await entCatRepo.findEnterpriseCategoryById(
     Number(enterpriseCategoryId),
     enterpriseId,
@@ -173,7 +173,7 @@ const processSkuExcel = async (
     );
   }
 
-  // detection_category_id: usa la categoría DTC resuelta; si no hay, cae al selected
+  // detection_category_id: usa la categoría DTC resuelta (smart); si no hay, cae al selected
   const detectionCategoryId =
     entCat.resolved_category_id ?? entCat.selected_category_id;
 
@@ -184,9 +184,6 @@ const processSkuExcel = async (
     totalRows: rows.length,
     skusCreated: 0,
     skusUpdated: 0,
-    productsCreated: 0,
-    enterpriseSkusCreated: 0,
-    categoriesResolved: 0,
     duplicatesSkipped: 0,
     errorsCount: 0,
   };
@@ -217,45 +214,34 @@ const processSkuExcel = async (
     }
 
     // ── 2. Buscar o crear SKU global por EAN ──────────────────────────────
-    // NOTA: RETSC_OP_PRODUCTS no existe; Product_dsc y Category_id viven
+    // NOTA: RETSC_OP_PRODUCTS no existe; Product_dsc y categorías viven
     // directamente en RETSC_OP_SKUS.
+    //   selected_category_id  → enterprise_category_id (PK de ENTERPRISE_CATEGORIES)
+    //   detection_category_id → resolved_category_id (Category_id smart de CATEGORIES)
     let skuRow = await skuRepo.findSkuByEan(row.gtin);
 
-    const safeDesc = row.description ? row.description.substring(0, 500) : null;
+    const safeDesc = row.description ? row.description.substring(0, 100) : null;
 
-    if (!skuRow) {
+    const isNew = !skuRow;
+    if (isNew) {
       skuRow = await skuRepo.insertSku({
         ean: row.gtin,
         productDsc: safeDesc,
-        categoryId: null,
+        selectedCategoryId: entCat.selected_category_id,  // FK→RETSC_OP_CATEGORIES.Category_id
+        detectionCategoryId: entCat.resolved_category_id, // smart category FK→RETSC_OP_CATEGORIES
       });
       metrics.skusCreated++;
-      metrics.productsCreated++;
     } else {
       const descChanged = safeDesc && safeDesc !== skuRow.Product_dsc;
       if (descChanged) {
         await skuRepo.updateSku(skuRow.SKU_ID, { productDsc: safeDesc });
         metrics.skusUpdated++;
+      } else {
+        metrics.duplicatesSkipped++;
       }
     }
 
-    // ── 3. Segmentación enterprise ─────────────────────────────────────────
-    const entSku = await skuRepo.findEnterpriseSku(enterpriseId, skuRow.SKU_ID);
-
-    if (!entSku) {
-      await skuRepo.insertEnterpriseSku({
-        enterpriseId,
-        skuId: skuRow.SKU_ID,
-        selectedCategoryId: entCat.selected_category_id, // NOTA: FK→RETSC_OP_CATEGORIES.Category_id (no el enterprise_category_id)
-        detectionCategoryId,
-      });
-      metrics.enterpriseSkusCreated++;
-      metrics.categoriesResolved++;
-    } else {
-      metrics.duplicatesSkipped++;
-    }
-
-    // ── 4. Log de auditoría ────────────────────────────────────────────────
+    // ── 3. Log ────────────────────────────────────────────────────────────
     await skuRepo
       .logSkuRow({
         enterpriseId,
@@ -265,7 +251,7 @@ const processSkuExcel = async (
         skuDescription: row.description,
         selectedCategoryId: entCat.selected_category_id,
         detectionCategoryId,
-        processStatus: entSku ? "SKIPPED" : "OK",
+        processStatus: isNew ? "OK" : "SKIPPED",
       })
       .catch(() => {});
   }
