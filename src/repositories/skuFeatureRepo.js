@@ -57,6 +57,24 @@ const findBySkuId = async (skuId) => {
   return r.recordset;
 };
 
+// Busca un feature por su PK.
+const findById = async (featureId) => {
+  const pool = await getPool();
+  const r = await pool.request()
+    .input('id', sql.Int, featureId)
+    .query(`SELECT TOP 1 * FROM ${FEATURES_TABLE} WHERE feature_id = @id`);
+  return r.recordset[0] ?? null;
+};
+
+// Actualiza validation_status de un feature (Issue 6.1).
+const updateValidationStatus = async (featureId, status) => {
+  const pool = await getPool();
+  await pool.request()
+    .input('id',     sql.Int,         featureId)
+    .input('status', sql.VarChar(20), status)
+    .query(`UPDATE ${FEATURES_TABLE} SET validation_status = @status WHERE feature_id = @id`);
+};
+
 // Cuenta imágenes de un SKU (para determinar is_primary en el primer insert).
 const countBySku = async (skuId) => {
   const pool = await getPool();
@@ -136,6 +154,7 @@ const setPrimary = async (featureId, skuId) => {
 };
 
 module.exports = {
+  findById,
   findBySkuIdAndHash,
   findBySkuId,
   countBySku,
@@ -143,4 +162,5 @@ module.exports = {
   insert,
   insertMetadata,
   setPrimary,
+  updateValidationStatus,
 };

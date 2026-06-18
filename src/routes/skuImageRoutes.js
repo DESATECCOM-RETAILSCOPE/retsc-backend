@@ -47,4 +47,9 @@ router.get('/jobs/:jobId', authMiddleware, c.getJobStatus);
 
 router.get('/sku/:skuId', authMiddleware, c.listBySku);
 
+// Validación de calidad de imagen (Issue 6.1)
+// POST /api/sku-images/:featureId/validate
+// Cualquier usuario autenticado puede disparar la validación.
+router.post('/:featureId/validate', authMiddleware, c.validateImageQuality);
+
 module.exports = router;
