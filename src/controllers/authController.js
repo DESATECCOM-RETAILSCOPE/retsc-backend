@@ -1,5 +1,6 @@
-const jwt = require('jsonwebtoken');
 const authService = require('../services/authService');
+
+// ────────────── Login ──────────────
 
 const login = async (req, res) => {
   try {
@@ -9,42 +10,66 @@ const login = async (req, res) => {
       return res.status(400).json({ message: 'Email y contraseña son requeridos' });
     }
 
-    const { user, relation, role } = await authService.resolveLoginData(
+    const { user, relation, role, enterprise } = await authService.resolveLoginData(
       email.trim().toLowerCase(),
       password
     );
 
-    const token = jwt.sign(
-      {
-        userId:       user.User_id,
-        email:        user.Email,
-        username:     user.User_name,
-        enterpriseId: relation.Enterprise_id,
-        roleId:       role.Role_id,
-        roleName:     role.Role_name,
-      },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRES_IN || '24h' }
-    );
+    const { accessToken, refreshToken } = authService.issueTokens(user, relation, role);
 
     return res.json({
-      token,
+      // Compatibilidad: el frontend actual usa 'token'. Se mantiene hasta que migre a 'accessToken'.
+      // TODO (feedback de versión): coordinar con frontend la migración a accessToken/refreshToken.
+      token:        accessToken,
+      accessToken,
+      refreshToken,
       user: {
-        id:           user.User_id,
-        username:     user.User_name,
-        email:        user.Email,
-        cedIdentidad: user.ced_identidad,
-        enterpriseId: relation.Enterprise_id,
-        roleId:       role.Role_id,
-        roleName:     role.Role_name,
+        id:            user.User_id,
+        username:      user.User_name,
+        email:         user.Email,
+        cedIdentidad:  user.ced_identidad,
+        enterpriseId:  relation.Enterprise_id,
+        enterpriseDsc: enterprise?.Enterprise_dsc ?? null,
+        roleId:        role.Role_id,
+        roleName:      role.Role_name,
       },
     });
   } catch (err) {
     const status = err.statusCode || 500;
-    if (status === 500) console.error('Login error:', err);
+    // DEBUG TEMPORAL — borrar después de resolver el problema
+    console.error('[LOGIN DEBUG] statusCode:', err.statusCode);
+    console.error('[LOGIN DEBUG] message:', err.message);
+    console.error('[LOGIN DEBUG] error completo:', err);
     return res.status(status).json({ message: err.message });
   }
 };
+
+// ────────────── Refresh ──────────────
+
+const refresh = async (req, res) => {
+  try {
+    const { refreshToken } = req.body;
+
+    const { accessToken } = await authService.refreshAccessToken(refreshToken);
+
+    return res.json({ accessToken });
+  } catch (err) {
+    const status = err.statusCode || 500;
+    if (status === 500) console.error('Refresh error:', err);
+    return res.status(status).json({ message: err.message });
+  }
+};
+
+// ────────────── Logout (stateless) ──────────────
+
+const logout = async (req, res) => {
+  // Logout stateless: el server solo confirma. El cliente debe borrar sus tokens.
+  // Si en el futuro se requiere "kill session" real, agregar tabla de refresh
+  // tokens revocados y marcar el refreshToken del request como revocado aquí.
+  return res.json({ message: 'Sesión cerrada exitosamente' });
+};
+
+// ────────────── Resto (sin cambios) ──────────────
 
 const register = async (req, res) => {
   try {
@@ -108,4 +133,18 @@ const getUsers = async (req, res) => {
   }
 };
 
-module.exports = { login, register, getMe, getUsers };
+const forgotPassword = async (req, res) => {
+  try {
+    const { identifier } = req.body;
+    if (!identifier?.trim()) {
+      return res.status(400).json({ success: false, message: 'Email o usuario requerido' });
+    }
+    const result = await authService.forgotPassword(identifier.trim());
+    return res.json({ success: true, message: result.message });
+  } catch (err) {
+    console.error('ForgotPassword error:', err);
+    return res.status(500).json({ success: false, message: 'Error interno del servidor' });
+  }
+};
+
+module.exports = { login, refresh, logout, register, getMe, getUsers, forgotPassword };

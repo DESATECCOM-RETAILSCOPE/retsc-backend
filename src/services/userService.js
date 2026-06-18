@@ -2,6 +2,7 @@ const bcrypt = require('bcryptjs');
 const userRepo           = require('../repositories/userRepo');
 const userEnterpriseRepo = require('../repositories/userEnterpriseRepo');
 const roleRepo           = require('../repositories/roleRepo');
+const { isValidEmail }   = require('../utils/validators');
 
 function svcError(msg, statusCode) {
   const err = new Error(msg);
@@ -12,11 +13,9 @@ function svcError(msg, statusCode) {
 // ── 1.1 ──────────────────────────────────────────────────────────────────────
 const listByEnterprise = async (enterpriseId) => {
   const relations = await userEnterpriseRepo.findByEnterprise(enterpriseId);
-  // Solo relaciones activas
-  const active = relations.filter(r => r.Status === 1);
 
   const enriched = await Promise.all(
-    active.map(async (r) => {
+    relations.map(async (r) => {
       const user = await userRepo.findById(r.User_id);
       const role = await roleRepo.findById(r.Role_id);
       return {
@@ -26,7 +25,7 @@ const listByEnterprise = async (enterpriseId) => {
         cedIdentidad:      user?.ced_identidad ?? null,
         roleId:            role?.Role_id ?? r.Role_id,
         roleName:          role?.Role_name ?? null,
-        status:            r.Status,
+        status:            (r.Status === 1 || r.Status === true) ? 1 : 0,
         fechaActivacion:   r.Fecha_activacion,
         fechaInactivacion: r.Fecha_inactivacion,
       };
@@ -60,6 +59,7 @@ const createAndAssign = async (payload, enterpriseId) => {
   if (missing.length) throw svcError(`Campos requeridos faltantes: ${missing.join(', ')}`, 400);
 
   if (password.length < 8) throw svcError('La contraseña debe tener al menos 8 caracteres', 400);
+  if (!isValidEmail(email)) throw svcError('Formato de email inválido', 400);
 
   if (await userRepo.findByCedula(cedIdentidad)) {
     throw svcError('La cédula ya existe. Use POST /api/users/assign para asignar el usuario existente.', 409);
@@ -111,11 +111,11 @@ const assignToEnterprise = async (userId, roleId, enterpriseId) => {
   const existing = await userEnterpriseRepo.findByUserAndEnterprise(userId, enterpriseId);
 
   if (existing) {
-    if (existing.Status === 1) {
+    if (existing.Status === 1 || existing.Status === true) {
       throw svcError('El usuario ya está asignado a esta empresa.', 409);
     }
     // Relación inactiva — reactivar
-    await userEnterpriseRepo.update(existing.Id, {
+    await userEnterpriseRepo.update(userId, enterpriseId, {
       Role_id:            role.Role_id,
       Status:             1,
       Fecha_activacion:   new Date().toISOString(),
@@ -149,6 +149,7 @@ const updateUser = async (userId, payload, enterpriseId) => {
 
   if (email != null) {
     const normalized = email.trim().toLowerCase();
+    if (!isValidEmail(normalized)) throw svcError('Formato de email inválido', 400);
     const taken = await userRepo.findByEmail(normalized);
     if (taken && taken.User_id !== userId) throw svcError('El email ya está en uso por otro usuario.', 409);
     partial.Email = normalized;
@@ -182,7 +183,7 @@ const updateUserEnterprise = async (userId, enterpriseId, payload) => {
   if (status != null)            partial.Status             = status;
   if (fechaInactivacion != null) partial.Fecha_inactivacion = fechaInactivacion;
 
-  const updated = await userEnterpriseRepo.update(relation.Id, partial);
+  const updated = await userEnterpriseRepo.update(userId, enterpriseId, partial);
   return updated;
 };
 

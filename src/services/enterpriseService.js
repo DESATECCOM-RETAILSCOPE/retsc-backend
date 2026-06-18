@@ -1,16 +1,17 @@
-const crypto = require('crypto');
-const bcrypt = require('bcryptjs');
-const enterpriseRepo     = require('../repositories/enterpriseRepo');
-const userRepo           = require('../repositories/userRepo');
-const userEnterpriseRepo = require('../repositories/userEnterpriseRepo');
-const roleRepo           = require('../repositories/roleRepo');
+const crypto = require("crypto");
+const bcrypt = require("bcryptjs");
+const enterpriseRepo = require("../repositories/enterpriseRepo");
+const userRepo = require("../repositories/userRepo");
+const userEnterpriseRepo = require("../repositories/userEnterpriseRepo");
+const roleRepo = require("../repositories/roleRepo");
+const { isValidEmail } = require("../utils/validators");
 
-const VALID_TYPES = ['Proveedor', 'Detallista', 'Empresa de servicios'];
+const VALID_TYPES = ["Proveedor", "Detallista", "Empresa de servicios"];
 
 function generatePassword() {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789";
   const bytes = crypto.randomBytes(16);
-  let pwd = '';
+  let pwd = "";
   for (let i = 0; i < 8; i++) pwd += chars[bytes[i] % chars.length];
   return pwd;
 }
@@ -21,128 +22,223 @@ function serviceError(msg, statusCode) {
   return err;
 }
 
+// ────────────── Registro de empresa con admin (issue 1.1) ──────────────
+
 const registerEnterprise = async (payload) => {
   const {
-    fiscalId, enterpriseDsc, country, state, county, city,
-    telephone, address, invoiceMail, contact, contactMail, contactPhone, type,
-    adminCedula, adminName, adminEmail, adminPhone,
+    fiscalId,
+    enterpriseDsc,
+    country,
+    state,
+    county,
+    city,
+    telephone,
+    address,
+    invoiceMail,
+    contact,
+    contactMail,
+    contactPhone,
+    type,
+    adminCedula,
+    adminName,
+    adminEmail,
+    adminPhone,
   } = payload;
 
-  // Validar campos obligatorios
+  // ───── Validación de campos obligatorios ─────
+  // adminName y adminEmail son SIEMPRE requeridos
   const required = {
-    fiscalId, enterpriseDsc, country, state, county, city,
-    telephone, address, invoiceMail, contact, contactMail, contactPhone, type, adminCedula,
+    fiscalId,
+    enterpriseDsc,
+    country,
+    state,
+    county,
+    city,
+    telephone,
+    address,
+    invoiceMail,
+    contact,
+    contactMail,
+    contactPhone,
+    type,
+    adminCedula,
+    adminName,
+    adminEmail,
   };
-  const missing = Object.entries(required).filter(([, v]) => !v).map(([k]) => k);
+  const missing = Object.entries(required)
+    .filter(([, v]) => !v)
+    .map(([k]) => k);
   if (missing.length > 0) {
-    throw serviceError(`Campos requeridos faltantes: ${missing.join(', ')}`, 400);
+    throw serviceError(
+      `Campos requeridos faltantes: ${missing.join(", ")}`,
+      400,
+    );
   }
 
   if (!VALID_TYPES.includes(type)) {
-    throw serviceError(`El campo type debe ser uno de: ${VALID_TYPES.join(', ')}`, 400);
+    throw serviceError(
+      `El campo type debe ser uno de: ${VALID_TYPES.join(", ")}`,
+      400,
+    );
   }
 
-  // Verificar duplicado de fiscalId
+  if (!isValidEmail(invoiceMail)) throw serviceError('Formato de invoiceMail inválido', 400);
+  if (!isValidEmail(contactMail)) throw serviceError('Formato de contactMail inválido', 400);
+  if (!isValidEmail(adminEmail))  throw serviceError('Formato de adminEmail inválido', 400);
+
+  // ───── Fail-fast: verificar duplicados ANTES de cualquier insert ─────
+
+  // 1. Empresa: fiscalId único
   if (await enterpriseRepo.findByFiscalId(fiscalId)) {
-    throw serviceError('Ya existe una empresa registrada con ese fiscalId', 409);
+    throw serviceError(
+      "Ya existe una empresa registrada con ese fiscalId",
+      409,
+    );
   }
 
-  // Buscar o crear usuario administrador
-  let user = await userRepo.findByCedula(adminCedula);
+  // 2. Email único en RETSC_OP_USERS
+  //    (puede pertenecer al mismo usuario que estamos reactivando — lo validamos abajo)
+  const userByEmail = await userRepo.findByEmail(adminEmail);
+
+  // 3. Cédula: si existe, no debe tener relaciones activas
+  const userByCedula = await userRepo.findByCedula(adminCedula);
+
+  if (userByCedula) {
+    const activeRelations = await userEnterpriseRepo.findActiveByUserId(
+      userByCedula.User_id,
+    );
+    if (activeRelations.length > 0) {
+      throw serviceError(
+        "El administrador con esa cédula ya tiene una empresa activa asignada. Debe ser desactivado en su empresa anterior antes de registrarlo en una nueva.",
+        409,
+      );
+    }
+  }
+
+  // 4. Si el email ya existe, debe pertenecer al MISMO usuario (cédula).
+  //    Si pertenece a otro usuario distinto, lo rechazamos.
+  if (
+    userByEmail &&
+    (!userByCedula || userByEmail.User_id !== userByCedula.User_id)
+  ) {
+    throw serviceError("Ya existe un usuario con ese email en el sistema", 409);
+  }
+
+  // ───── Fail-fast: rol Admin debe existir antes de tocar nada ─────
+  const adminRole = await roleRepo.findByName("Admin");
+  if (!adminRole) {
+    throw serviceError(
+      'Rol "Admin" no encontrado. Verifique que el seed se ejecutó correctamente.',
+      500,
+    );
+  }
+
+  // ───── Crear o actualizar usuario admin ─────
+  let user = userByCedula;
   let isNewUser = false;
   let generatedPassword = null;
   let insertedUserId = null;
+  let updatedExistingUser = false;
 
   if (!user) {
-    if (!adminName || !adminEmail) {
-      throw serviceError('adminName y adminEmail son requeridos cuando el administrador no existe en el sistema', 400);
-    }
+    // Caso A: usuario nuevo
     generatedPassword = generatePassword();
     const passwordHash = await bcrypt.hash(generatedPassword, 10);
     const inserted = await userRepo.insert({
-      User_name:     adminName,
-      Email:         adminEmail,
-      PasswordHash:  passwordHash,
+      User_name: adminName,
+      Email: adminEmail,
+      PasswordHash: passwordHash,
       ced_identidad: adminCedula,
-      Status:        1,
-      Created_date:  new Date().toISOString(),
+      Status: 1,
+      Created_date: new Date().toISOString(),
     });
     user = inserted;
     insertedUserId = inserted.User_id;
     isNewUser = true;
+  } else {
+    // Caso B: usuario existente sin relaciones activas → reactivación con nuevos datos de trabajo
+    generatedPassword = generatePassword();
+    const passwordHash = await bcrypt.hash(generatedPassword, 10);
+    const updated = await userRepo.update(user.User_id, {
+      User_name: adminName,
+      Email: adminEmail,
+      PasswordHash: passwordHash,
+      Status: 1,
+    });
+    user = updated || user;
+    updatedExistingUser = true;
+    isNewUser = true; // semánticamente "nuevo" porque entrega un password fresco
   }
 
-  // Insertar empresa
+  // ───── Insertar empresa ─────
   let insertedEnterprise = null;
   try {
     insertedEnterprise = await enterpriseRepo.insert({
-      Fiscal_id:      fiscalId,
+      Fiscal_id: fiscalId,
       Enterprise_dsc: enterpriseDsc,
-      Country:        country,
-      State:          state,
-      County:         county,
-      City:           city,
-      Telephone:      telephone,
-      Address:        address,
-      Invoice_mail:   invoiceMail,
-      Contact:        contact,
-      Contact_mail:   contactMail,
-      Contact_phone:  contactPhone,
-      Type:           type,
+      Country: country,
+      State: state,
+      County: county,
+      City: city,
+      Telephone: telephone,
+      Address: address,
+      Invoice_mail: invoiceMail,
+      Contact: contact,
+      Contact_mail: contactMail,
+      Contact_phone: contactPhone,
+      Type: type,
     });
   } catch (err) {
     if (insertedUserId) await userRepo.remove(insertedUserId).catch(() => {});
     throw err;
   }
 
-  // Obtener rol Admin
-  const adminRole = await roleRepo.findByName('Admin');
-  if (!adminRole) {
-    await enterpriseRepo.remove(insertedEnterprise.Enterprise_id).catch(() => {});
-    if (insertedUserId) await userRepo.remove(insertedUserId).catch(() => {});
-    throw serviceError('Rol "Admin" no encontrado en la base de datos.', 500);
-  }
-
-  // Insertar relación usuario-empresa
+  // ───── Insertar relación usuario-empresa ─────
   try {
     await userEnterpriseRepo.insert({
-      User_id:            user.User_id,
-      Enterprise_id:      insertedEnterprise.Enterprise_id,
-      Role_id:            adminRole.Role_id,
-      Status:             1,
-      Fecha_activacion:   new Date().toISOString(),
+      User_id: user.User_id,
+      Enterprise_id: insertedEnterprise.Enterprise_id,
+      Role_id: adminRole.Role_id,
+      Status: 1,
+      Fecha_activacion: new Date().toISOString(),
       Fecha_inactivacion: null,
     });
   } catch (err) {
-    await enterpriseRepo.remove(insertedEnterprise.Enterprise_id).catch(() => {});
+    await enterpriseRepo
+      .remove(insertedEnterprise.Enterprise_id)
+      .catch(() => {});
     if (insertedUserId) await userRepo.remove(insertedUserId).catch(() => {});
     throw err;
   }
 
   return {
-    enterpriseId:      insertedEnterprise.Enterprise_id,
-    userId:            user.User_id,
+    enterpriseId: insertedEnterprise.Enterprise_id,
+    userId: user.User_id,
     isNewUser,
-    generatedPassword, // null si isNewUser === false
+    updatedExistingUser, // true cuando reactivamos un usuario existente
+    generatedPassword,
   };
 };
 
+// ────────────── CRUD de empresas (issue 2.2) ──────────────
+
 function toDTO(row, activeUsersCount = undefined) {
   const dto = {
-    enterpriseId:  row.Enterprise_id,
-    fiscalId:      row.Fiscal_id,
+    enterpriseId: row.Enterprise_id,
+    fiscalId: row.Fiscal_id,
     enterpriseDsc: row.Enterprise_dsc,
-    country:       row.Country,
-    state:         row.State,
-    county:        row.County,
-    city:          row.City,
-    telephone:     row.Telephone,
-    address:       row.Address,
-    invoiceMail:   row.Invoice_mail,
-    contact:       row.Contact,
-    contactMail:   row.Contact_mail,
-    contactPhone:  row.Contact_phone,
-    type:          row.Type,
+    country: row.Country,
+    state: row.State,
+    county: row.County,
+    city: row.City,
+    telephone: row.Telephone,
+    address: row.Address,
+    invoiceMail: row.Invoice_mail,
+    contact: row.Contact,
+    contactMail: row.Contact_mail,
+    contactPhone: row.Contact_phone,
+    type: row.Type,
+    status: row.status ? 1 : 0,
   };
   if (activeUsersCount !== undefined) dto.activeUsersCount = activeUsersCount;
   return dto;
@@ -152,56 +248,95 @@ const listAll = async () => {
   const enterprises = await enterpriseRepo.listAll();
   return Promise.all(
     enterprises.map(async (e) => {
-      const relations = await userEnterpriseRepo.findByEnterprise(e.Enterprise_id);
-      const activeUsersCount = relations.filter(r => r.Status === 1).length;
+      const relations = await userEnterpriseRepo.findByEnterprise(
+        e.Enterprise_id,
+      );
+      const activeUsersCount = relations.filter((r) => !!r.Status).length;
       return toDTO(e, activeUsersCount);
-    })
+    }),
   );
 };
 
 const findById = async (enterpriseId) => {
   const e = await enterpriseRepo.findById(enterpriseId);
-  if (!e) throw serviceError('Empresa no encontrada', 404);
+  if (!e) throw serviceError("Empresa no encontrada", 404);
   const relations = await userEnterpriseRepo.findByEnterprise(e.Enterprise_id);
-  const activeUsersCount = relations.filter(r => r.Status === 1).length;
+  const activeUsersCount = relations.filter((r) => !!r.Status).length;
   return toDTO(e, activeUsersCount);
 };
 
 const createEnterprise = async (payload) => {
   const {
-    fiscalId, enterpriseDsc, country, state, county, city,
-    telephone, address, invoiceMail, contact, contactMail, contactPhone, type,
+    fiscalId,
+    enterpriseDsc,
+    country,
+    state,
+    county,
+    city,
+    telephone,
+    address,
+    invoiceMail,
+    contact,
+    contactMail,
+    contactPhone,
+    type,
   } = payload;
 
   const required = {
-    fiscalId, enterpriseDsc, country, state, county, city,
-    telephone, address, invoiceMail, contact, contactMail, contactPhone, type,
+    fiscalId,
+    enterpriseDsc,
+    country,
+    state,
+    county,
+    city,
+    telephone,
+    address,
+    invoiceMail,
+    contact,
+    contactMail,
+    contactPhone,
+    type,
   };
-  const missing = Object.entries(required).filter(([, v]) => !v).map(([k]) => k);
-  if (missing.length > 0) throw serviceError(`Campos requeridos faltantes: ${missing.join(', ')}`, 400);
+  const missing = Object.entries(required)
+    .filter(([, v]) => !v)
+    .map(([k]) => k);
+  if (missing.length > 0)
+    throw serviceError(
+      `Campos requeridos faltantes: ${missing.join(", ")}`,
+      400,
+    );
 
   if (!VALID_TYPES.includes(type)) {
-    throw serviceError(`El campo type debe ser uno de: ${VALID_TYPES.join(', ')}`, 400);
+    throw serviceError(
+      `El campo type debe ser uno de: ${VALID_TYPES.join(", ")}`,
+      400,
+    );
   }
 
+  if (!isValidEmail(invoiceMail)) throw serviceError('Formato de invoiceMail inválido', 400);
+  if (!isValidEmail(contactMail)) throw serviceError('Formato de contactMail inválido', 400);
+
   if (await enterpriseRepo.findByFiscalId(fiscalId)) {
-    throw serviceError('Ya existe una empresa registrada con ese fiscalId', 409);
+    throw serviceError(
+      "Ya existe una empresa registrada con ese fiscalId",
+      409,
+    );
   }
 
   const inserted = await enterpriseRepo.insert({
-    Fiscal_id:      fiscalId,
+    Fiscal_id: fiscalId,
     Enterprise_dsc: enterpriseDsc,
-    Country:        country,
-    State:          state,
-    County:         county,
-    City:           city,
-    Telephone:      telephone,
-    Address:        address,
-    Invoice_mail:   invoiceMail,
-    Contact:        contact,
-    Contact_mail:   contactMail,
-    Contact_phone:  contactPhone,
-    Type:           type,
+    Country: country,
+    State: state,
+    County: county,
+    City: city,
+    Telephone: telephone,
+    Address: address,
+    Invoice_mail: invoiceMail,
+    Contact: contact,
+    Contact_mail: contactMail,
+    Contact_phone: contactPhone,
+    Type: type,
   });
 
   return toDTO(inserted, 0);
@@ -209,29 +344,42 @@ const createEnterprise = async (payload) => {
 
 const updateEnterprise = async (enterpriseId, payload) => {
   const existing = await enterpriseRepo.findById(enterpriseId);
-  if (!existing) throw serviceError('Empresa no encontrada', 404);
+  if (!existing) throw serviceError("Empresa no encontrada", 404);
 
   if (payload.fiscalId !== undefined) {
-    throw serviceError('El fiscalId no puede modificarse', 400);
+    throw serviceError("El fiscalId no puede modificarse", 400);
   }
 
   if (payload.type !== undefined && !VALID_TYPES.includes(payload.type)) {
-    throw serviceError(`El campo type debe ser uno de: ${VALID_TYPES.join(', ')}`, 400);
+    throw serviceError(
+      `El campo type debe ser uno de: ${VALID_TYPES.join(", ")}`,
+      400,
+    );
   }
 
+  if (payload.invoiceMail !== undefined && !isValidEmail(payload.invoiceMail))
+    throw serviceError('Formato de invoiceMail inválido', 400);
+  if (payload.contactMail !== undefined && !isValidEmail(payload.contactMail))
+    throw serviceError('Formato de contactMail inválido', 400);
+
   const partial = {};
-  if (payload.enterpriseDsc !== undefined) partial.Enterprise_dsc = payload.enterpriseDsc;
-  if (payload.country       !== undefined) partial.Country        = payload.country;
-  if (payload.state         !== undefined) partial.State          = payload.state;
-  if (payload.county        !== undefined) partial.County         = payload.county;
-  if (payload.city          !== undefined) partial.City           = payload.city;
-  if (payload.telephone     !== undefined) partial.Telephone      = payload.telephone;
-  if (payload.address       !== undefined) partial.Address        = payload.address;
-  if (payload.invoiceMail   !== undefined) partial.Invoice_mail   = payload.invoiceMail;
-  if (payload.contact       !== undefined) partial.Contact        = payload.contact;
-  if (payload.contactMail   !== undefined) partial.Contact_mail   = payload.contactMail;
-  if (payload.contactPhone  !== undefined) partial.Contact_phone  = payload.contactPhone;
-  if (payload.type          !== undefined) partial.Type           = payload.type;
+  if (payload.enterpriseDsc !== undefined)
+    partial.Enterprise_dsc = payload.enterpriseDsc;
+  if (payload.country !== undefined) partial.Country = payload.country;
+  if (payload.state !== undefined) partial.State = payload.state;
+  if (payload.county !== undefined) partial.County = payload.county;
+  if (payload.city !== undefined) partial.City = payload.city;
+  if (payload.telephone !== undefined) partial.Telephone = payload.telephone;
+  if (payload.address !== undefined) partial.Address = payload.address;
+  if (payload.invoiceMail !== undefined)
+    partial.Invoice_mail = payload.invoiceMail;
+  if (payload.contact !== undefined) partial.Contact = payload.contact;
+  if (payload.contactMail !== undefined)
+    partial.Contact_mail = payload.contactMail;
+  if (payload.contactPhone !== undefined)
+    partial.Contact_phone = payload.contactPhone;
+  if (payload.type !== undefined) partial.Type = payload.type;
+  if (payload.status !== undefined) partial.Status = payload.status ? 1 : 0;
 
   if (Object.keys(partial).length === 0) return toDTO(existing);
 
@@ -239,4 +387,10 @@ const updateEnterprise = async (enterpriseId, payload) => {
   return toDTO(updated ?? existing);
 };
 
-module.exports = { registerEnterprise, listAll, findById, createEnterprise, updateEnterprise };
+module.exports = {
+  registerEnterprise,
+  listAll,
+  findById,
+  createEnterprise,
+  updateEnterprise,
+};

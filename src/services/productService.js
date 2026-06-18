@@ -1,6 +1,19 @@
 const productRepo = require('../repositories/productRepo');
 const imageRepo   = require('../repositories/imageRepo');
 
+function toProductDTO(row) {
+  return {
+    productId:    row.product_id,
+    skuId:        row.SKU_ID,
+    gtin:         row.EAN,
+    description:  row.Product_dsc,
+    categoryName: row.commercial_category_dsc ?? null,
+    brand:        row.Brand ?? null,
+    status:       row.status,
+    primaryImage: row.image_url ?? null,
+  };
+}
+
 async function listByEnterprise(enterpriseId, filters = {}) {
   const { categoryId, search, page = 1, limit = 50 } = filters;
 
@@ -9,26 +22,20 @@ async function listByEnterprise(enterpriseId, filters = {}) {
     search,
   });
 
-  const total  = all.length;
-  const start  = (page - 1) * limit;
-  const paged  = all.slice(start, start + limit);
+  const total = all.length;
+  const start = (page - 1) * limit;
+  const paged = all.slice(start, start + limit);
 
-  const enriched = await Promise.all(
-    paged.map(async (p) => {
-      const images = await imageRepo.findByProduct(p.Product_id);
-      return { ...p, primaryImage: images[0]?.Blob_url ?? null, imageCount: images.length };
-    })
-  );
+  const products = paged.map(toProductDTO);
 
-  return { products: enriched, total, page: Number(page), limit: Number(limit) };
+  return { products, total, page: Number(page), limit: Number(limit) };
 }
 
 async function findById(productId, enterpriseId) {
   const product = await productRepo.findById(productId);
   if (!product) return null;
-  if (product.Enterprise_id !== enterpriseId) return null; // seguridad cross-empresa
-  const images = await imageRepo.findByProduct(productId);
-  return { ...product, images };
+  const images = await imageRepo.findByProduct(productId).catch(() => []);
+  return { ...toProductDTO(product), images };
 }
 
 module.exports = { listByEnterprise, findById };
