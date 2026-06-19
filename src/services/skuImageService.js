@@ -4,9 +4,8 @@
 //   RETSC_AI_SKU_FEATURES       — registro de imagen por SKU (fuente de verdad)
 //   RETSC_AI_SKU_IMAGE_METADATA — metadata extendida en key-value
 //   RETSC_LOG_IMAGE_UPLOAD      — log de cada intento de carga
-//   RETSC_OP_SKUS               — lookup de SKU por EAN
-//   RETSC_OP_PRODUCTS           — para resolver categoría del blob path
-//   RETSC_OP_CATEGORIES         — is_smart_dtc y slug del blob path
+//   RETSC_OP_SKUS               — lookup de SKU por EAN; detection_category_id define el blob path
+//   RETSC_OP_CATEGORIES         — is_smart_dtc y slug del blob path (via detection_category_id)
 //
 // Flujo de huérfanas:
 //   - EAN sin SKU → blob sube a 'huerfanas/{ean}_{view}.{ext}', log con process_status='ORPHAN'
@@ -29,6 +28,7 @@ const skuFeatureRepo        = require('../repositories/skuFeatureRepo');
 const skuImageLogRepo       = require('../repositories/skuImageLogRepo');
 const { getPool, sql }      = require('../config/db');
 const { uploadToContainer } = require('./blobStorageService');
+const queueService          = require('./queueService');
 
 const TRAINING_CONTAINER = () => process.env.AZURE_GLOBAL_TRAINING_CONTAINER || 'global-sku-training';
 
@@ -42,9 +42,11 @@ async function findSkuByEan(ean) {
   return r.recordset[0] ?? null;
 }
 
-// Resuelve el prefijo de blob para un SKU según la categoría de su producto.
-// Reutiliza normalizeName de Pasada 1 para garantizar que el slug coincida
-// con el prefix creado por aiInfrastructureService.
+// Resuelve el prefijo de blob para un SKU según su categoría de detección AI.
+// Usa detection_category_id de RETSC_OP_SKUS (la categoría DTC para el modelo AI),
+// no selected_category_id (que es la categoría comercial del retailer, nunca smart).
+// Reutiliza normalizeName para garantizar que el slug coincida con el prefix
+// creado por aiInfrastructureService.
 //
 // En producción todos los SKUs deberían tener categoría smart. Si no la tienen,
 // loguea un warning estructurado para detectar el problema sin bloquear el upload.
@@ -53,10 +55,9 @@ async function getBlobPrefixForSku(skuId, ean) {
   const r = await pool.request()
     .input('skuId', sql.Int, skuId)
     .query(`
-      SELECT c.Category_dsc, c.is_smart_dtc, c.Category_id, p.product_id
+      SELECT c.Category_dsc, c.is_smart_dtc, c.Category_id
       FROM RETSC_OP_SKUS s
-      JOIN RETSC_OP_PRODUCTS p ON p.product_id = s.product_id
-      LEFT JOIN RETSC_OP_CATEGORIES c ON c.Category_id = p.Category_id
+      LEFT JOIN RETSC_OP_CATEGORIES c ON c.Category_id = s.detection_category_id
       WHERE s.SKU_ID = @skuId
     `);
   const row = r.recordset[0];
@@ -253,7 +254,15 @@ const processBatch = async ({ files, uploadedBy, enterpriseId, onProgress }) => 
       // 11. Actualizar RETSC_OP_SKUS si es primera imagen
       if (isPrimary) await markSkuFirstImage(sku.SKU_ID, url);
 
-      // 12. Log de éxito
+      // 12. Encolar para procesamiento cognitivo (OCR + embeddings) — no bloquea
+      await queueService.enqueueSkuImageProcessing({
+        skuId:     sku.SKU_ID,
+        featureId: feature.feature_id,
+        imageUrl:  url,
+        ean,
+      });
+
+      // 13. Log de éxito
       await skuImageLogRepo.insertLog({
         enterpriseId, uploadBatchId: batchId,
         skuId: sku.SKU_ID, ean, imageName: file.originalname,
@@ -375,6 +384,14 @@ const resolveOrphansForSku = async (skuId, ean) => {
       });
 
       if (isPrimary) await markSkuFirstImage(skuId, orphan.image_url);
+
+      // La huérfana ahora tiene SKU → encolar para procesamiento cognitivo
+      await queueService.enqueueSkuImageProcessing({
+        skuId,
+        featureId: feature.feature_id,
+        imageUrl:  orphan.image_url,
+        ean,
+      });
 
       await skuImageLogRepo.markAdopted(orphan.image_log_id, skuId);
 
