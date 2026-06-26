@@ -69,6 +69,34 @@ const insertLog = async ({
   return r.recordset[0]?.image_log_id ?? null;
 };
 
+// Registra el resultado de una validación de calidad de imagen (Issue 6.1).
+// process_status = 'QUALITY_CHECK'
+// image_status   = resultado: 'VALID' | 'LOW_RESOLUTION' | 'BLURRY' | 'POOR_LIGHTING'
+// error_message  = lista de todos los fallos (puede haber más de uno) o null si VALID.
+// NOTA: upload_batch_id es NOT NULL → se usa un UUID fijo de sistema para estas filas.
+const insertValidationLog = async ({
+  enterpriseId,
+  skuId,
+  featureId,
+  imageUrl,
+  validationStatus,
+  failures,
+}) => {
+  const VALIDATION_BATCH = '00000000-0000-0000-0000-000000000001';
+  const errorMessage = failures && failures.length > 0 ? failures.join(', ') : null;
+
+  return insertLog({
+    enterpriseId,
+    uploadBatchId: VALIDATION_BATCH,
+    skuId:         skuId ?? null,
+    imageUrl:      imageUrl ?? null,
+    imageStatus:   validationStatus,
+    processStatus: 'QUALITY_CHECK',
+    errorCode:     validationStatus !== 'VALID' ? validationStatus : null,
+    errorMessage,
+  });
+};
+
 // Actualiza sku_id, process_status e image_status de un log al adoptar una huérfana.
 const markAdopted = async (imageLogId, skuId) => {
   const pool = await getPool();
@@ -104,4 +132,4 @@ const findOrphansByEan = async (ean) => {
   return r.recordset;
 };
 
-module.exports = { insertLog, markAdopted, findOrphansByEan };
+module.exports = { insertLog, insertValidationLog, markAdopted, findOrphansByEan };
