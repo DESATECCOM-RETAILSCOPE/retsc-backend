@@ -146,12 +146,14 @@ const retryForCategory = async (categoryId) => {
     return provisionForCategory({ categoryId, categoryName: cat.Category_dsc });
   }
 
-  // Reintentar blob marker si el container está en PENDING_AZURE
-  const existingContainer = await globalBlobContainerRepo.findByContainerName(containerName);
-  if (existingContainer && existingContainer.status === 'PENDING_AZURE') {
+  // Reintentar blob marker si el prefijo específico no existe en Azure.
+  // NOTA: no verificamos el status del container (compartido entre todas las categorías)
+  // sino si el blob de ESTA categoría fue creado — porque el container puede estar ACTIVE
+  // para otra categoría aunque este prefijo nunca se haya subido.
+  const prefixAlreadyExists = await blobStorageService.prefixExists({ containerName, prefix });
+  if (!prefixAlreadyExists) {
     try {
       await blobStorageService.createMarker({ containerName, prefix });
-      await globalBlobContainerRepo.updateStatus(existingContainer.global_container_id, 'ACTIVE');
     } catch (err) {
       errors.push(`Blob marker: ${err.message}`);
     }
