@@ -56,4 +56,36 @@ async function createProject(name) {
 // TODO: agregar triggerTraining(projectId) para disparar el entrenamiento desde un endpoint admin.
 // TODO: agregar getPublishedIterations(projectId) para obtener el modelo publicado.
 
-module.exports = { isConfigured, createProject };
+// Sube una imagen a Custom Vision SIN regiones para que el equipo DTC anote después (Issue 7.2 / #42).
+// Devuelve { stub, cvImageId }.
+//
+// Si !isConfigured() o projectId es null (modelo aún en PENDING): devuelve stub con ID simulado.
+// Esto permite probar el flujo end-to-end en mock sin bloquear por credenciales.
+//
+// tagId resuelve el canal de la foto (OMT/DTT/CONVENIENCE → tag de Custom Vision).
+// El mapeo de canal a tagId vendrá del Issue #35. Por ahora se pasa null en stub
+// o desde env opcionales CV_TAG_OMT / CV_TAG_DTT / CV_TAG_CONVENIENCE.
+//
+// TODO: implementar cuando las credenciales estén disponibles:
+//   const { TrainingAPIClient } = require('@azure/cognitiveservices-customvision-training');
+//   const { ApiKeyCredentials } = require('@azure/ms-rest-js');
+//   const client = new TrainingAPIClient(
+//     new ApiKeyCredentials({ inHeader: { 'Training-key': process.env.CUSTOM_VISION_TRAINING_KEY } }),
+//     process.env.CUSTOM_VISION_ENDPOINT
+//   );
+//   const result = await client.createImagesFromData(projectId, buffer, {
+//     tagIds: tagId ? [tagId] : [],
+//   });
+//   return { stub: false, cvImageId: result.images[0].image.id };
+const crypto = require('crypto');
+
+async function createImageFromData(projectId, _buffer, _tagId) {
+  if (!isConfigured() || !projectId) {
+    return { stub: true, cvImageId: `stub-${crypto.randomUUID()}` };
+  }
+  // TODO: implementar llamada real al SDK de Custom Vision (ver bloque arriba).
+  console.warn('[customVision] isConfigured=true pero createImageFromData aún no implementado. Devolviendo stub.');
+  return { stub: true, cvImageId: `stub-${crypto.randomUUID()}` };
+}
+
+module.exports = { isConfigured, createProject, createImageFromData };

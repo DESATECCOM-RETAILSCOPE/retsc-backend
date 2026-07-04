@@ -10,6 +10,10 @@
 //
 // NOTA: se asume que Photo_id es IDENTITY (autoincremental), por eso insert() no lo
 // envía. Si en la BD no fuera IDENTITY, habría que pasar Photo_id explícito.
+//
+// Issue 7.2: se agrega findByHashGlobal para el dedup de fotos globales (sin enterprise).
+// Las fotos globales tienen ENTERPRISE_ID=NULL; el dedup por enterprise de assessPhoto
+// no aplica para este flujo.
 
 const { getPool, sql } = require('../config/db');
 
@@ -62,4 +66,19 @@ const insert = async (photo) => {
   return r.recordset[0];
 };
 
-module.exports = { findByHash, insert };
+// Dedup global (Issue 7.2): ¿ya existe una foto global (ENTERPRISE_ID IS NULL) con este hash?
+// Devuelve la fila existente o null. Se usa en el flujo de carga de fotos de góndola globales
+// para evitar duplicados en el dataset de entrenamiento sin acotar por enterprise.
+const findByHashGlobal = async (hash) => {
+  const pool = await getPool();
+  const r = await pool.request()
+    .input('hash', sql.VarChar(64), hash)
+    .query(`
+      SELECT TOP 1 *
+      FROM ${TABLE}
+      WHERE image_hash = @hash AND ENTERPRISE_ID IS NULL
+    `);
+  return r.recordset[0] ?? null;
+};
+
+module.exports = { findByHash, findByHashGlobal, insert };
