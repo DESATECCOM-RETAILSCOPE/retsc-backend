@@ -65,4 +65,31 @@ async function assessPhoto(input, { enterpriseId } = {}) {
   };
 }
 
-module.exports = { assessPhoto };
+// Helper para el flujo de fotos GLOBALES (Issue 7.2): ejecuta solo los criterios de
+// píxeles (resolución, nitidez, brillo) sin el dedup por enterprise.
+//
+// El dedup de fotos globales (sin enterprise) se hace por separado en
+// shelfPhotoUploadService usando shelfPhotoRepo.findByHashGlobal().
+// Se exporta para que ese servicio no duplique la lógica de métricas.
+//
+// Devuelve { accepted, errorCode, errors[], hash, metrics } — sin qualityStatus ni
+// el campo 'errors[]' de DUPLICATE_IMAGE que solo aplica al flujo por enterprise.
+async function validateQualityMetrics(input) {
+  const errors = [];
+
+  const { errors: pixelErrors, metrics } = await validateImageQuality(input);
+  errors.push(...pixelErrors);
+
+  const hash = typeof input === 'string' ? await hashFile(input) : await hashBuffer(input);
+
+  const accepted  = errors.length === 0;
+  return {
+    accepted,
+    errorCode: accepted ? null : firstByPriority(errors),
+    errors,
+    hash,
+    metrics,
+  };
+}
+
+module.exports = { assessPhoto, validateQualityMetrics };

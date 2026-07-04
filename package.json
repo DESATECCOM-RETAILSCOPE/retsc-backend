@@ -5,12 +5,13 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
+    "predev": "fuser -k 3000/tcp 2>/dev/null || true",
     "dev": "nodemon server.js",
     "backfill:smart-categories": "node scripts/backfill-smart-categories.js"
   },
   "dependencies": {
     "@azure/storage-blob": "^12.31.0",
-    "@azure/storage-queue": "^12.30.0",
+    "@azure/storage-queue": "^12.31.0",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",

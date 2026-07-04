@@ -12,6 +12,7 @@ const skuRoutes                         = require('./routes/skuRoutes');
 const enterpriseCommercialCategoryRoutes = require('./routes/enterpriseCommercialCategoryRoutes');
 const annotationRoutes                  = require('./routes/annotationRoutes');
 const modelRoutes                       = require('./routes/modelRoutes');
+const shelfPhotoRoutes                  = require('./routes/shelfPhotoRoutes');
 const authMiddleware                    = require('./middlewares/authMiddleware');
 const jobRepo                  = require('./repositories/jobRepo');
 
@@ -39,6 +40,7 @@ app.use('/api/skus',                               skuRoutes);
 app.use('/api/enterprises/me/enterprise-categories', authMiddleware, enterpriseCommercialCategoryRoutes);
 app.use('/api/annotations',                authMiddleware, annotationRoutes);
 app.use('/api/models',                     authMiddleware, modelRoutes);
+app.use('/api/shelf-photos',               authMiddleware, shelfPhotoRoutes);
 
 // Recovery al startup: jobs que quedaron RUNNING de una ejecución anterior → FAILED
 jobRepo.failStaleRunning('Servidor reiniciado durante el procesamiento')
