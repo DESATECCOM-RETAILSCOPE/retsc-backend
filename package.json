@@ -5,7 +5,6 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "predev": "fuser -k 3000/tcp 2>/dev/null || true",
     "dev": "nodemon server.js",
     "backfill:smart-categories": "node scripts/backfill-smart-categories.js"
   },

@@ -113,7 +113,7 @@ const provisionForCategory = async ({ categoryId, categoryName }) => {
           customvisionProjectId: project.id,
           predictionResourceId:  process.env.CUSTOM_VISION_PREDICTION_RESOURCE_ID || null,
         });
-        await aiModelRepo.updateStatus(model.detection_model_id, 'READY');
+        await aiModelRepo.updateStatus(model.detection_model_id, 'PROJECT_CREATED');
       }
     } catch (err) {
       errors.push(`Custom Vision: ${err.message}`);
@@ -168,7 +168,7 @@ const retryForCategory = async (categoryId) => {
           customvisionProjectId: project.id,
           predictionResourceId:  process.env.CUSTOM_VISION_PREDICTION_RESOURCE_ID || null,
         });
-        await aiModelRepo.updateStatus(existingModel.detection_model_id, 'READY');
+        await aiModelRepo.updateStatus(existingModel.detection_model_id, 'PROJECT_CREATED');
       }
     } catch (err) {
       errors.push(`Custom Vision: ${err.message}`);

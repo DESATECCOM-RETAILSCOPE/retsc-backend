@@ -7,6 +7,7 @@ function toProductDTO(row) {
     skuId:        row.SKU_ID,
     gtin:         row.EAN,
     description:  row.Product_dsc,
+    categoryId:   row.Category_id ?? null,
     categoryName: row.commercial_category_dsc ?? null,
     brand:        row.Brand ?? null,
     status:       row.status,
