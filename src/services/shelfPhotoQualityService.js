@@ -65,4 +65,20 @@ async function assessPhoto(input, { enterpriseId } = {}) {
   };
 }
 
-module.exports = { assessPhoto };
+// Validación de calidad solo de píxeles (sin dedup de BD).
+// Usada por el flujo de góndola global donde no hay enterprise_id y el dedup
+// se hace por separado sobre ENTERPRISE_ID IS NULL.
+async function validateQualityMetrics(input) {
+  const { errors, metrics } = await validateImageQuality(input);
+  const hash = typeof input === 'string' ? await hashFile(input) : await hashBuffer(input);
+  return {
+    accepted: errors.length === 0,
+    errorCode: errors.length ? firstByPriority(errors) : null,
+    errors,
+    hash,
+    qualityStatus: errors.length === 0 ? 'PASSED' : 'REJECTED',
+    metrics,
+  };
+}
+
+module.exports = { assessPhoto, validateQualityMetrics };

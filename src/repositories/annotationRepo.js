@@ -121,6 +121,51 @@ const countNewValidatedPhotos = async (categoryId, sinceDate) => {
   return r.recordset[0].n;
 };
 
+// Inserta una anotación pendiente de revisión. Los bbox_* pueden ser null (sin coordenadas
+// aún). canal es obligatorio para el flujo de góndola (OMT/DTT/CONVENIENCE).
+const insert = async (annotation) => {
+  const pool = await getPool();
+  const r = await pool.request()
+    .input('photoId',    sql.Int,         annotation.photo_id)
+    .input('categoryId', sql.Int,         annotation.dtc_category_id)
+    .input('bboxLeft',   sql.Float,       annotation.bbox_left   ?? null)
+    .input('bboxTop',    sql.Float,       annotation.bbox_top    ?? null)
+    .input('bboxWidth',  sql.Float,       annotation.bbox_width  ?? null)
+    .input('bboxHeight', sql.Float,       annotation.bbox_height ?? null)
+    .input('source',     sql.VarChar(50), annotation.source      ?? 'upload')
+    .input('isValidated',sql.Bit,         annotation.is_validated ?? 0)
+    .input('canal',      sql.VarChar(20), annotation.canal       ?? null)
+    .query(`
+      INSERT INTO ${TABLE}
+        (photo_id, dtc_category_id, bbox_left, bbox_top, bbox_width, bbox_height,
+         source, is_validated, canal)
+      OUTPUT INSERTED.*
+      VALUES
+        (@photoId, @categoryId, @bboxLeft, @bboxTop, @bboxWidth, @bboxHeight,
+         @source, @isValidated, @canal)
+    `);
+  return r.recordset[0];
+};
+
+// Cuenta fotos con al menos una anotación validada para un category+canal dado.
+// Usado para el umbral de entrenamiento de Custom Vision (SHELF_TRAINING_THRESHOLD).
+const countValidatedApprovedByCategoryChannel = async (categoryId, canal) => {
+  const pool = await getPool();
+  const r = await pool.request()
+    .input('categoryId', sql.Int,         categoryId)
+    .input('canal',      sql.VarChar(20), canal)
+    .query(`
+      SELECT COUNT(DISTINCT a.photo_id) AS n
+      FROM   ${TABLE} a
+      JOIN   RETSC_EX_SHELFPHOTO p ON p.Photo_id = a.photo_id
+      WHERE  a.dtc_category_id = @categoryId
+        AND  a.canal           = @canal
+        AND  a.is_validated    = 1
+        AND  p.quality_status  = 'PASSED'
+    `);
+  return r.recordset[0].n;
+};
+
 module.exports = {
   findById,
   listByPhoto,
@@ -130,4 +175,6 @@ module.exports = {
   countByPhoto,
   countValidatedByPhoto,
   countNewValidatedPhotos,
+  insert,
+  countValidatedApprovedByCategoryChannel,
 };

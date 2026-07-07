@@ -62,4 +62,14 @@ const insert = async (photo) => {
   return r.recordset[0];
 };
 
-module.exports = { findByHash, insert };
+// Dedup GLOBAL: ¿ya existe una foto con este hash sin importar el enterprise?
+// Usado en el flujo de carga de góndola donde la foto es global (ENTERPRISE_ID = null).
+const findByHashGlobal = async (hash) => {
+  const pool = await getPool();
+  const r = await pool.request()
+    .input('hash', sql.VarChar(64), hash)
+    .query(`SELECT TOP 1 * FROM ${TABLE} WHERE image_hash = @hash AND ENTERPRISE_ID IS NULL`);
+  return r.recordset[0] ?? null;
+};
+
+module.exports = { findByHash, findByHashGlobal, insert };

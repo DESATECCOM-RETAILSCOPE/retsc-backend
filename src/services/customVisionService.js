@@ -56,4 +56,20 @@ async function createProject(name) {
 // TODO: agregar triggerTraining(projectId) para disparar el entrenamiento desde un endpoint admin.
 // TODO: agregar getPublishedIterations(projectId) para obtener el modelo publicado.
 
-module.exports = { isConfigured, createProject };
+// Registra una imagen de góndola en un proyecto de Custom Vision (object detection).
+// buffer: Buffer de la imagen
+// projectId: ID del proyecto Custom Vision
+// tagId: ID del tag a asignar (uno por categoría de góndola)
+// Devuelve { cvImageId } o { stub: true, cvImageId } si las credenciales no están disponibles.
+//
+// TODO: implementar con el SDK cuando lleguen las credenciales (ver createProject arriba).
+async function createImageFromData(buffer, projectId, tagId) {
+  if (!isConfigured()) {
+    const crypto = require('crypto');
+    return { stub: true, cvImageId: `stub-${crypto.randomUUID()}` };
+  }
+  console.warn('[customVision] isConfigured=true pero createImageFromData aún no implementado.');
+  return null;
+}
+
+module.exports = { isConfigured, createProject, createImageFromData };
