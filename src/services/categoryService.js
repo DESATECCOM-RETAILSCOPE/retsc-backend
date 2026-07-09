@@ -338,11 +338,27 @@ const listCommercialCategories = async (enterpriseId) => {
   }));
 };
 
+// Categorías inteligentes del enterprise para formularios de Góndola y Carga SKU.
+// Devuelve las smart categories únicas con metadatos de padre para que el upload
+// service pueda aplicar la regla "Si me da un hijo, grabar el papá".
+const listSmartByEnterprise = async (enterpriseId) => {
+  const rows = await enterpriseCategoryRepo.listSmartForEnterprise(enterpriseId);
+  return rows.map((r) => ({
+    enterpriseCategoryId: r.enterprise_category_id,
+    categoryId: r.category_id,
+    categoryDsc: r.category_dsc,
+    parentCategoryId: r.parent_category_id ?? null,
+    parentDsc: r.parent_dsc ?? null,
+    levelNo: r.level_no,
+  }));
+};
+
 module.exports = {
   listGlobal,
   listByEnterprise,
   replaceForEnterprise,
   listCommercialCategories,
+  listSmartByEnterprise,
   getRoots,
   getChildren,
   getById,

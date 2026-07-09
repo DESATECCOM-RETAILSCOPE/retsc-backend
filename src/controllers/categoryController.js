@@ -170,11 +170,23 @@ const listCommercialCategories = async (req, res) => {
   }
 };
 
+// GET /api/enterprises/me/smart-categories
+// Categorías inteligentes del enterprise para dropdowns de Góndola y Carga SKU.
+const listSmartByEnterprise = async (req, res) => {
+  try {
+    const categories = await categoryService.listSmartByEnterprise(req.user.enterpriseId);
+    return res.json({ success: true, categories });
+  } catch (err) {
+    return handleError(res, err);
+  }
+};
+
 module.exports = {
   listGlobal,
   listByEnterprise,
   replaceForEnterprise,
   listCommercialCategories,
+  listSmartByEnterprise,
   getRoots,
   getChildren,
   getById,
