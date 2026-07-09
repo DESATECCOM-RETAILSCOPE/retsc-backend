@@ -79,6 +79,26 @@ const correct = async (id, bbox, reviewerId) => {
   return r.recordset[0] ?? null;
 };
 
+// APROBAR FOTO COMPLETA: marca todas las anotaciones de una foto como
+// validadas y aprobadas en una sola operación. Retorna todas las anotaciones
+// actualizadas. Usado cuando el revisor aprueba la foto entera desde el canvas.
+const approvePhoto = async (photoId, reviewerId) => {
+  const pool = await getPool();
+  const r = await pool.request()
+    .input('photoId',  sql.Int, photoId)
+    .input('reviewer', sql.Int, reviewerId ?? null)
+    .query(`
+      UPDATE ${TABLE}
+      SET    is_validated      = 1,
+             photo_approved    = 1,
+             photo_reviewer_id = @reviewer,
+             photo_reviewed_at = GETDATE()
+      OUTPUT INSERTED.*
+      WHERE  photo_id = @photoId
+    `);
+  return r.recordset;
+};
+
 // RECHAZAR: elimina el registro. Devuelve cuántas filas se borraron.
 const remove = async (id) => {
   const pool = await getPool();
@@ -183,6 +203,7 @@ module.exports = {
   findById,
   listByPhoto,
   approve,
+  approvePhoto,
   correct,
   remove,
   countByPhoto,
