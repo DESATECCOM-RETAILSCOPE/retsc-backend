@@ -199,6 +199,98 @@ const countValidatedApprovedByCategoryChannel = async (categoryId, canal) => {
   return r.recordset[0].n;
 };
 
+// Devuelve una fila por foto agrupada por photo_id, con filtros opcionales.
+// Usado por GET /training/photos.
+//
+// status válidos: 'PENDING_ANNOTATION' | 'PENDING_REVIEW' | 'APPROVED' | 'REJECTED'
+// Si status es cualquier otro valor se ignora (no se filtra por estado).
+//
+// NOTA: los valores de status se mapean a condiciones SQL fijas en JS — nunca se
+// concatena input del usuario en el query, solo se elige qué cláusula agregar.
+const STATUS_CLAUSES = {
+  PENDING_ANNOTATION: ' AND is_validated = 0',
+  PENDING_REVIEW:     ' AND is_validated = 1 AND photo_approved IS NULL',
+  APPROVED:           ' AND photo_approved = 1',
+  REJECTED:           ' AND photo_approved = 0',
+};
+
+const listPhotos = async ({ categoryId, canal, status } = {}) => {
+  const pool = await getPool();
+  const req  = pool.request()
+    .input('categoryId', sql.Int, categoryId);
+
+  let whereExtra = '';
+
+  if (canal) {
+    req.input('canalFilter', sql.VarChar(20), canal);
+    whereExtra += ' AND canal = @canalFilter';
+  }
+
+  if (status && STATUS_CLAUSES[status]) {
+    whereExtra += STATUS_CLAUSES[status];
+  }
+
+  const r = await req.query(`
+    SELECT
+      photo_id,
+      MAX(blob_path)                   AS blob_path,
+      MAX(canal)                       AS canal,
+      MAX(dtc_category_id)             AS dtc_category_id,
+      COUNT(*)                         AS regionCount,
+      MAX(CAST(is_validated AS INT))   AS is_validated,
+      MAX(CAST(photo_approved AS INT)) AS photo_approved,
+      MIN(created_at)                  AS created_at
+    FROM ${TABLE}
+    WHERE dtc_category_id = @categoryId
+      ${whereExtra}
+    GROUP BY photo_id
+    ORDER BY MIN(created_at) DESC
+  `);
+  return r.recordset;
+};
+
+// Devuelve blob_path + canal + categoría de la foto y todas sus cajitas de anotación.
+// Usado por GET /training/photos/:photoId/regions.
+// Retorna null si no existe ninguna fila con ese photo_id.
+const getPhotoWithRegions = async (photoId) => {
+  const pool = await getPool();
+  const r = await pool.request()
+    .input('photoId', sql.Int, photoId)
+    .query(`
+      SELECT
+        photo_id,
+        blob_path,
+        canal,
+        dtc_category_id,
+        annotation_id,
+        bbox_left, bbox_top, bbox_width, bbox_height,
+        cv_region_id,
+        is_validated
+      FROM ${TABLE}
+      WHERE photo_id = @photoId
+      ORDER BY annotation_id
+    `);
+
+  if (!r.recordset.length) return null;
+
+  const first = r.recordset[0];
+  return {
+    photo_id:        first.photo_id,
+    blob_path:       first.blob_path,
+    canal:           first.canal,
+    dtc_category_id: first.dtc_category_id,
+    regions: r.recordset.map(row => ({
+      annotation_id: row.annotation_id,
+      bbox_left:     row.bbox_left,
+      bbox_top:      row.bbox_top,
+      bbox_width:    row.bbox_width,
+      bbox_height:   row.bbox_height,
+      cv_region_id:  row.cv_region_id,
+      is_validated:  row.is_validated,
+    })),
+  };
+};
+
 module.exports = {
   findById,
   listByPhoto,
@@ -211,4 +303,6 @@ module.exports = {
   countNewValidatedPhotos,
   insert,
   countValidatedApprovedByCategoryChannel,
+  listPhotos,
+  getPhotoWithRegions,
 };
