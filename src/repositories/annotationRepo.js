@@ -291,6 +291,36 @@ const getPhotoWithRegions = async (photoId) => {
   };
 };
 
+// Actualiza el estado de sincronización con Custom Vision de una anotación (Issue 8.2).
+// cvRegionId es OPCIONAL: si se omite, no se toca la columna (p. ej. en un fallo de CV no
+// queremos pisar un cv_region_id previo que sigue siendo válido en Custom Vision).
+// cv_sync_attempts se incrementa en cada llamada, haya éxito o fallo.
+//
+// NOTA: usa cv_sync_status, cv_sync_error, cv_sync_attempts — columnas ya presentes en BD
+// desde Fase 0 (confirmado con INFORMATION_SCHEMA), aunque no figuraban en el header de este
+// archivo (esquema verificado en el Issue 7.2, antes de que existieran). No requieren migración.
+const updateCvSync = async (id, { cvRegionId, syncStatus, syncError = null } = {}) => {
+  const pool = await getPool();
+  const req = pool.request()
+    .input('id',         sql.Int,          id)
+    .input('syncStatus', sql.VarChar(20),  syncStatus)
+    .input('syncError',  sql.VarChar(500), syncError ? String(syncError).slice(0, 500) : null);
+
+  const setRegion = cvRegionId !== undefined;
+  if (setRegion) req.input('cvRegionId', sql.VarChar(100), cvRegionId);
+
+  const r = await req.query(`
+    UPDATE ${TABLE}
+    SET    cv_sync_status   = @syncStatus,
+           cv_sync_error    = @syncError,
+           cv_sync_attempts = ISNULL(cv_sync_attempts, 0) + 1
+           ${setRegion ? ', cv_region_id = @cvRegionId' : ''}
+    OUTPUT INSERTED.*
+    WHERE  annotation_id = @id
+  `);
+  return r.recordset[0] ?? null;
+};
+
 module.exports = {
   findById,
   listByPhoto,
@@ -305,4 +335,5 @@ module.exports = {
   countValidatedApprovedByCategoryChannel,
   listPhotos,
   getPhotoWithRegions,
+  updateCvSync,
 };

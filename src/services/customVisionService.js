@@ -94,4 +94,81 @@ async function createImageFromData(projectId, _buffer, _tagId) {
   return { stub: true, cvImageId: `stub-${crypto.randomUUID()}` };
 }
 
-module.exports = { isConfigured, createProject, createImageFromData };
+// Issue 8.2 — sincronización de anotaciones (regiones) a Custom Vision.
+//
+// Formato verificado (Custom Vision Training API v3.3 — no se pudo abrir la página
+// interactiva de Microsoft Learn desde este entorno, se confirmó por búsqueda + consistencia
+// con el resto de esta API, que usa el mismo patrón de query params repetidos, p. ej. imageIds):
+//
+//   POST {endpoint}/customvision/v3.3/training/projects/{projectId}/images/regions
+//     body: { regions: [{ imageId, tagId, left, top, width, height }, ...] }   (máx. 64 por llamada)
+//     left/top/width/height van normalizados 0..1 — mismo formato que SQL, sin conversión.
+//     response: { created: [{ regionId, imageId, tagId, tagName, left, top, width, height, created }],
+//                 duplicated: [...], exceeded: [...] }
+//
+//   DELETE {endpoint}/customvision/v3.3/training/projects/{projectId}/images/regions?regionIds={id}
+//     regionIds es un parámetro repetible (regionIds=a&regionIds=b) para borrar varias a la vez;
+//     acá se usa de a una porque así lo pide la interfaz acordada con annotationSyncService.
+//     Devuelve 204 sin body.
+
+// Crea regiones (bounding boxes) para imágenes que ya existen en el proyecto.
+// regions: [{ imageId, tagId, left, top, width, height }] — coordenadas normalizadas 0..1.
+// Trocea automáticamente en lotes de 64 (límite de la API).
+// Devuelve el array combinado de regiones creadas (con su regionId).
+// CONFIRMADO contra un proyecto CV real: el orden de `created[]` NO coincide con el orden de
+// envío — el llamador debe correlacionar por coordenadas (left/top/width/height), no por índice.
+// Ver annotationSyncService.coordsMatch() para el patrón ya usado en este repo.
+async function createImageRegions(projectId, regions) {
+  if (!regions || regions.length === 0) return [];
+
+  const BATCH_SIZE = 64;
+  const created = [];
+
+  for (let i = 0; i < regions.length; i += BATCH_SIZE) {
+    const batch = regions.slice(i, i + BATCH_SIZE);
+    const body = {
+      regions: batch.map(r => ({
+        imageId: r.imageId,
+        tagId:   r.tagId,
+        left:    r.left,
+        top:     r.top,
+        width:   r.width,
+        height:  r.height,
+      })),
+    };
+
+    const result = await cvFetch(`projects/${projectId}/images/regions`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+
+    created.push(...(result?.created ?? []));
+  }
+
+  return created;
+}
+
+// Elimina una región de una imagen en Custom Vision. No lanza si regionId es vacío (nada que borrar).
+async function deleteImageRegion(projectId, regionId) {
+  if (!regionId) return;
+  await cvFetch(`projects/${projectId}/images/regions?regionIds=${encodeURIComponent(regionId)}`, {
+    method: 'DELETE',
+  });
+}
+
+// Elimina imágenes completas de un proyecto (uso opcional al rechazar una foto: además de
+// borrar sus regiones, saca la imagen entera del set de entrenamiento).
+async function deleteImages(projectId, imageIds) {
+  if (!imageIds || imageIds.length === 0) return;
+  const params = imageIds.map(id => `imageIds=${encodeURIComponent(id)}`).join('&');
+  await cvFetch(`projects/${projectId}/images?${params}`, { method: 'DELETE' });
+}
+
+module.exports = {
+  isConfigured,
+  createProject,
+  createImageFromData,
+  createImageRegions,
+  deleteImageRegion,
+  deleteImages,
+};

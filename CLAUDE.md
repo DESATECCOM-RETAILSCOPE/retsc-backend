@@ -60,6 +60,15 @@ Copy `.env.example` to `.env` and fill in values. Required variables:
 - `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM` — email delivery; leave `SMTP_HOST` empty for mock mode (logs to console)
 - `AZURE_GLOBAL_TRAINING_CONTAINER` — blob container for AI training images (default: `global-sku-training`); shared by both the category AI infra flow and the SKU image ingestion flow
 - `CUSTOM_VISION_TRAINING_KEY`, `CUSTOM_VISION_PREDICTION_KEY`, `CUSTOM_VISION_ENDPOINT`, `CUSTOM_VISION_PREDICTION_RESOURCE_ID` — Azure Custom Vision credentials; leave unset until credentials arrive (`customVisionService.js` is a stub that returns null when these are missing)
+- `AZURE_VISION_ENDPOINT`, `AZURE_VISION_KEY` — Azure AI Vision (Image Analysis) credentials; `azureVisionService.js` remains a permissive stub (always accepts) regardless, until the SDK integration is finished
+- `AZURE_GLOBAL_SHELF_CONTAINER` — blob container for shelf-photo training images (default: `global-shelf-training`)
+- `AZURE_QUEUE_NAME` — Azure Queue Storage queue name for async SKU image OCR/embeddings processing (default: `sku-image-processing`); `queueService.js` no-ops (never throws) if `AZURE_STORAGE_CONNECTION_STRING` is unset
+- `SHELF_TRAINING_THRESHOLD` — validated+approved photo count per category/canal that flips a model to `IMAGES_UPLOADED` (default: 15)
+- `MODEL_RETRAIN_MIN_PHOTOS` — new validated photos required since last training before retrain is allowed (default: 20)
+- `MODEL_METRIC_TOLERANCE` — tolerance when comparing new vs. active model `mean_ap` (default: 0)
+- `QUALITY_CAPTION_MIN_CONFIDENCE` — min caption-confidence threshold for shelf photo uploads (default: 0.6)
+- `ANNOTATION_VALIDATOR_ROLES`, `SHELF_UPLOAD_ROLES`, `MODEL_MANAGER_ROLES` — CSV role lists gating annotation review, shelf photo upload, and model management routes respectively (defaults: `Admin,Supervisor`, `Admin`, `Admin`)
+- `CV_TAG_OMT`, `CV_TAG_DTT`, `CV_TAG_CONVENIENCE` — Custom Vision tag IDs per `canal`, used when registering shelf photos
 
 ## Architecture
 
@@ -87,6 +96,37 @@ uploads-temp/                          Temporary files during pipeline runs; aut
 ```
 
 `src/repositories/jsonRepo.js` is dead code — it exists but no repository imports it. All real persistence uses MSSQL.
+
+### Shelf photo annotation & model training pipeline (Issues 3.1.1 follow-on, 8.5, 42)
+
+Distinct from the SKU-level AI infra above, this pipeline trains **object-detection models on shelf/gondola photos** for smart-DTC categories:
+
+```
+POST /api/shelf-photos/upload  (shelfPhotoUploadService.uploadShelfPhoto)
+  1. validate canal (OMT|DTT|CONVENIENCE) + category is_smart_dtc=1
+  2. shelfPhotoQualityService.validateQualityMetrics()  → resolution/blur/brightness (sharp)
+  3. azureVisionService.analyzeCaption() + isShelf()     → STUB, always permissive
+  4. dedup via SHA-256 (shelfPhotoRepo.findByHashGlobal, global scope, enterprise_id=NULL)
+  5. blobStorageService.uploadToContainer()              → global-shelf-training/dtc-{slug}/{canal}/
+  6. customVisionService.createImageFromData()           → cvImageId (stub if unconfigured)
+  7. annotationRepo.insert()                              → RETSC_AI_TRAINING_ANNOTATIONS (unvalidated)
+  8. threshold check → aiModelRepo.updateStatus(..., 'IMAGES_UPLOADED') when SHELF_TRAINING_THRESHOLD reached
+
+Annotation review (/api/annotations)     — human validates/corrects/rejects bounding boxes
+  └─► modelVersioningService (/api/models) — retrain/compare-metrics/approve/reject/rollback versions
+```
+
+Key files: `src/services/shelfPhotoUploadService.js` (orchestrator), `src/services/shelfPhotoQualityService.js` (pixel quality gate, mirrors `imageValidationService.js` used by the SKU pipeline), `src/services/azureVisionService.js` (stub — see below), `src/services/annotationService.js` + `src/repositories/annotationRepo.js`, `src/services/modelVersioningService.js`.
+
+`src/services/azureVisionService.js` is a **stub**: `isConfigured()` checks `AZURE_VISION_ENDPOINT`/`AZURE_VISION_KEY`, but `analyzeCaption()` and `isShelf()` always return permissive stub results regardless — the real SDK (`@azure-rest/ai-vision-image-analysis`) is not installed yet, only TODO'd.
+
+`RETSC_AI_TRAINING_ANNOTATIONS` columns: `annotation_id` (PK), `photo_id`, `dtc_category_id`, `bbox_left/top/width/height` (float, normalized 0–1), `source`, `is_validated` (bit), `photo_approved` (bit), `photo_notes`, `photo_reviewed_at`, `photo_reviewer_id`, `cv_region_id`, `canal` (`OMT`|`DTT`|`CONVENIENCE`, NOT NULL). A photo cannot be left with zero annotations — `annotationService.reject()` returns 409 if it's the last one for that photo. `annotationRepo.approvePhoto()` (bulk-approve all annotations for a photo) and `listPhotos()`/`getPhotoWithRegions()` exist in the repo but have **no route wired to them yet** — dead code pending a future "review queue" endpoint.
+
+`RETSC_EX_SHELFPHOTO` gained quality/dedup columns via migration 005 (`image_hash`, `quality_status`, `quality_error_code`, `width`, `height`, `blur_score`, `brightness`); unique filtered index on `(ENTERPRISE_ID, image_hash)`.
+
+`RETSC_AI_DETECTION_MODELS` gained versioning columns via migration 006 (`precision_score`, `recall_score`, `mean_ap`, `metrics_json`, `approved_by`, `approved_at`). `modelVersioningService.js` manages the retrain lifecycle on top of the same table `aiInfrastructureService.js` initially provisions: retrain requires ≥`MODEL_RETRAIN_MIN_PHOTOS` (default 20) new validated photos since the active version's `trained_at`; a new version whose `mean_ap` is worse than the active one goes to `AWAITING_APPROVAL` instead of auto-activating; rollback reactivates a prior (never-deleted) version.
+
+Role gates (CSV env vars, all default to `Admin` unless noted): `ANNOTATION_VALIDATOR_ROLES` (default `Admin,Supervisor`) for approve/correct/reject, `SHELF_UPLOAD_ROLES` for photo upload, `MODEL_MANAGER_ROLES` for all `/api/models` routes.
 
 ### Smart category AI infrastructure (Issue 3.1.1)
 
@@ -129,6 +169,8 @@ Each file in `src/repositories/` maps to one SQL table:
 | `skuFeatureRepo.js` | `RETSC_AI_SKU_FEATURES` + `RETSC_AI_SKU_IMAGE_METADATA` |
 | `skuImageLogRepo.js` | `RETSC_LOG_IMAGE_UPLOAD` (shared with `imageRepo.js`, different columns) |
 | `jobRepo.js` | `RETSC_LOG_JOBS` |
+| `annotationRepo.js` | `RETSC_AI_TRAINING_ANNOTATIONS` |
+| `shelfPhotoRepo.js` | `RETSC_EX_SHELFPHOTO` |
 
 `RETSC_OP_SKUS` is accessed directly by `skuImageService.js` (via inline SQL, no dedicated repo) for EAN lookups and updating `image_url`/`has_visual_variant` on first image upload.
 
@@ -170,7 +212,25 @@ Forgot password flow: `POST /api/auth/forgot-password` accepts `{ identifier }` 
 
 ### Middleware mounting pattern
 
-`src/app.js` applies `authMiddleware` globally for some route groups (e.g. `/api/users`, `/api/categories`, `/api/roles`), but other groups (`/api/enterprises`, `/api/products`) do **not** receive it at mount time — those route files apply `authMiddleware` inline per protected route. When adding a new route file, check whether to apply auth at the app level or per route. `requireAdmin` is always applied inline after `authMiddleware`, never globally.
+`src/app.js` applies `authMiddleware` globally for some route groups, but other groups do **not** receive it at mount time — those route files apply `authMiddleware` inline per protected route instead. When adding a new route file, check whether to apply auth at the app level or per route. `requireAdmin` is always applied inline after `authMiddleware`, never globally. Current mount table:
+
+```
+/api/auth                                    — no global auth (each route decides)
+/api/enterprises                             — no global auth (each route decides)
+/api/products                                — no global auth (each route decides)
+/api/sku-images                              — no global auth (each route decides)
+/api/skus                                    — no global auth (each route decides)
+/api/users                        authMiddleware
+/api/categories                   authMiddleware
+/api/roles                        authMiddleware
+/api/enterprises/me/categories               authMiddleware
+/api/enterprises/me/enterprise-categories    authMiddleware   (enterpriseCommercialCategoryRoutes.js)
+/api/annotations                  authMiddleware  + requireRole(ANNOTATION_VALIDATOR_ROLES) inline on approve/correct/reject
+/api/models                        authMiddleware  + requireRole(MODEL_MANAGER_ROLES) inline on all routes
+/api/shelf-photos                  authMiddleware  + requireRole(SHELF_UPLOAD_ROLES) inline on upload
+```
+
+`enterpriseCommercialCategoryRoutes.js` is distinct from `enterpriseCategoryRoutes.js` — it exposes `GET /api/enterprises/me/enterprise-categories` (commercial categories) and `GET /api/enterprises/me/enterprise-categories/smart` (only `is_smart_dtc=1` categories, used to populate SKU-upload/shelf-photo-upload dropdowns), both handled by `categoryController.js` (no separate controller file).
 
 ### API routes
 
@@ -210,6 +270,7 @@ Forgot password flow: `POST /api/auth/forgot-password` accepts `{ identifier }` 
 | `GET /api/enterprises/me/categories` | Bearer | Enterprise's selected categories |
 | `PUT /api/enterprises/me/categories` | Bearer | Atomically replace enterprise category selection |
 | `GET /api/enterprises/me/enterprise-categories` | Bearer | Enterprise's commercial categories with `enterprise_category_id` (used for SKU upload) |
+| `GET /api/enterprises/me/enterprise-categories/smart` | Bearer | Enterprise's smart-DTC categories only |
 | `GET /api/products` | Bearer | Products with pagination/search |
 | `POST /api/products/upload-excel` | Bearer | Parse `.xlsx`; returns rows + errors |
 | `POST /api/products/upload-images` | Bearer | Up to 200 images → `uploads-temp/<jobId>/` |
@@ -217,6 +278,19 @@ Forgot password flow: `POST /api/auth/forgot-password` accepts `{ identifier }` 
 | `GET /api/products/processing-status/:jobId` | Bearer | Poll pipeline state |
 | `GET /health` | No | `{status, timestamp}` |
 | `POST /api/categories/:id/retry-ai-infra` | Bearer + Admin | Reintenta provisioning IA de categoría smart |
+| `POST /api/shelf-photos/upload` | Bearer + role | Upload shelf photo → quality gate → dedup → blob → Custom Vision → annotation row |
+| `GET /api/annotations/photo/:photoId` | Bearer | List annotations for a photo |
+| `GET /api/annotations/photo/:photoId/readiness` | Bearer | `{ total, validated, ready }` — gates sending photo to Custom Vision |
+| `PATCH /api/annotations/:id/approve` | Bearer + role | Mark annotation validated |
+| `PATCH /api/annotations/:id` | Bearer + role | Correct bbox coords (normalized 0–1); marks validated |
+| `DELETE /api/annotations/:id` | Bearer + role | Reject/delete annotation; 409 if it's the photo's last one |
+| `GET /api/models/category/:categoryId` | Bearer + role | List all model versions for a category |
+| `GET /api/models/category/:categoryId/can-retrain` | Bearer + role | Whether ≥`MODEL_RETRAIN_MIN_PHOTOS` new validated photos exist |
+| `POST /api/models/category/:categoryId/retrain` | Bearer + role | Start a new training version (status=TRAINING) |
+| `POST /api/models/:modelId/complete` | Bearer + role | Save metrics; auto-activate if not worse, else AWAITING_APPROVAL |
+| `POST /api/models/:modelId/approve` | Bearer + role | Approve an AWAITING_APPROVAL version and activate it |
+| `POST /api/models/:modelId/reject` | Bearer + role | Reject an AWAITING_APPROVAL version (previous stays active) |
+| `POST /api/models/category/:categoryId/rollback/:version` | Bearer + role | Reactivate a prior (never-deleted) version |
 
 ### Enterprise registration
 
@@ -269,6 +343,8 @@ Flow in `src/services/skuService.js`:
 4. `detection_category_id` on `RETSC_OP_ENTERPRISE_SKUS` is set from `resolved_category_id ?? selected_category_id` of the enterprise category row.
 
 `skuService.js` uses GTIN length heuristics to fix leading-zero loss: a 7-digit string is padded to 8, an 11-digit string to 12.
+
+Supporting services for the pipelines above: `imageValidationService.js` (pre-OCR quality gate for SKU images: resolution/blur/brightness, mirrors `shelfPhotoQualityService.js`), `hierarchyService.js` (blob path depth decisions for the legacy product pipeline), `matchingService.js` (pairs uploaded image filenames to Excel rows by GTIN prefix), `aiService.js` (legacy pipeline's fallback registration of `RETSC_AI_DETECTION_MODELS` rows if `aiInfrastructureService` hasn't already created one), `queueService.js` (enqueues SKU images onto Azure Queue Storage for an external Function to run OCR/embeddings; never throws, no-ops if unconfigured).
 
 ### Excel parsing (legacy product pipeline)
 
@@ -335,6 +411,14 @@ Migración `migrations/003_add_prefix_to_global_blob_containers.sql` agrega la c
 ### 8. ~~Backfill de categorías smart existentes — script pendiente de crear~~ — COMPLETADO
 
 Script creado en `scripts/backfill-smart-categories.js`. Correr con `npm run backfill:smart-categories -- --dry-run` primero, luego sin `--dry-run`. Pre-requisito: migración 003 debe estar aplicada. El script es idempotente.
+
+### 10. Annotation "review queue" endpoints not wired
+
+`annotationRepo.js` has `listPhotos({categoryId, canal, status})` and `getPhotoWithRegions(photoId)` — intended for a photo-review-queue listing screen (status: `PENDING_ANNOTATION|PENDING_REVIEW|APPROVED|REJECTED`) and `approvePhoto(photoId, reviewerId)` (bulk-approve every annotation on a photo). None of these are called by `annotationController.js`/`annotationRoutes.js` yet — no HTTP route exposes them.
+
+### 11. Azure Vision integration pending
+
+`src/services/azureVisionService.js` is a stub: `analyzeCaption()` and `isShelf()` always return permissive results even when `AZURE_VISION_ENDPOINT`/`AZURE_VISION_KEY` are set. To finish: install `@azure-rest/ai-vision-image-analysis` + `@azure/core-auth` and implement the two TODO'd calls.
 
 ### 9. Enterprise registration not wrapped in a SQL transaction
 
