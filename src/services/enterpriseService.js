@@ -257,6 +257,21 @@ const listAll = async () => {
   );
 };
 
+// Only the enterprises the user is actively linked to (RETSC_OP_USRSXENTERP),
+// mapped through the same DTO as listAll so callers get an identical shape.
+const listByUser = async (userId) => {
+  const enterprises = await enterpriseRepo.listByUser(userId);
+  return Promise.all(
+    enterprises.map(async (e) => {
+      const relations = await userEnterpriseRepo.findByEnterprise(
+        e.Enterprise_id,
+      );
+      const activeUsersCount = relations.filter((r) => !!r.Status).length;
+      return toDTO(e, activeUsersCount);
+    }),
+  );
+};
+
 const findById = async (enterpriseId) => {
   const e = await enterpriseRepo.findById(enterpriseId);
   if (!e) throw serviceError("Empresa no encontrada", 404);
@@ -390,6 +405,7 @@ const updateEnterprise = async (enterpriseId, payload) => {
 module.exports = {
   registerEnterprise,
   listAll,
+  listByUser,
   findById,
   createEnterprise,
   updateEnterprise,

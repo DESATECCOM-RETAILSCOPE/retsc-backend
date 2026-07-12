@@ -33,9 +33,13 @@ const registerEnterprise = async (req, res) => {
 };
 
 // GET /api/enterprises/list
+// NOTA: RETSC_OP_ROLES has no platform-wide admin role — "Admin" (checked by
+// requireAdmin on this route) is assigned per user-enterprise relation, so
+// every enterprise's own Admin would otherwise see every other enterprise
+// too. Always scope the result to the caller's own linked enterprises.
 const listEnterprises = async (req, res) => {
   try {
-    const enterprises = await enterpriseService.listAll();
+    const enterprises = await enterpriseService.listByUser(req.user.userId);
     return res.json({ success: true, enterprises });
   } catch (err) { return handleError(res, err); }
 };
