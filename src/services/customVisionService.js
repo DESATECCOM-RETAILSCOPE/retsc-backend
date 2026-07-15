@@ -164,6 +164,43 @@ async function deleteImages(projectId, imageIds) {
   await cvFetch(`projects/${projectId}/images?${params}`, { method: 'DELETE' });
 }
 
+// Issue 8.3 — entrenamiento del modelo de detección.
+//
+// Formato verificado (Custom Vision Training API v3.3 — no se pudo abrir la página interactiva
+// de Microsoft Learn desde este entorno, se confirmó por búsqueda):
+//
+//   POST {endpoint}/customvision/v3.3/training/projects/{projectId}/train?trainingType=Advanced
+//     Sin body. `trainingType` default es 'Regular'; acá se usa siempre 'Advanced' (decisión
+//     del issue). Devuelve el objeto Iteration recién creado: { id, name, status, created, ... }.
+//
+//   GET {endpoint}/customvision/v3.3/training/projects/{projectId}/iterations/{iterationId}
+//     Devuelve el mismo objeto Iteration actualizado. `status` observado: 'New' | 'Training' |
+//     'Completed' | 'Failed'.
+//
+//   GET {endpoint}/.../iterations/{iterationId}/performance
+//     Solo tiene sentido cuando la iteración está 'Completed'. Devuelve
+//     { precision, recall, averagePrecision, precisionStdDeviation, recallStdDeviation,
+//       perTagPerformance: [...] }. `averagePrecision` es el mAP.
+
+// Inicia el entrenamiento de un proyecto. Devuelve la iteración creada ({ id, status, ... }).
+// Lanza si la API falla (el llamador en modelTrainingService decide cómo reaccionar).
+async function trainProject(projectId, { trainingType = 'Advanced' } = {}) {
+  const params = new URLSearchParams({ trainingType });
+  const iteration = await cvFetch(`projects/${projectId}/train?${params}`, { method: 'POST' });
+  console.log(`[customVision] entrenamiento iniciado — proyecto=${projectId} iterationId=${iteration.id} status=${iteration.status} trainingType=${trainingType}`);
+  return iteration;
+}
+
+// Consulta el estado actual de una iteración (para polling).
+async function getIteration(projectId, iterationId) {
+  return cvFetch(`projects/${projectId}/iterations/${iterationId}`);
+}
+
+// Consulta las métricas de rendimiento de una iteración ya completada.
+async function getIterationPerformance(projectId, iterationId) {
+  return cvFetch(`projects/${projectId}/iterations/${iterationId}/performance`);
+}
+
 module.exports = {
   isConfigured,
   createProject,
@@ -171,4 +208,7 @@ module.exports = {
   createImageRegions,
   deleteImageRegion,
   deleteImages,
+  trainProject,
+  getIteration,
+  getIterationPerformance,
 };

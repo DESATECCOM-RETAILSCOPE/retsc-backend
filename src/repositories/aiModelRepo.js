@@ -7,7 +7,11 @@
 //   model_name                VARCHAR(100)  NULL
 //   customvision_project_id   VARCHAR(100)  NULL  (hasta que Custom Vision esté configurado)
 //   prediction_resource_id    VARCHAR(100)  NULL
-//   status                    VARCHAR(20)   NULL  — 'PENDING' | 'TRAINING' | 'READY' | 'ERROR'
+//   status                    VARCHAR(20)   NULL  — ciclo real (más largo que el original):
+//     PENDING → PROJECT_CREATED (8.1) → IMAGES_UPLOADED (8.2) → TRAINING → TRAINED | TRAINING_FAILED (8.3)
+//     → READY (activo/publicado, 8.4) — más AWAITING_APPROVAL | REJECTED (8.5, re-entrenamiento) y ERROR
+//     (fallo de provisioning inicial, no de training). TRAINED != READY: un modelo puede terminar de
+//     entrenar sin estar publicado/activo todavía.
 //   trained_at                DATETIME      NULL
 //   created_at                DATETIME      NULL
 //   model_version             INT           NULL
