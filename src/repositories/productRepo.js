@@ -19,10 +19,10 @@ const findByGtinAndEnterprise = async (gtin, enterpriseId) => {
   return r.recordset[0] ?? null;
 };
 
-const listByEnterprise = async (enterpriseId, filters = {}) => {
-  const pool = await getPool();
-  const req = pool.request().input('enterpriseId', sql.Int, enterpriseId);
-
+// Arma la condición WHERE compartida por el SELECT paginado y el COUNT(*).
+// Devuelve el texto del WHERE y aplica los .input() correspondientes sobre `req`.
+function buildFilters(req, enterpriseId, filters) {
+  req.input('enterpriseId', sql.Int, enterpriseId);
   let whereExtra = '';
 
   if (filters.categoryId != null) {
@@ -35,7 +35,33 @@ const listByEnterprise = async (enterpriseId, filters = {}) => {
     whereExtra += ' AND (sk.EAN LIKE @search OR sk.Product_dsc LIKE @search)';
   }
 
-  const r = await req.query(`
+  return whereExtra;
+}
+
+// Paginación server-side (OFFSET/FETCH) + total vía COUNT(*) — mismo WHERE en ambas.
+const listByEnterprise = async (enterpriseId, filters = {}) => {
+  const pool = await getPool();
+  const page  = Math.max(1, Number(filters.page)  || 1);
+  const limit = Math.max(1, Number(filters.limit) || 50);
+  const offset = (page - 1) * limit;
+
+  const countReq = pool.request();
+  const whereExtraCount = buildFilters(countReq, enterpriseId, filters);
+  const countResult = await countReq.query(`
+    SELECT COUNT(DISTINCT sk.SKU_ID) AS total
+    FROM RETSC_OP_ENTERPRISE_SKUS es
+    JOIN RETSC_OP_SKUS sk
+      ON sk.SKU_ID = es.sku_id
+    WHERE es.enterprise_id = @enterpriseId
+    ${whereExtraCount}
+  `);
+  const total = countResult.recordset[0]?.total ?? 0;
+
+  const listReq = pool.request()
+    .input('offset', sql.Int, offset)
+    .input('limit',  sql.Int, limit);
+  const whereExtraList = buildFilters(listReq, enterpriseId, filters);
+  const r = await listReq.query(`
     SELECT DISTINCT
       sk.EAN,
       sk.SKU_ID,
@@ -52,9 +78,28 @@ const listByEnterprise = async (enterpriseId, filters = {}) => {
     LEFT JOIN RETSC_OP_CATEGORIES cat
       ON cat.Category_id = es.selected_category_id
     WHERE es.enterprise_id = @enterpriseId
-    ${whereExtra}
+    ${whereExtraList}
     ORDER BY sk.Product_dsc ASC
+    OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY
   `);
+  return { rows: r.recordset, total };
+};
+
+// GET /api/products/categories — solo categorías que tienen al menos un SKU
+// cargado para la empresa actual (para que el dropdown del frontend no muestre
+// categorías vacías).
+const listCategoriesWithProducts = async (enterpriseId) => {
+  const pool = await getPool();
+  const r = await pool.request()
+    .input('enterpriseId', sql.Int, enterpriseId)
+    .query(`
+      SELECT DISTINCT cat.Category_id, cat.Category_dsc
+      FROM RETSC_OP_ENTERPRISE_SKUS es
+      JOIN RETSC_OP_CATEGORIES cat
+        ON cat.Category_id = es.selected_category_id
+      WHERE es.enterprise_id = @enterpriseId
+      ORDER BY cat.Category_dsc ASC
+    `);
   return r.recordset;
 };
 
@@ -116,4 +161,4 @@ const update = async (id, partial) => {
   return r.recordset[0] ?? null;
 };
 
-module.exports = { findById, findByGtinAndEnterprise, listByEnterprise, insert, insertMany, update };
+module.exports = { findById, findByGtinAndEnterprise, listByEnterprise, listCategoriesWithProducts, insert, insertMany, update };

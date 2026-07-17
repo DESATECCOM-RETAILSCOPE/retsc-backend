@@ -241,6 +241,43 @@ const processSkuExcel = async (
       }
     }
 
+    // ── 2.1 Asociar el SKU a esta empresa (BUG B5) ─────────────────────────
+    // Un SKU global (RETSC_OP_SKUS) recién creado — o ya existente en el catálogo
+    // por otra empresa — nunca quedaba vinculado a RETSC_OP_ENTERPRISE_SKUS. Como
+    // GET /api/products filtra por es.enterprise_id via JOIN a esa tabla, el
+    // producto jamás aparecía en el listado de la empresa que lo cargó, aunque
+    // el SKU sí existiera en RETSC_OP_SKUS. Idempotente: find-then-insert, mismo
+    // patrón que findEnterpriseCategoryById.
+    try {
+      const existingEntSku = await skuRepo.findEnterpriseSku(enterpriseId, skuRow.SKU_ID);
+      if (!existingEntSku) {
+        await skuRepo.insertEnterpriseSku({
+          enterpriseId,
+          skuId: skuRow.SKU_ID,
+          selectedCategoryId: entCat.selected_category_id,
+          detectionCategoryId,
+        });
+      }
+    } catch (err) {
+      errors.push({ row: row._rowNum, ean: row.gtin, reason: `Error al asociar SKU a la empresa: ${err.message}` });
+      metrics.errorsCount++;
+      await skuRepo
+        .logSkuRow({
+          enterpriseId,
+          batchId,
+          rowNumber: row._rowNum,
+          ean: row.gtin,
+          skuDescription: row.description,
+          selectedCategoryId: entCat.selected_category_id,
+          detectionCategoryId,
+          processStatus: 'ERROR',
+          errorCode: 'ENTERPRISE_SKU_LINK_FAILED',
+          errorMessage: err.message,
+        })
+        .catch(() => {});
+      continue;
+    }
+
     // ── 3. Log ────────────────────────────────────────────────────────────
     await skuRepo
       .logSkuRow({

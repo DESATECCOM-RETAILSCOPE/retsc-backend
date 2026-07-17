@@ -188,4 +188,14 @@ const listProducts = async (req, res) => {
   } catch (err) { return handleError(res, err); }
 };
 
-module.exports = { uploadExcel, uploadImages, processJob, getStatus, listProducts };
+// ── B5 QA — GET /api/products/categories ─────────────────────────────────────
+// Solo categorías que tienen SKUs cargados por la empresa actual, para que el
+// dropdown de filtro del frontend no muestre categorías vacías.
+const listProductCategories = async (req, res) => {
+  try {
+    const categories = await productService.listCategoriesWithProducts(req.user.enterpriseId);
+    return res.json({ success: true, categories });
+  } catch (err) { return handleError(res, err); }
+};
+
+module.exports = { uploadExcel, uploadImages, processJob, getStatus, listProducts, listProductCategories };

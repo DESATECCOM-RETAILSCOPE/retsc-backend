@@ -34,6 +34,7 @@ router.post('/upload-excel',              authMiddleware, excelUpload,   control
 router.post('/upload-images',             authMiddleware, imagesUpload,  controller.uploadImages);
 router.post('/process/:jobId',            authMiddleware,                controller.processJob);
 router.get('/processing-status/:jobId',   authMiddleware,                controller.getStatus);
+router.get('/categories',                 authMiddleware,                controller.listProductCategories);
 router.get('/',                           authMiddleware,                controller.listProducts);
 
 module.exports = router;

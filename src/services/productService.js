@@ -18,18 +18,24 @@ function toProductDTO(row) {
 async function listByEnterprise(enterpriseId, filters = {}) {
   const { categoryId, search, page = 1, limit = 50 } = filters;
 
-  const all = await productRepo.listByEnterprise(enterpriseId, {
+  // Paginación resuelta en SQL (OFFSET/FETCH + COUNT(*)) — antes se traía todo
+  // el catálogo de la empresa y se paginaba con .slice() en Node.
+  const { rows, total } = await productRepo.listByEnterprise(enterpriseId, {
     categoryId: categoryId ? Number(categoryId) : undefined,
     search,
+    page: Number(page),
+    limit: Number(limit),
   });
 
-  const total = all.length;
-  const start = (page - 1) * limit;
-  const paged = all.slice(start, start + limit);
-
-  const products = paged.map(toProductDTO);
+  const products = rows.map(toProductDTO);
 
   return { products, total, page: Number(page), limit: Number(limit) };
+}
+
+// GET /api/products/categories — categorías con al menos un SKU cargado por la empresa.
+async function listCategoriesWithProducts(enterpriseId) {
+  const rows = await productRepo.listCategoriesWithProducts(enterpriseId);
+  return rows.map((r) => ({ categoryId: r.Category_id, categoryDsc: r.Category_dsc }));
 }
 
 async function findById(productId, enterpriseId) {
@@ -39,4 +45,4 @@ async function findById(productId, enterpriseId) {
   return { ...toProductDTO(product), images };
 }
 
-module.exports = { listByEnterprise, findById };
+module.exports = { listByEnterprise, listCategoriesWithProducts, findById };
