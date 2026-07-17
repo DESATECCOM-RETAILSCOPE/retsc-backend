@@ -66,7 +66,7 @@ Copy `.env.example` to `.env` and fill in values. Required variables:
 - `BLOB_HIERARCHY_THRESHOLD` — folder-split threshold for blob paths (default: 500)
 - `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM` — email delivery; leave `SMTP_HOST` empty for mock mode (logs to console)
 - `AZURE_GLOBAL_TRAINING_CONTAINER` — blob container for AI training images (default: `global-sku-training`); shared by both the category AI infra flow and the SKU image ingestion flow
-- `CUSTOM_VISION_TRAINING_KEY`, `CUSTOM_VISION_PREDICTION_KEY`, `CUSTOM_VISION_ENDPOINT`, `CUSTOM_VISION_PREDICTION_RESOURCE_ID` — Azure Custom Vision credentials; leave unset until credentials arrive (`customVisionService.js` is a stub that returns null when these are missing)
+- `CUSTOM_VISION_TRAINING_KEY`, `CUSTOM_VISION_PREDICTION_KEY`, `CUSTOM_VISION_ENDPOINT`, `CUSTOM_VISION_PREDICTION_RESOURCE_ID` — credenciales de Azure Custom Vision; `customVisionService.js` (`isConfigured()`) solo cae a comportamiento stub en `createImageFromData()` cuando faltan — el resto del servicio (crear proyecto, regiones, entrenamiento) ya hace llamadas HTTP reales una vez configurado (ver más abajo)
 - `AZURE_VISION_ENDPOINT`, `AZURE_VISION_KEY` — Azure AI Vision (Image Analysis) credentials for shelf-photo caption/content checks; `azureVisionService.js` stays a permissive stub even when these are set (SDK call not implemented yet)
 - `AZURE_GLOBAL_SHELF_CONTAINER` — blob container for shelf-photo training images (default: `global-shelf-training`)
 - `AZURE_QUEUE_NAME` — Azure Storage Queue name `queueService.js` posts to after each SKU image upload, for an external `ProcessSkuImageQueue` Azure Function (not in this repo) to consume (default `sku-image-processing`)
@@ -82,6 +82,7 @@ Copy `.env.example` to `.env` and fill in values. Required variables:
 - `SHELF_UPLOAD_ROLES` — CSV of roles allowed to upload shelf photos (default `Admin`)
 - `MODEL_MANAGER_ROLES` — CSV of roles allowed to retrain/approve/reject/rollback AI detection models (default `Admin`)
 - `CV_TAG_OMT`, `CV_TAG_DTT`, `CV_TAG_CONVENIENCE` — Custom Vision tag IDs per canal; TODO — replace with a DB-backed tag lookup (Issue #35)
+- `TRAINING_ADMIN_ROLES` — CSV de roles autorizados a disparar entrenamiento vía `/api/training` (default `Admin`)
 
 ## Architecture
 
@@ -110,6 +111,7 @@ src/utils/imageQualityAnalyzer.js      sharp-based pixel analysis: resolution, b
 src/utils/imageQualityValidator.js     Wraps imageQualityAnalyzer with pass/fail thresholds + error codes (used by shelf-photo quality gate)
 data/blob-mock/                        Local mock blob storage, served as static files
 uploads-temp/                          Temporary files during pipeline runs; auto-cleaned after job
+docs/                                   Bugs/decisiones documentadas fuera del código (ver docs/BUG-is_active-no-unico.md)
 ```
 
 `requireAdmin.js` and `requireRole.js` both exist and are **not** refactored to share code — `requireAdmin` is a separate hardcoded check, not `requireRole('Admin')`. Newer route groups (shelf-photos, annotations, models) use `requireRole` with roles read from CSV env vars; older ones (enterprises, roles endpoints) still use `requireAdmin`.
@@ -132,6 +134,8 @@ POST /api/shelf-photos/upload  (shelfPhotoUploadService.uploadShelfPhoto)
   8. threshold check → aiModelRepo.updateStatus(..., 'IMAGES_UPLOADED') when SHELF_TRAINING_THRESHOLD reached
 
 Annotation review (/api/annotations)     — human validates/corrects/rejects bounding boxes
+  └─► annotationSyncService (sin ruta propia) — sincroniza cajitas aprobadas/rechazadas a Custom Vision
+  └─► /api/training                        — dispara entrenamiento en Custom Vision (Issue 8.3)
   └─► modelVersioningService (/api/models) — retrain/compare-metrics/approve/reject/rollback versions
 ```
 
@@ -145,7 +149,34 @@ Key files: `src/services/shelfPhotoUploadService.js` (orchestrator), `src/servic
 
 `RETSC_AI_DETECTION_MODELS` gained versioning columns via migration 006 (`precision_score`, `recall_score`, `mean_ap`, `metrics_json`, `approved_by`, `approved_at`). `modelVersioningService.js` manages the retrain lifecycle on top of the same table `aiInfrastructureService.js` initially provisions: retrain requires ≥`MODEL_RETRAIN_MIN_PHOTOS` (default 20) new validated photos since the active version's `trained_at`; a new version whose `mean_ap` is worse than the active one goes to `AWAITING_APPROVAL` instead of auto-activating; rollback reactivates a prior (never-deleted) version.
 
-Role gates (CSV env vars, all default to `Admin` unless noted): `ANNOTATION_VALIDATOR_ROLES` (default `Admin,Supervisor`) for approve/correct/reject, `SHELF_UPLOAD_ROLES` for photo upload, `MODEL_MANAGER_ROLES` for all `/api/models` routes.
+Role gates (CSV env vars, all default to `Admin` unless noted): `ANNOTATION_VALIDATOR_ROLES` (default `Admin,Supervisor`) for approve/correct/reject, `SHELF_UPLOAD_ROLES` for photo upload, `MODEL_MANAGER_ROLES` for all `/api/models` routes, `TRAINING_ADMIN_ROLES` for `/api/training`.
+
+### Sincronización de anotaciones a Custom Vision (Issue 8.2)
+
+`src/services/annotationSyncService.js` **no expone ruta HTTP propia**: es la interfaz acordada con el disparador de aprobación del cliente (Issue #54, construido por otra persona, todavía no integrado en este repo). Dos puntos de entrada:
+
+- **`syncApprovedPhoto(photoId, { clienteAjustoCajitas })`** — se debe llamar inmediatamente después de que #54 setee `photo_approved=1`. Si `clienteAjustoCajitas === false` no se toca Custom Vision (las cajitas ya estaban sincronizadas de una corrección previa); en cualquier otro caso se borran las regiones viejas y se recrean todas las cajitas actuales de la foto. Luego siempre corre `checkAndUpdateThreshold`.
+- **`removeRejectedPhoto(photoId)`** — borra las regiones (y la imagen) en Custom Vision pero **conserva la fila en SQL** — el issue pide no borrar registros.
+
+Ninguna de las dos lanza por fallos de Custom Vision — la aprobación/rechazo ya quedó persistida en SQL antes de llamarlas y no debe revertirse por un problema de sincronización; los fallos se registran en `cv_sync_status='FAILED'` / `cv_sync_error` / `cv_sync_attempts` (columnas ya presentes en `RETSC_AI_TRAINING_ANNOTATIONS`) para reintento manual.
+
+Dos decisiones no obvias documentadas en el header del archivo:
+- El `cvImageId` de una foto viaja embebido en el texto libre `photo_notes` (formato `"blob:... | sha256:... | cvImageId:..."`, escrito por `shelfPhotoUploadService`) — **no tiene columna propia** (TEMPORAL).
+- Custom Vision no devuelve un ID de correlación al crear regiones y **no preserva el orden de envío** — `createImageRegions()` se correlaciona por coordenadas (`coordsMatch()`, tolerancia `1e-6`). Dos cajitas con coordenadas idénticas en la misma foto hacen que Custom Vision rechace el batch entero (`400 Duplicate image regions`), lo que marca **todas** las anotaciones de esa foto como `FAILED`, no solo las duplicadas.
+
+⚠ **Bug conocido sin corregir** (`docs/BUG-is_active-no-unico.md`): nada en la BD impide más de una fila `is_active=1` para la misma `category_id` en `RETSC_AI_DETECTION_MODELS` — no hay constraint ni índice único filtrado. `aiModelRepo.findByCategoryId()` (usado por `annotationSyncService`, `modelVersioningService.setActiveVersion()` y `shelfPhotoUploadService`) simplemente toma `recordset[0]` si eso llega a pasar, sin garantía de cuál fila devuelve. Ya causó un incidente real en pruebas contra producción (`category_id=36`). La corrección requiere decisión de equipo (índice único filtrado vs. transacción explícita) — no se resuelve implícitamente al tocar código relacionado.
+
+### Entrenamiento de modelos (`/api/training`, Issue 8.3)
+
+`POST /api/training/models/:categoryId/train` (montada con `authMiddleware` + `requireRole(TRAINING_ADMIN_ROLES)`, default `Admin`) dispara el entrenamiento en Custom Vision para el modelo activo de una categoría. Solo válido si `status='IMAGES_UPLOADED'` (409 en cualquier otro estado) y el modelo tiene `customvision_project_id`.
+
+`modelTrainingService.startTraining()` es fire-and-forget: llama a `customVisionService.trainProject()`, marca `status='TRAINING'`, responde `202` de inmediato, y lanza `pollTrainingStatus()` **sin await** en background dentro del mismo proceso Node (consulta cada 30s, hasta 40 intentos = 20 min de timeout de seguridad, se rinde tras 3 fallos de red consecutivos). El progreso se consulta con `GET /api/models/category/:categoryId` (ya existente, Issue 8.5).
+
+**Limitación conocida**: el polling vive en memoria del proceso — si el server se reinicia a mitad de un entrenamiento, el polling se pierde y el modelo queda "colgado" en `TRAINING` (Custom Vision sigue entrenando del lado de Azure, pero nadie vuelve a consultarlo). No hay lógica de reanudación al arrancar (a diferencia de `jobRepo.failStaleRunning` en `app.js`) — TODO fuera de alcance del Issue 8.3.
+
+Al completar (`status Completed` en Custom Vision), métricas por debajo del mínimo recomendado (`precision<0.80`, `recall<0.75`, `mAP<0.75`) **no bloquean** el paso a `TRAINED` — solo se loguean como advertencia; decidir si son aceptables es responsabilidad del admin (o del futuro flujo de publicación, Issue 8.4), no de este servicio.
+
+⚠ **Migración 006 verificada como NO aplicada en la BD real** (confirmado con `INFORMATION_SCHEMA`, 2026-07-12) — pese a que `aiModelRepo.js` (Issue 8.5) ya asume que las columnas `precision_score`/`recall_score`/`mean_ap`/`metrics_json` existen. `aiModelRepo.saveMetrics()` lanza `"Invalid column name"` hasta que se corra esa migración manualmente. `handleTrainingCompleted()` envuelve ese llamado en try/catch para que un fallo de guardado de métricas nunca impida pasar a `TRAINED` — las métricas quedan logueadas mientras tanto. No confiar en que la migración 006 ya está aplicada solo porque el código la asume.
 
 ### Smart category AI infrastructure (Issue 3.1.1)
 
@@ -157,13 +188,13 @@ categoryService.createCategory()
         ├─► blobStorageService.createMarker()           → global-sku-training/dtc-{slug}/.keep
         ├─► globalBlobContainerRepo.insert()            → RETSC_INF_GLOBAL_BLOB_CONTAINERS
         ├─► aiModelRepo.insert()                        → RETSC_AI_DETECTION_MODELS (status=PENDING)
-        └─► customVisionService.createProject()         → null (stub, credenciales pendientes)
+        └─► customVisionService.createProject()         → proyecto real si hay credenciales; null si no
 ```
 
 Key files:
 - `src/utils/categoryNameNormalizer.js` — slug generator for blob prefix names (e.g. `"Vino Tinto"` → `"vino-tinto"`)
 - `src/services/aiInfrastructureService.js` — orchestrator; never throws, returns `{ status, errors[] }`
-- `src/services/customVisionService.js` — stub; all functions return null until credentials arrive
+- `src/services/customVisionService.js` — **ya no es un stub completo** (Issue 8.1/8.2/8.3): `createProject()`, `createImageRegions()`, `deleteImageRegion()`, `deleteImages()`, `trainProject()`, `getIteration()`, `getIterationPerformance()` hacen llamadas HTTP reales a la API v3.3 de Custom Vision Training usando `fetch` nativo (no el SDK oficial — la key de Azure AI Services unificada trae caracteres no-ASCII que el módulo `http` de Node rechaza en headers pero `fetch` acepta). Solo `createImageFromData()` sigue siendo stub (sube la imagen sin bytes reales — TODO pendiente para Issue 8.2). `isConfigured()` sigue siendo el gate para todo lo demás.
 - `src/repositories/globalBlobContainerRepo.js` — wraps `RETSC_INF_GLOBAL_BLOB_CONTAINERS`; prefix stored in `description` field (TEMPORAL, see pending #7)
 
 Blob prefix format: `dtc-{slug}` inside the `AZURE_GLOBAL_TRAINING_CONTAINER` container (default: `global-sku-training`). The `.keep` marker file makes the prefix visible in the Azure Portal as a folder.
@@ -197,7 +228,7 @@ Each file in `src/repositories/` maps to one SQL table:
 
 `RETSC_AI_TRAINING_ANNOTATIONS` columns: `annotation_id` (PK), `photo_id`, `dtc_category_id`, `bbox_left`, `bbox_top`, `bbox_width`, `bbox_height` (floats normalized to `[0,1]`), `source`, `is_validated` (bit), `created_at`, `photo_approved` (bit), `photo_notes`, `photo_reviewed_at`, `photo_reviewer_id`, `cv_region_id`, `canal` (NOT NULL).
 
-`RETSC_AI_DETECTION_MODELS` (extended by migration `006_add_metrics_to_detection_models.sql`) adds versioning columns: `precision_score`, `recall_score`, `mean_ap` (primary comparison metric — named `*_score`/`mean_ap` instead of `precision`/`recall` because `PRECISION` is a T-SQL reserved word), `metrics_json` (raw Custom Vision iteration payload), `approved_by`, `approved_at`, plus index `IX_RETSC_AI_DETECTION_MODELS_category_version (category_id, model_version DESC)`. `status` now spans `PENDING | TRAINING | READY | ERROR | IMAGES_UPLOADED | AWAITING_APPROVAL | REJECTED`.
+`RETSC_AI_DETECTION_MODELS` (extended by migration `006_add_metrics_to_detection_models.sql`) adds versioning columns: `precision_score`, `recall_score`, `mean_ap` (primary comparison metric — named `*_score`/`mean_ap` instead of `precision`/`recall` because `PRECISION` is a T-SQL reserved word), `metrics_json` (raw Custom Vision iteration payload), `approved_by`, `approved_at`, plus index `IX_RETSC_AI_DETECTION_MODELS_category_version (category_id, model_version DESC)`. ⚠ Esta migración fue verificada como **NO aplicada** contra la BD real de este proyecto (`INFORMATION_SCHEMA`, 2026-07-12) — ver nota en la sección de entrenamiento más abajo; no asumir que corrió solo porque el código la referencia. `status` ahora abarca el ciclo completo: `PENDING → PROJECT_CREATED (8.1) → IMAGES_UPLOADED (8.2) → TRAINING → TRAINED | TRAINING_FAILED (8.3) → READY` (activo/publicado, 8.4), más `AWAITING_APPROVAL | REJECTED` (re-entrenamiento, 8.5) y `ERROR` (fallo de provisioning inicial, no de training). `TRAINED != READY`: un modelo puede terminar de entrenar sin estar publicado/activo todavía.
 
 `RETSC_OP_SKUS` is accessed directly by `skuImageService.js` (via inline SQL, no dedicated repo) for EAN lookups and updating `image_url`/`has_visual_variant` on first image upload.
 
@@ -255,6 +286,7 @@ Forgot password flow: `POST /api/auth/forgot-password` accepts `{ identifier }` 
 /api/annotations                  authMiddleware  + requireRole(ANNOTATION_VALIDATOR_ROLES) inline on approve/correct/reject
 /api/models                        authMiddleware  + requireRole(MODEL_MANAGER_ROLES) inline on all routes
 /api/shelf-photos                  authMiddleware  + requireRole(SHELF_UPLOAD_ROLES) inline on upload
+/api/training                      authMiddleware  + requireRole(TRAINING_ADMIN_ROLES) inline on all routes
 ```
 
 `enterpriseCommercialCategoryRoutes.js` is distinct from `enterpriseCategoryRoutes.js` — it exposes `GET /api/enterprises/me/enterprise-categories` (commercial categories) and `GET /api/enterprises/me/enterprise-categories/smart` (only `is_smart_dtc=1` categories, used to populate SKU-upload/shelf-photo-upload dropdowns), both handled by `categoryController.js` (no separate controller file).
@@ -323,6 +355,7 @@ Forgot password flow: `POST /api/auth/forgot-password` accepts `{ identifier }` 
 | `POST /api/models/:modelId/approve` | Bearer + `MODEL_MANAGER_ROLES` | Approve and activate a version stuck in `AWAITING_APPROVAL` |
 | `POST /api/models/:modelId/reject` | Bearer + `MODEL_MANAGER_ROLES` | Reject a version in `AWAITING_APPROVAL`; previous version stays active |
 | `POST /api/shelf-photos/upload` | Bearer + `SHELF_UPLOAD_ROLES` | 8-stage quality-gated shelf-photo ingestion (see below) |
+| `POST /api/training/models/:categoryId/train` | Bearer + `TRAINING_ADMIN_ROLES` | Dispara entrenamiento en Custom Vision (202, fire-and-forget); requiere `status='IMAGES_UPLOADED'` |
 
 ### Enterprise registration
 
@@ -401,7 +434,7 @@ Route ordering matters: `/photo/:photoId` routes are registered before `/:id` in
 
 Extends `RETSC_AI_DETECTION_MODELS` (already created per-category by the smart-category AI infra flow above) with a version history. `modelVersioningService.js`:
 - **canRetrain(categoryId)** — counts newly-validated photos since the active model's `trained_at`; requires ≥ `MODEL_RETRAIN_MIN_PHOTOS`.
-- **startRetrain(categoryId)** — 409 if the photo-count rule isn't met; otherwise inserts a new row at `model_version = max+1`, `status='TRAINING'`, `is_active=0` (the old version stays active until the new one is validated). Actually triggering Custom Vision training is still a stub (`triggerTraining()` doesn't exist yet).
+- **startRetrain(categoryId)** — 409 if the photo-count rule isn't met; otherwise inserts a new row at `model_version = max+1`, `status='TRAINING'`, `is_active=0` (the old version stays active until the new one is validated). Actually triggering Custom Vision training here is still a stub (comment references a `triggerTraining()` that doesn't exist) — **not** wired to `modelTrainingService.startTraining()` / `customVisionService.trainProject()` (Issue 8.3), which is a separate, real flow reached only via `POST /api/training/models/:categoryId/train`. Retraining a category today goes through the `/api/training` route, not through `startRetrain()`.
 - **completeRetrain(modelId, {precision, recall, meanAp, raw})** — persists metrics, stamps `trained_at`, then compares `mean_ap` against the currently-active model's via `isWorse()` (worse if `newMap < activeMap - MODEL_METRIC_TOLERANCE`; missing metrics count as worse). Worse → `status='AWAITING_APPROVAL'`; otherwise auto-activates (deactivates all other versions for the category, sets this one active + `status='READY'`).
 - **approveVersion / rejectVersion** — only valid from `AWAITING_APPROVAL` (409 otherwise); approve activates the version, reject sets `status='REJECTED'` and leaves the previous version active.
 - **rollback(categoryId, version)** — reactivates an old, never-deleted version via the same `setActiveVersion()` path.
@@ -413,6 +446,7 @@ Extends `RETSC_AI_DETECTION_MODELS` (already created per-category by the smart-c
 | Service | Used by | Status |
 |---|---|---|
 | `imageValidationService.js`, `jobService.js`, `queueService.js` | `/api/sku-images` (active flow) | Live — make SKU image upload async/job-based and hand off OCR/embeddings to an external Azure Function |
+| `customVisionService.js` | `aiInfrastructureService.js`, `shelfPhotoUploadService.js`, `annotationSyncService.js`, `modelTrainingService.js` | Mostly live (Issues 8.1/8.2/8.3) — solo `createImageFromData()` sigue siendo stub; el resto llama a la API real de Custom Vision Training v3.3 vía `fetch` |
 | `azureVisionService.js` | `/api/shelf-photos` only | Permissive stub; ignores real credentials until the SDK call is implemented |
 | `aiService.js`, `hierarchyService.js` | `pipelineOrchestrator.js` only | Tied to the legacy/broken Excel image pipeline (see `loadStateRepo.js` note above) |
 | `matchingService.js` | `pipelineOrchestrator.js` (legacy), plus `extractGTINFromFilename()` used standalone by `productController.js` | Mixed — the service as a whole is legacy, but that one function still has a live caller |
@@ -481,13 +515,13 @@ What needs to be built:
 
 `src/controllers/authController.js:66-68` — The logout handler is intentionally stateless. The comment explicitly notes: if real session-kill is needed in the future, add a revoked-tokens table and mark the `refreshToken` from the request body as revoked. No implementation is needed now, but be aware that blacklisting refresh tokens will require a new DB table and a check inside `authService.refreshAccessToken()`.
 
-### 6. Custom Vision — integración pendiente de credenciales
+### 6. ~~Custom Vision — integración pendiente de credenciales~~ — MAYORMENTE COMPLETADO (Issues 8.1/8.2/8.3)
 
-`src/services/customVisionService.js` — El servicio es un **stub completo**. `isConfigured()` devuelve `false` hasta que se agreguen `CUSTOM_VISION_TRAINING_KEY` y `CUSTOM_VISION_ENDPOINT` al `.env`. Cuando lleguen las credenciales:
-- Instalar SDKs: `npm install @azure/cognitiveservices-customvision-training @azure/cognitiveservices-customvision-prediction @azure/ms-rest-js`
-- Completar `createProject()` y agregar `triggerTraining()`, `getPublishedIterations()`
-- Correr el backfill: `node scripts/backfill-smart-categories.js` (crear este script)
-- Los modelos en `RETSC_AI_DETECTION_MODELS` con `status='PENDING'` se actualizarán mediante `POST /api/categories/:id/retry-ai-infra`
+`src/services/customVisionService.js` ya **no** es un stub completo. `createProject()`, `createImageRegions()`, `deleteImageRegion()`, `deleteImages()`, `trainProject()`, `getIteration()`, `getIterationPerformance()` hacen llamadas HTTP reales (vía `fetch` nativo, no el SDK oficial — la key de Azure AI Services unificada tiene caracteres no-ASCII que el módulo `http` de Node rechaza en headers). Queda pendiente:
+- **`createImageFromData()` sigue en stub** — sube la imagen sin bytes reales (`imageData` como FormData); necesario para que el Issue 8.2 quede completo end-to-end.
+- **Issue 8.4 (publicación)**: `publishIteration(projectId, iterationId)` no existe todavía.
+- Correr la migración `006_add_metrics_to_detection_models.sql` — verificada como no aplicada en la BD real (ver sección de entrenamiento); sin ella `aiModelRepo.saveMetrics()` falla (silenciosamente, no bloquea el flujo).
+- Los modelos en `RETSC_AI_DETECTION_MODELS` con `status='PENDING'` se actualizan mediante `POST /api/categories/:id/retry-ai-infra`.
 
 ### 7. ~~Columna `prefix` pendiente en `RETSC_INF_GLOBAL_BLOB_CONTAINERS`~~ — COMPLETADO
 
