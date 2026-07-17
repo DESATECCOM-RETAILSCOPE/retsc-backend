@@ -43,6 +43,8 @@ const COLUMN_ALIASES = {
   manufacturer: ["manufacturer", "fabricante", "proveedor", "supplier"],
   category: ["category", "categoria"],
   subcategory: ["subcategory", "subcategoria"],
+  volume: ["volume", "volumen"],
+  relevant: ["relevant", "relevante", "relevant_feature", "checklist"],
 };
 const REQUIRED_KEYS = ["gtin", "description"];
 
@@ -151,6 +153,14 @@ function parseSkuExcel(filePath) {
       headerMap["subcategory"] && raw[headerMap["subcategory"]]
         ? String(raw[headerMap["subcategory"]]).trim()
         : null,
+    volume:
+      headerMap["volume"] && raw[headerMap["volume"]] != null
+        ? Number(String(raw[headerMap["volume"]]).replace(",", "."))
+        : null,
+    relevant:
+      headerMap["relevant"] && raw[headerMap["relevant"]] != null
+        ? String(raw[headerMap["relevant"]]).trim()
+        : null,
   }));
 }
 
@@ -241,21 +251,33 @@ const processSkuExcel = async (
       }
     }
 
-    // ── 2.1 Asociar el SKU a esta empresa (BUG B5) ─────────────────────────
+    // ── 2.1 Asociar el SKU a esta empresa + datos propios del cliente ─────
     // Un SKU global (RETSC_OP_SKUS) recién creado — o ya existente en el catálogo
-    // por otra empresa — nunca quedaba vinculado a RETSC_OP_ENTERPRISE_PRODUCT_SEG.
-    // Como GET /api/products filtra por seg.enterprise_id via JOIN a esa tabla, el
-    // producto jamás aparecía en el listado de la empresa que lo cargó, aunque
-    // el SKU sí existiera en RETSC_OP_SKUS. Idempotente: find-then-insert, mismo
-    // patrón que findEnterpriseCategoryById. No se pasa categoría acá — esa tabla
-    // no tiene esas columnas, la categorización ya quedó en RETSC_OP_SKUS arriba.
+    // por otra empresa — nunca quedaba vinculado a RETSC_OP_ENTERPRISE_PRODUCT_SEG
+    // (bug B5, ya corregido). brand/category/subcategory/volume/relevant del Excel
+    // son datos POR-EMPRESA-POR-SKU (a diferencia de selected_category_id/
+    // detection_category_id, que son globales en RETSC_OP_SKUS) — se guardan acá.
+    // En recargas posteriores del mismo SKU se RESINCRONIZAN (update), no solo se
+    // insertan una vez — así una carga con datos corregidos arregla filas viejas
+    // en vez de dejarlas pegadas con el valor de la primera carga.
+    const clientData = {
+      brand: row.brand,
+      supplier: row.manufacturer,
+      clientCategory: row.category,
+      clientSubcategory: row.subcategory,
+      volume: row.volume,
+      relevantFeature: row.relevant,
+    };
     try {
       const existingEntSku = await skuRepo.findEnterpriseSku(enterpriseId, skuRow.SKU_ID);
       if (!existingEntSku) {
         await skuRepo.insertEnterpriseSku({
           enterpriseId,
           skuId: skuRow.SKU_ID,
+          ...clientData,
         });
+      } else {
+        await skuRepo.updateEnterpriseSku(existingEntSku.seg_id, clientData);
       }
     } catch (err) {
       errors.push({ row: row._rowNum, ean: row.gtin, reason: `Error al asociar SKU a la empresa: ${err.message}` });

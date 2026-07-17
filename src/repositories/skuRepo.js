@@ -19,7 +19,13 @@
  *   normalized_name, Relevant_feature, volume.
  *   Constraint único (enterprise_id, sku_id) — UQ_RETSC_ENTERPRISE_SKU_SEG.
  *   NOTA: esta tabla NO tiene selected_category_id/detection_category_id — la
- *   categorización de un SKU vive solo en RETSC_OP_SKUS (a nivel global, no por-empresa).
+ *   categorización "de plataforma" de un SKU vive en RETSC_OP_SKUS (global, no
+ *   por-empresa). client_category/client_subcategory SÍ son por-empresa — son
+ *   la categorización propia del cliente tal como viene en su Excel de carga
+ *   (columnas CATEGORY/SUBCATEGORY), distinta de selected_category_id/
+ *   detection_category_id (el árbol oficial de RETSC_OP_CATEGORIES, usado para
+ *   IA/DTC). Brand/Supplier/volume/Relevant_feature mapean 1:1 a las columnas
+ *   BRAND/MANUFACTURER/VOLUME/RELEVANT del mismo Excel.
  *
  * Mapeo de categorías en RETSC_OP_SKUS:
  *   selected_category_id  → enterprise_category_id (PK de RETSC_OP_ENTERPRISE_CATEGORIES)
@@ -109,15 +115,52 @@ const insertEnterpriseSku = async (data) => {
   const pool = await getPool();
   const r = await pool
     .request()
-    .input("enterpriseId", sql.Int, data.enterpriseId)
-    .input("skuId", sql.Int, data.skuId)
-    .input("status", sql.VarChar(20), "ACTIVE").query(`
+    .input("enterpriseId",       sql.Int,          data.enterpriseId)
+    .input("skuId",               sql.Int,          data.skuId)
+    .input("status",              sql.VarChar(20),  "ACTIVE")
+    .input("brand",               sql.VarChar(50),  data.brand ?? null)
+    .input("supplier",            sql.VarChar(50),  data.supplier ?? null)
+    .input("clientCategory",      sql.VarChar(100), data.clientCategory ?? null)
+    .input("clientSubcategory",   sql.VarChar(100), data.clientSubcategory ?? null)
+    .input("volume",              sql.Decimal(18, 4), data.volume ?? null)
+    .input("relevantFeature",     sql.VarChar(100), data.relevantFeature ?? null)
+    .query(`
       INSERT INTO RETSC_OP_ENTERPRISE_PRODUCT_SEG
-        (enterprise_id, sku_id, status, created_at)
+        (enterprise_id, sku_id, status, created_at,
+         Brand, Supplier, client_category, client_subcategory, volume, Relevant_feature)
       OUTPUT INSERTED.*
-      VALUES (@enterpriseId, @skuId, @status, GETDATE())
+      VALUES
+        (@enterpriseId, @skuId, @status, GETDATE(),
+         @brand, @supplier, @clientCategory, @clientSubcategory, @volume, @relevantFeature)
     `);
   return r.recordset[0];
+};
+
+// Resincroniza los datos del cliente (brand/categoría/volumen/etc.) en una
+// recarga posterior del mismo SKU — antes de esto, una vez creada la fila
+// enterprise-sku, nunca se actualizaba, dejando datos viejos/incorrectos
+// pegados para siempre si el Excel se volvía a subir con datos corregidos.
+const updateEnterpriseSku = async (segId, partial) => {
+  const pool = await getPool();
+  const req = pool.request().input("segId", sql.Int, segId);
+  const set = ["updated_at = GETDATE()"];
+
+  if (partial.brand               !== undefined) { req.input("brand",              sql.VarChar(50),   partial.brand);              set.push("Brand = @brand"); }
+  if (partial.supplier            !== undefined) { req.input("supplier",           sql.VarChar(50),   partial.supplier);           set.push("Supplier = @supplier"); }
+  if (partial.clientCategory      !== undefined) { req.input("clientCategory",     sql.VarChar(100),  partial.clientCategory);     set.push("client_category = @clientCategory"); }
+  if (partial.clientSubcategory   !== undefined) { req.input("clientSubcategory",  sql.VarChar(100),  partial.clientSubcategory);  set.push("client_subcategory = @clientSubcategory"); }
+  if (partial.volume              !== undefined) { req.input("volume",             sql.Decimal(18,4), partial.volume);             set.push("volume = @volume"); }
+  if (partial.relevantFeature     !== undefined) { req.input("relevantFeature",    sql.VarChar(100),  partial.relevantFeature);    set.push("Relevant_feature = @relevantFeature"); }
+
+  if (set.length === 1) return null; // nada más que el updated_at — no vale la pena el UPDATE
+
+  const r = await req.query(`
+    UPDATE RETSC_OP_ENTERPRISE_PRODUCT_SEG
+    SET ${set.join(", ")}
+    OUTPUT INSERTED.*
+    WHERE seg_id = @segId
+  `);
+  return r.recordset[0] ?? null;
 };
 
 // ── RETSC_LOG_SKU_UPLOAD ───────────────────────────────────────────────────
@@ -153,5 +196,6 @@ module.exports = {
   updateSku,
   findEnterpriseSku,
   insertEnterpriseSku,
+  updateEnterpriseSku,
   logSkuRow,
 };
