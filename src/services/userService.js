@@ -4,9 +4,10 @@ const userEnterpriseRepo = require('../repositories/userEnterpriseRepo');
 const roleRepo           = require('../repositories/roleRepo');
 const { isValidEmail }   = require('../utils/validators');
 
-function svcError(msg, statusCode) {
+function svcError(msg, statusCode, payload) {
   const err = new Error(msg);
   err.statusCode = statusCode;
+  if (payload !== undefined) err.payload = payload;
   return err;
 }
 
@@ -61,8 +62,23 @@ const createAndAssign = async (payload, enterpriseId) => {
   if (password.length < 8) throw svcError('La contraseña debe tener al menos 8 caracteres', 400);
   if (!isValidEmail(email)) throw svcError('Formato de email inválido', 400);
 
-  if (await userRepo.findByCedula(cedIdentidad)) {
-    throw svcError('La cédula ya existe. Use POST /api/users/assign para asignar el usuario existente.', 409);
+  const existingByCedula = await userRepo.findByCedula(cedIdentidad);
+  if (existingByCedula) {
+    // Payload enriquecido: el frontend puede ofrecer "asignar usuario existente"
+    // (POST /api/users/assign) sin tener que volver a buscar por cédula.
+    throw svcError(
+      'La cédula ya existe. Use POST /api/users/assign para asignar el usuario existente.',
+      409,
+      {
+        code: 'CEDULA_EXISTS',
+        user: {
+          userId:       existingByCedula.User_id,
+          userName:     existingByCedula.User_name,
+          email:        existingByCedula.Email,
+          cedIdentidad: existingByCedula.ced_identidad,
+        },
+      }
+    );
   }
 
   if (await userRepo.findByEmail(email.trim().toLowerCase())) {

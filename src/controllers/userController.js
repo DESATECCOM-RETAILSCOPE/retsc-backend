@@ -3,7 +3,9 @@ const userService = require('../services/userService');
 function handleError(res, err) {
   const status = err.statusCode || 500;
   if (status === 500) console.error('[user]', err);
-  return res.status(status).json({ success: false, message: err.message });
+  // err.payload (ej. code + user, ver createAndAssign / cédula duplicada) viaja
+  // adjunto a la respuesta sin romper el contrato { success, message } existente.
+  return res.status(status).json({ success: false, message: err.message, ...(err.payload ?? {}) });
 }
 
 // GET /api/users
