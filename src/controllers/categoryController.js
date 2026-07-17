@@ -170,8 +170,17 @@ const listCommercialCategories = async (req, res) => {
   }
 };
 
-// GET /api/enterprises/me/smart-categories
+// GET /api/enterprises/me/enterprise-categories/smart
 // Categorías inteligentes del enterprise para dropdowns de Góndola y Carga SKU.
+// Ya deduplicadas: si la empresa seleccionó un padre con varias hijas smart, cada
+// hija aparece UNA sola vez (GROUP BY + MIN en enterpriseCategoryRepo.listSmartForEnterprise).
+// Contrato de respuesta:
+//   { success: true, categories: [{ enterpriseCategoryId, categoryId, categoryDsc,
+//                                    parentCategoryId, parentDsc, levelNo }] }
+// IMPORTANTE (Issue B4/QA): la pantalla de Fotos de Góndola debe consumir este endpoint,
+// NO GET /api/categories filtrado por is_smart_dtc en el cliente — ese devuelve TODAS
+// las categorías DTC globales (no las de la empresa) y es ahí donde el padre puede
+// aparecer repetido en el dropdown si el cliente no dedupea.
 const listSmartByEnterprise = async (req, res) => {
   try {
     const categories = await categoryService.listSmartByEnterprise(req.user.enterpriseId);
