@@ -243,19 +243,18 @@ const processSkuExcel = async (
 
     // ── 2.1 Asociar el SKU a esta empresa (BUG B5) ─────────────────────────
     // Un SKU global (RETSC_OP_SKUS) recién creado — o ya existente en el catálogo
-    // por otra empresa — nunca quedaba vinculado a RETSC_OP_ENTERPRISE_SKUS. Como
-    // GET /api/products filtra por es.enterprise_id via JOIN a esa tabla, el
+    // por otra empresa — nunca quedaba vinculado a RETSC_OP_ENTERPRISE_PRODUCT_SEG.
+    // Como GET /api/products filtra por seg.enterprise_id via JOIN a esa tabla, el
     // producto jamás aparecía en el listado de la empresa que lo cargó, aunque
     // el SKU sí existiera en RETSC_OP_SKUS. Idempotente: find-then-insert, mismo
-    // patrón que findEnterpriseCategoryById.
+    // patrón que findEnterpriseCategoryById. No se pasa categoría acá — esa tabla
+    // no tiene esas columnas, la categorización ya quedó en RETSC_OP_SKUS arriba.
     try {
       const existingEntSku = await skuRepo.findEnterpriseSku(enterpriseId, skuRow.SKU_ID);
       if (!existingEntSku) {
         await skuRepo.insertEnterpriseSku({
           enterpriseId,
           skuId: skuRow.SKU_ID,
-          selectedCategoryId: entCat.selected_category_id,
-          detectionCategoryId,
         });
       }
     } catch (err) {

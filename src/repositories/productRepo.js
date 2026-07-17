@@ -21,13 +21,18 @@ const findByGtinAndEnterprise = async (gtin, enterpriseId) => {
 
 // Arma la condición WHERE compartida por el SELECT paginado y el COUNT(*).
 // Devuelve el texto del WHERE y aplica los .input() correspondientes sobre `req`.
+// NOTA (B1/B5 QA, 2026-07-17): el link enterprise↔sku es RETSC_OP_ENTERPRISE_PRODUCT_SEG
+// (alias seg) — RETSC_OP_ENTERPRISE_SKUS no existe en ningún ambiente. La categoría del
+// SKU se filtra sobre sk.selected_category_id (RETSC_OP_SKUS) porque esa tabla de
+// segmentación no tiene columnas de categoría — la categorización es global por SKU,
+// no por-empresa. Ver skuRepo.js para el detalle completo del esquema real.
 function buildFilters(req, enterpriseId, filters) {
   req.input('enterpriseId', sql.Int, enterpriseId);
   let whereExtra = '';
 
   if (filters.categoryId != null) {
     req.input('categoryId', sql.Int, filters.categoryId);
-    whereExtra += ' AND es.selected_category_id = @categoryId';
+    whereExtra += ' AND sk.selected_category_id = @categoryId';
   }
 
   if (filters.search) {
@@ -49,10 +54,11 @@ const listByEnterprise = async (enterpriseId, filters = {}) => {
   const whereExtraCount = buildFilters(countReq, enterpriseId, filters);
   const countResult = await countReq.query(`
     SELECT COUNT(DISTINCT sk.SKU_ID) AS total
-    FROM RETSC_OP_ENTERPRISE_SKUS es
+    FROM RETSC_OP_ENTERPRISE_PRODUCT_SEG seg
     JOIN RETSC_OP_SKUS sk
-      ON sk.SKU_ID = es.sku_id
-    WHERE es.enterprise_id = @enterpriseId
+      ON sk.SKU_ID = seg.sku_id
+    WHERE seg.enterprise_id = @enterpriseId
+      AND seg.status = 'ACTIVE'
     ${whereExtraCount}
   `);
   const total = countResult.recordset[0]?.total ?? 0;
@@ -68,16 +74,17 @@ const listByEnterprise = async (enterpriseId, filters = {}) => {
       sk.image_url,
       sk.SKU_ID     AS product_id,
       sk.Product_dsc,
-      sk.Category_id,
-      NULL          AS Brand,
+      sk.selected_category_id AS Category_id,
+      seg.Brand,
       sk.status,
       cat.Category_dsc AS commercial_category_dsc
-    FROM RETSC_OP_ENTERPRISE_SKUS es
+    FROM RETSC_OP_ENTERPRISE_PRODUCT_SEG seg
     JOIN RETSC_OP_SKUS sk
-      ON sk.SKU_ID = es.sku_id
+      ON sk.SKU_ID = seg.sku_id
     LEFT JOIN RETSC_OP_CATEGORIES cat
-      ON cat.Category_id = es.selected_category_id
-    WHERE es.enterprise_id = @enterpriseId
+      ON cat.Category_id = sk.selected_category_id
+    WHERE seg.enterprise_id = @enterpriseId
+      AND seg.status = 'ACTIVE'
     ${whereExtraList}
     ORDER BY sk.Product_dsc ASC
     OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY
@@ -94,10 +101,13 @@ const listCategoriesWithProducts = async (enterpriseId) => {
     .input('enterpriseId', sql.Int, enterpriseId)
     .query(`
       SELECT DISTINCT cat.Category_id, cat.Category_dsc
-      FROM RETSC_OP_ENTERPRISE_SKUS es
+      FROM RETSC_OP_ENTERPRISE_PRODUCT_SEG seg
+      JOIN RETSC_OP_SKUS sk
+        ON sk.SKU_ID = seg.sku_id
       JOIN RETSC_OP_CATEGORIES cat
-        ON cat.Category_id = es.selected_category_id
-      WHERE es.enterprise_id = @enterpriseId
+        ON cat.Category_id = sk.selected_category_id
+      WHERE seg.enterprise_id = @enterpriseId
+        AND seg.status = 'ACTIVE'
       ORDER BY cat.Category_dsc ASC
     `);
   return r.recordset;

@@ -1,13 +1,25 @@
 /**
  * Repositorio SKU — catálogo global y segmentación enterprise.
  *
- * Esquema real en BD (RETSC_OP_PRODUCTS NO existe):
- *   RETSC_OP_SKUS            (SKU global)
- *   RETSC_OP_ENTERPRISE_SKUS (segmentación por enterprise)
+ * Esquema real en BD (verificado con INFORMATION_SCHEMA + sys.foreign_keys, 2026-07-17;
+ * RETSC_OP_PRODUCTS y RETSC_OP_ENTERPRISE_SKUS NO EXISTEN — ver docs/TODO-prioridad-3.md /
+ * Issue B1-B5 de QA para el historial de esta corrección):
+ *   RETSC_OP_SKUS                    (SKU global)
+ *   RETSC_OP_ENTERPRISE_PRODUCT_SEG  (segmentación por enterprise — antes se escribía
+ *                                      contra una tabla RETSC_OP_ENTERPRISE_SKUS que
+ *                                      nunca existió en ningún ambiente)
  *
  * Columnas reales de RETSC_OP_SKUS:
  *   SKU_ID, EAN, image_url, creation_date, image_status,
  *   Product_dsc, status, selected_category_id, detection_category_id
+ *
+ * Columnas reales de RETSC_OP_ENTERPRISE_PRODUCT_SEG:
+ *   seg_id (PK identity), enterprise_id (FK→RETSC_OP_ENTERPRISE), sku_id (FK→RETSC_OP_SKUS),
+ *   status, created_at, updated_at, client_category, client_subcategory, Brand, Supplier,
+ *   normalized_name, Relevant_feature, volume.
+ *   Constraint único (enterprise_id, sku_id) — UQ_RETSC_ENTERPRISE_SKU_SEG.
+ *   NOTA: esta tabla NO tiene selected_category_id/detection_category_id — la
+ *   categorización de un SKU vive solo en RETSC_OP_SKUS (a nivel global, no por-empresa).
  *
  * Mapeo de categorías en RETSC_OP_SKUS:
  *   selected_category_id  → enterprise_category_id (PK de RETSC_OP_ENTERPRISE_CATEGORIES)
@@ -75,7 +87,11 @@ const updateSku = async (skuId, partial) => {
   return r.recordset[0] ?? null;
 };
 
-// ── RETSC_OP_ENTERPRISE_SKUS ───────────────────────────────────────────────
+// ── RETSC_OP_ENTERPRISE_PRODUCT_SEG ─────────────────────────────────────────
+// Link enterprise↔sku real (antes apuntaba a RETSC_OP_ENTERPRISE_SKUS, que no existe).
+// No recibe categoría: esta tabla no tiene esas columnas — la categorización del
+// SKU (selected_category_id/detection_category_id) ya se graba en RETSC_OP_SKUS
+// vía insertSku/updateSku, a nivel global, no por-empresa.
 
 const findEnterpriseSku = async (enterpriseId, skuId) => {
   const pool = await getPool();
@@ -83,7 +99,7 @@ const findEnterpriseSku = async (enterpriseId, skuId) => {
     .request()
     .input("enterpriseId", sql.Int, enterpriseId)
     .input("skuId", sql.Int, skuId).query(`
-      SELECT * FROM RETSC_OP_ENTERPRISE_SKUS
+      SELECT * FROM RETSC_OP_ENTERPRISE_PRODUCT_SEG
       WHERE enterprise_id = @enterpriseId AND sku_id = @skuId
     `);
   return r.recordset[0] ?? null;
@@ -95,12 +111,11 @@ const insertEnterpriseSku = async (data) => {
     .request()
     .input("enterpriseId", sql.Int, data.enterpriseId)
     .input("skuId", sql.Int, data.skuId)
-    .input("selectedCatId", sql.Int, data.selectedCategoryId)
-    .input("detectionCatId", sql.Int, data.detectionCategoryId).query(`
-      INSERT INTO RETSC_OP_ENTERPRISE_SKUS
-        (enterprise_id, sku_id, selected_category_id, detection_category_id, created_at)
+    .input("status", sql.VarChar(20), "ACTIVE").query(`
+      INSERT INTO RETSC_OP_ENTERPRISE_PRODUCT_SEG
+        (enterprise_id, sku_id, status, created_at)
       OUTPUT INSERTED.*
-      VALUES (@enterpriseId, @skuId, @selectedCatId, @detectionCatId, GETDATE())
+      VALUES (@enterpriseId, @skuId, @status, GETDATE())
     `);
   return r.recordset[0];
 };
