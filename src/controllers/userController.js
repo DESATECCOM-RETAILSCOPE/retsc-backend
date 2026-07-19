@@ -16,32 +16,17 @@ const listUsers = async (req, res) => {
   } catch (err) { return handleError(res, err); }
 };
 
-// GET /api/users/by-cedula/:ced
-const findByCedula = async (req, res) => {
-  try {
-    const result = await userService.findByCedula(req.params.ced);
-    return res.json(result);
-  } catch (err) { return handleError(res, err); }
-};
-
 // POST /api/users
+// createAndAssign maneja tanto el alta de un usuario nuevo como el caso de una
+// cédula ya existente sin relaciones activas (reactivación silenciosa) — ver
+// userService.js para el detalle de ambas ramas.
 const createUser = async (req, res) => {
   try {
     const result = await userService.createAndAssign(req.body, req.user.enterpriseId);
-    return res.status(201).json({ success: true, userId: result.userId, message: 'Usuario creado y asignado a la empresa.' });
-  } catch (err) { return handleError(res, err); }
-};
-
-// POST /api/users/assign
-const assignUser = async (req, res) => {
-  try {
-    const { userId, roleId } = req.body;
-    const result = await userService.assignToEnterprise(userId, roleId, req.user.enterpriseId);
-    const messages = {
-      created:     'Usuario asignado a la empresa exitosamente.',
-      reactivated: 'Relación reactivada con el rol indicado.',
-    };
-    return res.status(201).json({ success: true, action: result.action, message: messages[result.action] });
+    const message = result.reactivated
+      ? 'Usuario reactivado y asignado a la empresa.'
+      : 'Usuario creado y asignado a la empresa.';
+    return res.status(201).json({ success: true, userId: result.userId, message });
   } catch (err) { return handleError(res, err); }
 };
 
@@ -69,4 +54,4 @@ const updateUserEnterprise = async (req, res) => {
   } catch (err) { return handleError(res, err); }
 };
 
-module.exports = { listUsers, findByCedula, createUser, assignUser, updateUser, updateUserEnterprise };
+module.exports = { listUsers, createUser, updateUser, updateUserEnterprise };

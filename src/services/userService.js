@@ -36,22 +36,15 @@ const listByEnterprise = async (enterpriseId) => {
   return enriched;
 };
 
-// ── 1.2 ──────────────────────────────────────────────────────────────────────
-const findByCedula = async (ced) => {
-  const user = await userRepo.findByCedula(ced);
-  if (!user) return { exists: false };
-  return {
-    exists: true,
-    user: {
-      userId:      user.User_id,
-      userName:    user.User_name,
-      email:       user.Email,
-      cedIdentidad: user.ced_identidad,
-    },
-  };
-};
-
 // ── 1.3 ──────────────────────────────────────────────────────────────────────
+// Decisión de negocio (feedback dueña, 1 Jul): una cédula duplicada con
+// relación activa en OTRA empresa no debe revelar nada del usuario ni ofrecer
+// asignación directa — es fuga de datos entre empresas. El traslado lo
+// gestiona el call center de DTC inactivando la relación vieja; recién
+// entonces esta empresa puede proceder. Si la cédula existe pero ya NO tiene
+// relaciones activas (el call center ya la liberó), se reactiva el usuario
+// con los datos del formulario y se lo vincula a esta empresa — mismo patrón
+// que enterpriseService.createEnterprise() usa para su admin.
 const createAndAssign = async (payload, enterpriseId) => {
   const { cedIdentidad, userName, email, telephone, password, roleId } = payload;
 
@@ -62,26 +55,27 @@ const createAndAssign = async (payload, enterpriseId) => {
   if (password.length < 8) throw svcError('La contraseña debe tener al menos 8 caracteres', 400);
   if (!isValidEmail(email)) throw svcError('Formato de email inválido', 400);
 
-  const existingByCedula = await userRepo.findByCedula(cedIdentidad);
+  const normalizedCedula = cedIdentidad.trim();
+  const existingByCedula = await userRepo.findByCedula(normalizedCedula);
+
+  let reactivating = false;
   if (existingByCedula) {
-    // Payload enriquecido: el frontend puede ofrecer "asignar usuario existente"
-    // (POST /api/users/assign) sin tener que volver a buscar por cédula.
-    throw svcError(
-      'La cédula ya existe. Use POST /api/users/assign para asignar el usuario existente.',
-      409,
-      {
-        code: 'CEDULA_EXISTS',
-        user: {
-          userId:       existingByCedula.User_id,
-          userName:     existingByCedula.User_name,
-          email:        existingByCedula.Email,
-          cedIdentidad: existingByCedula.ced_identidad,
-        },
-      }
-    );
+    const activeRelations = await userEnterpriseRepo.findActiveByUserId(existingByCedula.User_id);
+    if (activeRelations.length > 0) {
+      // Mismo mensaje exista o no relación activa "visible" para quien pregunta
+      // — no hay rama que distinga el caso, así que no hay enumeración posible.
+      throw svcError(
+        'La cédula ya está registrada en el sistema. Comuníquese con el call center de DTC para gestionar el traslado.',
+        409,
+        { code: 'CEDULA_EXISTS' },
+      );
+    }
+    reactivating = true;
   }
 
-  if (await userRepo.findByEmail(email.trim().toLowerCase())) {
+  const normalizedEmail = email.trim().toLowerCase();
+  const existingByEmail = await userRepo.findByEmail(normalizedEmail);
+  if (existingByEmail && (!existingByCedula || existingByEmail.User_id !== existingByCedula.User_id)) {
     throw svcError('El email ya está registrado en el sistema.', 409);
   }
 
@@ -89,18 +83,32 @@ const createAndAssign = async (payload, enterpriseId) => {
   if (!role) throw svcError(`El rol con id ${roleId} no existe.`, 400);
 
   const passwordHash = await bcrypt.hash(password, 10);
-  const inserted = await userRepo.insert({
-    User_name:     userName.trim(),
-    Email:         email.trim().toLowerCase(),
-    PasswordHash:  passwordHash,
-    ced_identidad: cedIdentidad.trim(),
-    Status:        1,
-    Created_date:  new Date().toISOString(),
-  });
+
+  let user;
+  let insertedUserId = null;
+  if (reactivating) {
+    const updated = await userRepo.update(existingByCedula.User_id, {
+      User_name:    userName.trim(),
+      Email:        normalizedEmail,
+      PasswordHash: passwordHash,
+      Status:       1,
+    });
+    user = updated || existingByCedula;
+  } else {
+    user = await userRepo.insert({
+      User_name:     userName.trim(),
+      Email:         normalizedEmail,
+      PasswordHash:  passwordHash,
+      ced_identidad: normalizedCedula,
+      Status:        1,
+      Created_date:  new Date().toISOString(),
+    });
+    insertedUserId = user.User_id;
+  }
 
   try {
     await userEnterpriseRepo.insert({
-      User_id:            inserted.User_id,
+      User_id:            user.User_id,
       Enterprise_id:      enterpriseId,
       Role_id:            role.Role_id,
       Status:             1,
@@ -108,47 +116,20 @@ const createAndAssign = async (payload, enterpriseId) => {
       Fecha_inactivacion: null,
     });
   } catch (err) {
-    await userRepo.remove(inserted.User_id).catch(() => {});
+    // Solo se revierte el usuario si lo creamos nosotros en este mismo request
+    // — un usuario reactivado ya existía antes, no es nuestro para borrar.
+    if (insertedUserId) await userRepo.remove(insertedUserId).catch(() => {});
     throw err;
   }
 
-  return { userId: inserted.User_id, enterpriseId, roleId: role.Role_id };
-};
-
-// ── 1.4 ──────────────────────────────────────────────────────────────────────
-const assignToEnterprise = async (userId, roleId, enterpriseId) => {
-  if (!userId || !roleId) throw svcError('userId y roleId son requeridos', 400);
-
-  if (!await userRepo.findById(userId)) throw svcError('Usuario no encontrado', 404);
-
-  const role = await roleRepo.findById(Number(roleId));
-  if (!role) throw svcError(`El rol con id ${roleId} no existe.`, 400);
-
-  const existing = await userEnterpriseRepo.findByUserAndEnterprise(userId, enterpriseId);
-
-  if (existing) {
-    if (existing.Status === 1 || existing.Status === true) {
-      throw svcError('El usuario ya está asignado a esta empresa.', 409);
-    }
-    // Relación inactiva — reactivar
-    await userEnterpriseRepo.update(userId, enterpriseId, {
-      Role_id:            role.Role_id,
-      Status:             1,
-      Fecha_activacion:   new Date().toISOString(),
-      Fecha_inactivacion: null,
-    });
-    return { userId, enterpriseId, roleId: role.Role_id, action: 'reactivated' };
-  }
-
-  await userEnterpriseRepo.insert({
-    User_id:            userId,
-    Enterprise_id:      enterpriseId,
-    Role_id:            role.Role_id,
-    Status:             1,
-    Fecha_activacion:   new Date().toISOString(),
-    Fecha_inactivacion: null,
-  });
-  return { userId, enterpriseId, roleId: role.Role_id, action: 'created' };
+  return {
+    userId: user.User_id,
+    enterpriseId,
+    roleId: role.Role_id,
+    reactivated: reactivating,
+    email: normalizedEmail,
+    userName: userName.trim(),
+  };
 };
 
 // ── 1.5 ──────────────────────────────────────────────────────────────────────
@@ -205,9 +186,7 @@ const updateUserEnterprise = async (userId, enterpriseId, payload) => {
 
 module.exports = {
   listByEnterprise,
-  findByCedula,
   createAndAssign,
-  assignToEnterprise,
   updateUser,
   updateUserEnterprise,
 };
