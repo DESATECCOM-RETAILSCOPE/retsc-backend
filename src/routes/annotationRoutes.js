@@ -2,7 +2,9 @@
 // Prefijo en app.js: /api/annotations  (montado con authMiddleware)
 //
 // Acciones de validación restringidas por rol. Roles permitidos configurables por
-// env ANNOTATION_VALIDATOR_ROLES (CSV); default: 'Admin,Supervisor'.
+// env ANNOTATION_VALIDATOR_ROLES (CSV); default: 'ADMIN,ADMIN_DTC'.
+// (El rol 'Supervisor' que este default usaba antes fue eliminado del catálogo
+// — ver scripts/remove-legacy-roles.js. requireRole normaliza mayúsculas.)
 // Listar y consultar readiness solo requieren estar autenticado.
 
 const express      = require('express');
@@ -11,7 +13,7 @@ const requireRole  = require('../middlewares/requireRole');
 const c            = require('../controllers/annotationController');
 
 // Roles autorizados para aprobar/corregir/rechazar.
-const VALIDATOR_ROLES = (process.env.ANNOTATION_VALIDATOR_ROLES || 'Admin,Supervisor')
+const VALIDATOR_ROLES = (process.env.ANNOTATION_VALIDATOR_ROLES || 'ADMIN,ADMIN_DTC')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);

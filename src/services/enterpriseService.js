@@ -5,6 +5,7 @@ const userRepo = require("../repositories/userRepo");
 const userEnterpriseRepo = require("../repositories/userEnterpriseRepo");
 const roleRepo = require("../repositories/roleRepo");
 const { isValidEmail } = require("../utils/validators");
+const { ROLES } = require("../config/roles");
 
 const VALID_TYPES = ["Proveedor", "Detallista", "Empresa de servicios"];
 
@@ -125,10 +126,10 @@ const registerEnterprise = async (payload) => {
   }
 
   // ───── Fail-fast: rol Admin debe existir antes de tocar nada ─────
-  const adminRole = await roleRepo.findByName("Admin");
+  const adminRole = await roleRepo.findByName(ROLES.ADMIN);
   if (!adminRole) {
     throw serviceError(
-      'Rol "Admin" no encontrado. Verifique que el seed se ejecutó correctamente.',
+      `Rol "${ROLES.ADMIN}" no encontrado. Verifique que el seed se ejecutó correctamente.`,
       500,
     );
   }

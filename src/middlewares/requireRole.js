@@ -3,18 +3,24 @@
 //
 // Uso:
 //   const requireRole = require('../middlewares/requireRole');
-//   router.patch('/:id/approve', authMiddleware, requireRole('Admin', 'Supervisor'), ctrl.approve);
+//   const { ROLES } = require('../config/roles');
+//   router.patch('/:id/approve', authMiddleware, requireRole(ROLES.ADMIN, ROLES.ADMIN_DTC), ctrl.approve);
 //
 // Requiere que authMiddleware haya corrido antes (lee req.user.roleName, que arma
 // authService al firmar el JWT).
 //
-// NOTA: la comparación es exacta y sensible a mayúsculas, igual que requireAdmin
-// ('Admin'). Los nombres deben coincidir con Role_name en RETSC_OP_ROLES.
+// La comparación se normaliza (trim + mayúsculas) en ambos lados vía
+// normalizeRole — antes era exacta y case-sensitive, lo cual rompió la
+// autorización completa cuando los roles se renombraron a mayúsculas
+// (scripts/sync-roles-with-qa.js) sin actualizar estos middlewares.
+
+const { normalizeRole } = require('../config/roles');
 
 function requireRole(...allowedRoles) {
+  const normalizedAllowed = allowedRoles.map(normalizeRole);
   return (req, res, next) => {
-    const role = req.user?.roleName;
-    if (!role || !allowedRoles.includes(role)) {
+    const role = normalizeRole(req.user?.roleName);
+    if (!role || !normalizedAllowed.includes(role)) {
       return res.status(403).json({
         success: false,
         message: `Esta acción requiere uno de los roles: ${allowedRoles.join(', ')}.`,

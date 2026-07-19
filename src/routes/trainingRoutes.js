@@ -9,7 +9,7 @@ const router      = express.Router();
 const requireRole = require('../middlewares/requireRole');
 const c           = require('../controllers/trainingController');
 
-const ADMIN_ROLES = (process.env.TRAINING_ADMIN_ROLES || 'Admin')
+const ADMIN_ROLES = (process.env.TRAINING_ADMIN_ROLES || 'ADMIN,ADMIN_DTC')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
