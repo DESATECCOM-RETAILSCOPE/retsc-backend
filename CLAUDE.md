@@ -58,7 +58,7 @@ Copy `.env.example` to `.env` and fill in values. Required variables:
 
 - `PORT` — server port
 - `SQL_SERVER`, `SQL_DATABASE`, `SQL_USER`, `SQL_PASSWORD`, `SQL_PORT` — Azure SQL credentials
-- `JWT_SECRET`, `JWT_EXPIRES_IN` — access token signing and expiry (default 1h)
+- `JWT_SECRET`, `JWT_EXPIRES_IN` — access token signing and expiry (default `30m` — reduced from `1h` per Issue B6/QA session-expiration feedback)
 - `JWT_REFRESH_SECRET`, `JWT_REFRESH_EXPIRES_IN` — refresh token signing and expiry (default 30d)
 - `BLOB_STORAGE_MODE` — `mock` (default) or `azure`; mock writes to `data/blob-mock/` and serves at `/blob-mock/`
 - `AZURE_STORAGE_CONNECTION_STRING`, `AZURE_BLOB_CONTAINER` — required only when `BLOB_STORAGE_MODE=azure`
@@ -78,11 +78,11 @@ Copy `.env.example` to `.env` and fill in values. Required variables:
 - `QUALITY_MIN_WIDTH`, `QUALITY_MIN_HEIGHT` — minimum shelf-photo resolution (default 1280×720)
 - `QUALITY_MIN_SHARPNESS`, `QUALITY_SHARPNESS_NORM` — normalized-Laplacian-variance blur threshold and normalization divisor (defaults 0.005 / 100; NOTA in `.env.example` — needs calibration with real shelf photos)
 - `QUALITY_MIN_BRIGHTNESS`, `QUALITY_MAX_BRIGHTNESS` — accepted mean brightness range 0–255 (default 30–220)
-- `ANNOTATION_VALIDATOR_ROLES` — CSV of roles allowed to approve/correct/reject shelf-photo annotations (default `Admin,Supervisor`)
-- `SHELF_UPLOAD_ROLES` — CSV of roles allowed to upload shelf photos (default `Admin`)
-- `MODEL_MANAGER_ROLES` — CSV of roles allowed to retrain/approve/reject/rollback AI detection models (default `Admin`)
+- `ANNOTATION_VALIDATOR_ROLES` — CSV of roles allowed to approve/correct/reject shelf-photo annotations (default `ADMIN,ADMIN_DTC`)
+- `SHELF_UPLOAD_ROLES` — CSV of roles allowed to upload shelf photos (default `ADMIN,ADMIN_DTC`)
+- `MODEL_MANAGER_ROLES` — CSV of roles allowed to retrain/approve/reject/rollback AI detection models (default `ADMIN,ADMIN_DTC`)
 - `CV_TAG_OMT`, `CV_TAG_DTT`, `CV_TAG_CONVENIENCE` — Custom Vision tag IDs per canal; TODO — replace with a DB-backed tag lookup (Issue #35)
-- `TRAINING_ADMIN_ROLES` — CSV de roles autorizados a disparar entrenamiento vía `/api/training` (default `Admin`)
+- `TRAINING_ADMIN_ROLES` — CSV de roles autorizados a disparar entrenamiento vía `/api/training` (default `ADMIN,ADMIN_DTC`)
 
 ## Architecture
 
@@ -96,8 +96,9 @@ src/controllers/              Input validation, calls services, formats HTTP res
 src/services/                 Business logic
 src/repositories/             Data access — all SQL reads/writes go here
 src/middlewares/authMiddleware.js   JWT verification; attaches decoded payload to req.user
-src/middlewares/requireAdmin.js    Role check; requires req.user.roleName === 'Admin'
-src/middlewares/requireRole.js     Parameterized role check; requireRole(...roles) 403s unless req.user.roleName is in the list
+src/middlewares/requireAdmin.js    Legacy wrapper — now literally requireRole(ROLES.ADMIN, ROLES.ADMIN_DTC), kept as its own file so existing routes importing it don't all need touching at once
+src/middlewares/requireRole.js     Parameterized role check; requireRole(...roles) 403s unless req.user.roleName (normalized via normalizeRole — trim+uppercase) is in the list
+src/config/roles.js                Canonical role catalog (ROLES.{ADMIN,ADMIN_DTC,EJECUTIVO_CAMPO,GERENCIA,AUDITOR_CAMPO}) + normalizeRole(); all role comparisons must go through this, never a literal string or Role_id (Role_id varies between environments — prod 1-5, QA 1,4,7,8,9)
 src/config/db.js              MSSQL connection pool (max 10, lazy init on first getPool() call)
 src/utils/gtinValidator.js              EAN8/UPC12/EAN13 check-digit validation
 src/utils/imageHasher.js               SHA-256 hashing for dedup
@@ -114,7 +115,17 @@ uploads-temp/                          Temporary files during pipeline runs; aut
 docs/                                   Bugs/decisiones documentadas fuera del código (ver docs/BUG-is_active-no-unico.md)
 ```
 
-`requireAdmin.js` and `requireRole.js` both exist and are **not** refactored to share code — `requireAdmin` is a separate hardcoded check, not `requireRole('Admin')`. Newer route groups (shelf-photos, annotations, models) use `requireRole` with roles read from CSV env vars; older ones (enterprises, roles endpoints) still use `requireAdmin`.
+`requireAdmin.js` is now a thin wrapper over `requireRole.js` (`requireRole(ROLES.ADMIN, ROLES.ADMIN_DTC)`) — it used to be a separate hardcoded `roleName === 'Admin'` check, but that broke completely when roles were renamed to uppercase (see role system section below) and was fixed by delegating to `requireRole`'s normalized comparison. `ADMIN_DTC` (the DTC superuser) can always do anything `ADMIN` can. Newer route groups (shelf-photos, annotations, models, training) call `requireRole` directly with roles read from CSV env vars; older ones (enterprises, roles endpoints) still import `requireAdmin`, which is equivalent.
+
+### Role system (Issues B1–B4, feedback de la dueña del proyecto, 2026-07-01)
+
+Roles were renamed to **uppercase** in the DB (`scripts/sync-roles-with-qa.js`) and the legacy `Analista`/`Supervisor` roles were removed (`scripts/remove-legacy-roles.js`) — see `docs/TODO-menu-roles.md` and `docs/TODO-prioridad-3.md` for the full history. `src/config/roles.js` is now the single source of truth: `ROLES.{ADMIN, ADMIN_DTC, EJECUTIVO_CAMPO, GERENCIA, AUDITOR_CAMPO}` (values match `Role_name` exactly, e.g. `'EJECUTIVO CAMPO'` with a space) plus `normalizeRole()` (trim + uppercase), used on **both sides** of every role comparison in the codebase — `roleRepo.findByName()` also does a case-insensitive `UPPER()` SQL comparison for the same reason. Never compare against a literal string or against `Role_id` (it varies between environments: prod 1–5, QA 1,4,7,8,9).
+
+`ADMIN_DTC` is a DTC-wide superuser, distinct from a per-enterprise `ADMIN`:
+- `GET/GET-list /api/enterprises` — `ADMIN_DTC` sees every enterprise; a plain `ADMIN` only ever sees their own (`req.user.enterpriseId`), not the result of a "find enterprises I'm linked to" query. `enterpriseService.listByUser()` was removed for this reason.
+- `GET/PUT /api/enterprises/:id` — 403 for a plain `ADMIN` if `:id` doesn't match their own `enterpriseId`; `ADMIN_DTC` can access any.
+- `POST /api/enterprises/create` (creating a new client enterprise) is restricted to `ADMIN_DTC` via `requireRole` at the route level.
+- Taxonomy/category-tree management (`/api/categories` write routes) is exclusive to `ADMIN_DTC` (Issue B4).
 
 `src/repositories/jsonRepo.js` is dead code — it exists but no repository imports it. All real persistence uses MSSQL.
 
@@ -129,17 +140,18 @@ POST /api/shelf-photos/upload  (shelfPhotoUploadService.uploadShelfPhoto)
   3. azureVisionService.analyzeCaption() + isShelf()     → STUB, always permissive
   4. dedup via SHA-256 (shelfPhotoRepo.findByHashGlobal, global scope, enterprise_id=NULL)
   5. blobStorageService.uploadToContainer()              → global-shelf-training/dtc-{slug}/{canal}/
-  6. customVisionService.createImageFromData()           → cvImageId (stub if unconfigured)
+  6. customVisionService.createImageFromData()           → cvImageId (still a stub — see Custom Vision section below)
   7. annotationRepo.insert()                              → RETSC_AI_TRAINING_ANNOTATIONS (unvalidated)
   8. threshold check → aiModelRepo.updateStatus(..., 'IMAGES_UPLOADED') when SHELF_TRAINING_THRESHOLD reached
 
 Annotation review (/api/annotations)     — human validates/corrects/rejects bounding boxes
-  └─► annotationSyncService (sin ruta propia) — sincroniza cajitas aprobadas/rechazadas a Custom Vision
-  └─► /api/training                        — dispara entrenamiento en Custom Vision (Issue 8.3)
+  └─► #54 (external, not in this repo) sets photo_approved=1/rejects
+        └─► annotationSyncService.syncApprovedPhoto()/removeRejectedPhoto()  → pushes regions to Custom Vision
   └─► modelVersioningService (/api/models) — retrain/compare-metrics/approve/reject/rollback versions
+  └─► POST /api/training/models/:categoryId/train (modelTrainingService) → trains + polls Custom Vision in background
 ```
 
-Key files: `src/services/shelfPhotoUploadService.js` (orchestrator), `src/services/shelfPhotoQualityService.js` (pixel quality gate, mirrors `imageValidationService.js` used by the SKU pipeline), `src/services/azureVisionService.js` (stub — see below), `src/services/annotationService.js` + `src/repositories/annotationRepo.js`, `src/services/modelVersioningService.js`.
+Key files: `src/services/shelfPhotoUploadService.js` (orchestrator), `src/services/shelfPhotoQualityService.js` (pixel quality gate, mirrors `imageValidationService.js` used by the SKU pipeline), `src/services/azureVisionService.js` (stub — see below), `src/services/annotationService.js` + `src/repositories/annotationRepo.js`, `src/services/annotationSyncService.js` (Custom Vision region sync, Issue 8.2 — see below), `src/services/modelVersioningService.js`, `src/services/modelTrainingService.js` (Custom Vision training + polling, Issue 8.3 — see below).
 
 `src/services/azureVisionService.js` is a **stub**: `isConfigured()` checks `AZURE_VISION_ENDPOINT`/`AZURE_VISION_KEY`, but `analyzeCaption()` and `isShelf()` always return permissive stub results regardless — the real SDK (`@azure-rest/ai-vision-image-analysis`) is not installed yet, only TODO'd.
 
@@ -149,7 +161,7 @@ Key files: `src/services/shelfPhotoUploadService.js` (orchestrator), `src/servic
 
 `RETSC_AI_DETECTION_MODELS` gained versioning columns via migration 006 (`precision_score`, `recall_score`, `mean_ap`, `metrics_json`, `approved_by`, `approved_at`). `modelVersioningService.js` manages the retrain lifecycle on top of the same table `aiInfrastructureService.js` initially provisions: retrain requires ≥`MODEL_RETRAIN_MIN_PHOTOS` (default 20) new validated photos since the active version's `trained_at`; a new version whose `mean_ap` is worse than the active one goes to `AWAITING_APPROVAL` instead of auto-activating; rollback reactivates a prior (never-deleted) version.
 
-Role gates (CSV env vars, all default to `Admin` unless noted): `ANNOTATION_VALIDATOR_ROLES` (default `Admin,Supervisor`) for approve/correct/reject, `SHELF_UPLOAD_ROLES` for photo upload, `MODEL_MANAGER_ROLES` for all `/api/models` routes, `TRAINING_ADMIN_ROLES` for `/api/training`.
+Role gates (CSV env vars, all default to `ADMIN,ADMIN_DTC`): `ANNOTATION_VALIDATOR_ROLES` for approve/correct/reject, `SHELF_UPLOAD_ROLES` for photo upload, `MODEL_MANAGER_ROLES` for all `/api/models` routes, `TRAINING_ADMIN_ROLES` for `/api/training`.
 
 ### Sincronización de anotaciones a Custom Vision (Issue 8.2)
 
@@ -211,10 +223,10 @@ Each file in `src/repositories/` maps to one SQL table:
 | `roleRepo.js` | `RETSC_OP_ROLES` |
 | `categoryRepo.js` | `RETSC_OP_CATEGORIES` |
 | `enterpriseCategoryRepo.js` | `RETSC_OP_ENTERPRISE_CATEGORIES` |
-| `productRepo.js` | `RETSC_OP_PRODUCTS` |
+| `productRepo.js` | `RETSC_OP_ENTERPRISE_PRODUCT_SEG` + `RETSC_OP_SKUS` (read-only listings) |
 | `imageRepo.js` | `RETSC_LOG_IMAGE_UPLOAD` |
 | `loadStateRepo.js` | `RETSC_LOG_SKU_UPLOAD` (⚠ broken — see below) |
-| `skuRepo.js` | `RETSC_OP_PRODUCTS`, `RETSC_OP_SKUS`, `RETSC_OP_ENTERPRISE_SKUS`, `RETSC_LOG_SKU_UPLOAD` |
+| `skuRepo.js` | `RETSC_OP_SKUS`, `RETSC_OP_ENTERPRISE_PRODUCT_SEG`, `RETSC_LOG_SKU_UPLOAD` |
 | `aiModelRepo.js` | `RETSC_AI_DETECTION_MODELS` |
 | `skuFeatureRepo.js` | `RETSC_AI_SKU_FEATURES` + `RETSC_AI_SKU_IMAGE_METADATA` |
 | `skuImageLogRepo.js` | `RETSC_LOG_IMAGE_UPLOAD` (shared with `imageRepo.js`, different columns) |
@@ -232,17 +244,11 @@ Each file in `src/repositories/` maps to one SQL table:
 
 `RETSC_OP_SKUS` is accessed directly by `skuImageService.js` (via inline SQL, no dedicated repo) for EAN lookups and updating `image_url`/`has_visual_variant` on first image upload.
 
-`RETSC_OP_SKUS` columns: `SKU_ID`, `EAN`, `product_id` (FK → `RETSC_OP_PRODUCTS`), `creation_date`, `image_url`.
+`RETSC_OP_SKUS` columns: `SKU_ID`, `EAN`, `image_url`, `creation_date`, `image_status`, `Product_dsc`, `status`, `selected_category_id`, `detection_category_id`. No `product_id` — `RETSC_OP_PRODUCTS` doesn't exist (verified via `INFORMATION_SCHEMA.TABLES` — fully removed, not just missing columns); `Product_dsc` and both category FKs live directly on this table now.
 
-`RETSC_OP_ENTERPRISE_SKUS` columns: `enterprise_id`, `sku_id` (FK → `RETSC_OP_SKUS`), `selected_category_id` (FK → `RETSC_OP_CATEGORIES.Category_id` — pass `entCat.selected_category_id`, NOT `enterprise_category_id`), `detection_category_id` (FK → `RETSC_OP_CATEGORIES.Category_id`, used for AI), `created_at`.
+`RETSC_OP_ENTERPRISE_PRODUCT_SEG` columns: `seg_id` (PK identity), `enterprise_id` (FK → `RETSC_OP_ENTERPRISE`), `sku_id` (FK → `RETSC_OP_SKUS`), `status`, `created_at`, `updated_at`, `client_category`, `client_subcategory`, `Brand`, `Supplier`, `normalized_name`, `Relevant_feature`, `volume`; unique constraint `UQ_RETSC_ENTERPRISE_SKU_SEG` on `(enterprise_id, sku_id)`. This is the real enterprise↔SKU link — `RETSC_OP_ENTERPRISE_SKUS` never existed in any environment (an old naming assumption, not a removed table). No `selected_category_id`/`detection_category_id` here — platform categorization lives on `RETSC_OP_SKUS` (global); `client_category`/`client_subcategory` are the client's own categorization as typed in their Excel upload, a distinct concept.
 
 `RETSC_OP_ENTERPRISE_CATEGORIES` columns: `enterprise_category_id` (PK), `enterprise_id`, `selected_category_id` (FK → `RETSC_OP_CATEGORIES`), `resolved_category_id` (nullable — DTC-resolved override; falls back to `selected_category_id` when null), `status` (`'ACTIVE'` or other).
-
-⚠ **`productRepo.js` partial dead code**: `findByGtinAndEnterprise`, `insert`, `insertMany`, and `update` use non-existent columns (`GTIN`, `Enterprise_id`, `Description`, etc.) — they are leftovers from the old pipeline and will fail at runtime. Only `findById` and `listByEnterprise` are functional.
-
-**CRITICAL — real column names (verified from Azure SQL, June 2026):**
-
-`RETSC_OP_PRODUCTS` columns: `product_id`, `Product_dsc`, `Category_id`, `Checklist`, `creationdate`, `product_key`, `status`, `Brand` (added via `scripts/migrate-add-brand.js`). There is NO `Subcategory`, `Segment`, `Enterprise_id`, `GTIN`, or `Description`. Enterprise-specific metadata lives in `RETSC_OP_ENTERPRISE_PRODUCT_SEG`.
 
 `RETSC_LOG_IMAGE_UPLOAD` real columns: `image_log_id`, `enterprise_id`, `upload_batch_id` (NOT NULL), `sku_id`, `ean`, `image_name`, `image_url`, `image_hash`, `image_status`, `process_status` (NOT NULL), `ocr_status`, `embeddings_status`, `error_code`, `error_message`, `created_at`. No `Product_id`, `Hash`, `Blob_url`, or `Status`.
 
@@ -256,7 +262,7 @@ Login issues two tokens: a short-lived `accessToken` and a long-lived `refreshTo
 
 Login response includes `user.enterpriseDsc` so the frontend can display the enterprise name without an extra fetch.
 
-JWT payload: `{ userId, email, username, enterpriseId, roleId, roleName }`. Use `req.user.roleName` for permission checks. `requireAdmin` middleware enforces `roleName === 'Admin'` and must be applied after `authMiddleware`.
+JWT payload: `{ userId, email, username, enterpriseId, roleId, roleName }`. Use `req.user.roleName` for permission checks, always through `normalizeRole()`/`requireRole()` (see role system section above) — never compare the raw string directly. `requireAdmin` middleware enforces `ADMIN` or `ADMIN_DTC` and must be applied after `authMiddleware`.
 
 Refresh token payload is minimal `{ userId, type: 'refresh' }` — the `type` field is checked during refresh verification to prevent access tokens from being used as refresh tokens. Refresh endpoint validates both signature and `type === 'refresh'`; throws 401 if either fails.
 
@@ -302,19 +308,17 @@ Forgot password flow: `POST /api/auth/forgot-password` accepts `{ identifier }` 
 | `POST /api/auth/forgot-password` | No | generates new password, emails it |
 | `GET /api/auth/me` | Bearer | Current user |
 | `GET /api/auth/users` | Bearer | All users |
-| `POST /api/enterprises` | No | Register enterprise + admin user |
-| `GET /api/enterprises` | Bearer + Admin | List all enterprises (alias of /list) |
-| `GET /api/enterprises/list` | Bearer + Admin | List all enterprises |
-| `GET /api/enterprises/:id` | Bearer + Admin | Enterprise detail |
-| `POST /api/enterprises/create` | Bearer + Admin | Create enterprise (no admin user) |
-| `PUT /api/enterprises/:id` | Bearer + Admin | Update enterprise (accepts status field) |
+| `POST /api/enterprises` | No | Register enterprise + admin user; validates Costa Rica cédula jurídica (10 digits) + admin cédula física (9 digits) |
+| `GET /api/enterprises` | Bearer + Admin | `ADMIN_DTC` sees all enterprises; plain `ADMIN` sees only their own (alias of /list) |
+| `GET /api/enterprises/list` | Bearer + Admin | Same as above |
+| `GET /api/enterprises/:id` | Bearer + Admin | Enterprise detail; 403 for a plain `ADMIN` if `:id` isn't their own enterprise |
+| `POST /api/enterprises/create` | Bearer + `ADMIN_DTC` | Create enterprise (no admin user) — DTC-only |
+| `PUT /api/enterprises/:id` | Bearer + Admin | Update enterprise (accepts status field); same per-enterprise restriction as the GET above |
 | `GET /api/users` | Bearer | Users of the authenticated enterprise |
-| `GET /api/users/by-cedula/:ced` | Bearer | Find user by ID number |
-| `POST /api/users` | Bearer | Create user and assign to enterprise |
-| `POST /api/users/assign` | Bearer | Assign existing user to enterprise |
+| `POST /api/users` | Bearer | Create + assign user to enterprise; sends a best-effort welcome email; if cédula belongs to a user with no active relations, reactivates instead of creating; if it belongs to a user with an active relation elsewhere, 409 `{code:'CEDULA_EXISTS'}` without revealing user data (traslado gestionado por el call center de DTC) |
 | `PUT /api/users/:id` | Bearer | Update user |
 | `PUT /api/users/:userId/enterprises/:enterpriseId` | Bearer | Update user-enterprise relation |
-| `GET /api/roles` | Bearer | List all roles |
+| `GET /api/roles` | Bearer | List all roles; `?active=1` filters to `status=1` only |
 | `GET /api/roles/:id` | Bearer | Role detail |
 | `POST /api/roles` | Bearer | Create role |
 | `PUT /api/roles/:id` | Bearer | Update role |
@@ -369,14 +373,14 @@ This operation is **not** wrapped in a SQL transaction — it uses manual compen
 
 ### Product ingestion pipeline
 
-`src/services/pipelineOrchestrator.js` runs an async 7-step job tracked in `RETSC_LOG_SKU_UPLOAD`:
+`src/services/pipelineOrchestrator.js` runs an async 7-step job tracked in `RETSC_LOG_SKU_UPLOAD` — this describes the **original intended design**; the pipeline is non-functional today (see `RETSC_LOG_SKU_UPLOAD` note below) and step 6 additionally calls now-removed `productRepo` functions (`findByGtinAndEnterprise`/`insertMany`/`update`) that targeted a table (`RETSC_OP_PRODUCTS`) which no longer exists:
 
 1. **validating_gtins** — filters rows against EAN8/UPC12/EAN13 check digits
 2. **hashing** — SHA-256 dedup against `RETSC_LOG_IMAGE_UPLOAD` and within the batch
 3. **matching** — GTIN from image filename prefix (e.g. `0123456789012_front.jpg`) matched to Excel rows; one image per GTIN
 4. **hierarchy** — calculates blob subfolder depth based on product counts vs. `BLOB_HIERARCHY_THRESHOLD`; path segments are slugified (lowercase, accent-stripped, spaces → hyphens)
 5. **uploading** — uploads to Azure or mock in batches of 10 with exponential-backoff retry (1s/2s/4s, 3 attempts); fails job if >50% fail
-6. **persisting** — upserts products into `RETSC_OP_PRODUCTS`; inserts image records into `RETSC_LOG_IMAGE_UPLOAD`
+6. **persisting** — was meant to upsert products and insert image records into `RETSC_LOG_IMAGE_UPLOAD`
 7. **ai_tracking** — records `pending_training` entries in `RETSC_AI_DETECTION_MODELS` per category
 
 Pipeline is fire-and-forget: `POST /process/:jobId` returns immediately; clients poll `/processing-status/:jobId`.
@@ -448,6 +452,7 @@ Extends `RETSC_AI_DETECTION_MODELS` (already created per-category by the smart-c
 | `imageValidationService.js`, `jobService.js`, `queueService.js` | `/api/sku-images` (active flow) | Live — make SKU image upload async/job-based and hand off OCR/embeddings to an external Azure Function |
 | `customVisionService.js` | `aiInfrastructureService.js`, `shelfPhotoUploadService.js`, `annotationSyncService.js`, `modelTrainingService.js` | Mostly live (Issues 8.1/8.2/8.3) — solo `createImageFromData()` sigue siendo stub; el resto llama a la API real de Custom Vision Training v3.3 vía `fetch` |
 | `azureVisionService.js` | `/api/shelf-photos` only | Permissive stub; ignores real credentials until the SDK call is implemented |
+| `customVisionService.js` | `aiInfrastructureService.js` (project creation), `annotationSyncService.js` (region sync), `modelTrainingService.js` (training) | Mixed — `createProject`/region CRUD/training calls are real (Issues 8.1–8.3); `createImageFromData()` is still a stub |
 | `aiService.js`, `hierarchyService.js` | `pipelineOrchestrator.js` only | Tied to the legacy/broken Excel image pipeline (see `loadStateRepo.js` note above) |
 | `matchingService.js` | `pipelineOrchestrator.js` (legacy), plus `extractGTINFromFilename()` used standalone by `productController.js` | Mixed — the service as a whole is legacy, but that one function still has a live caller |
 
@@ -456,10 +461,9 @@ Extends `RETSC_AI_DETECTION_MODELS` (already created per-category by the smart-c
 `POST /api/skus/upload-excel` is the **active** SKU upload path (replaces the old image-pipeline for product cataloguing). It is **synchronous** — the response includes final `{ metrics, errors }` in one call.
 
 Flow in `src/services/skuService.js`:
-1. Validate `enterpriseCategoryId` belongs to the authenticated enterprise (`RETSC_OP_ENTERPRISE_CATEGORIES`).
-2. Parse the Excel file — required columns: `gtin` (aliases: `ean`, `barcode`, `codigo`, etc.) and `description`; optional: `brand`. Headers are accent/case-normalized.
-3. For each row: validate EAN format (8, 12, or 13 numeric digits); upsert `RETSC_OP_PRODUCTS` (via `product_key = EAN`); upsert `RETSC_OP_SKUS`; insert into `RETSC_OP_ENTERPRISE_SKUS` if not already present; log to `RETSC_LOG_SKU_UPLOAD`.
-4. `detection_category_id` on `RETSC_OP_ENTERPRISE_SKUS` is set from `resolved_category_id ?? selected_category_id` of the enterprise category row.
+1. Validate `enterpriseCategoryId` belongs to the authenticated enterprise (`RETSC_OP_ENTERPRISE_CATEGORIES`); resolve `detectionCategoryId = resolved_category_id ?? selected_category_id`.
+2. Parse the Excel file — required columns: `gtin` (aliases: `ean`, `barcode`, `codigo`, etc.) and `description`; optional: `brand`, `manufacturer`, `category`, `subcategory`, `volume`, `relevant`. Headers are accent/case-normalized.
+3. For each row: validate EAN format (8, 12, or 13 numeric digits + GS1 checksum); find-or-create the SKU in `RETSC_OP_SKUS` by EAN (`selected_category_id`/`detection_category_id` set from the enterprise category resolved in step 1 — global, not per-empresa); insert-or-resync the enterprise↔SKU link in `RETSC_OP_ENTERPRISE_PRODUCT_SEG` with the client's own `brand`/`supplier`/`client_category`/`client_subcategory`/`volume`/`relevant_feature` from that row (an existing link gets its client data **updated**, not left stale, on repeat uploads); log to `RETSC_LOG_SKU_UPLOAD`.
 
 `skuService.js` uses GTIN length heuristics to fix leading-zero loss: a 7-digit string is padded to 8, an 11-digit string to 12.
 
@@ -472,6 +476,8 @@ Supporting services for the pipelines above: `imageValidationService.js` (pre-OC
 ### Input validation
 
 All email fields are validated with `isValidEmail()` from `src/utils/validators.js` before any DB operation. This applies to: auth register, user create/update, enterprise register/create/update. Returns HTTP 400 with message `'Formato de email inválido'` on failure.
+
+Costa Rica cédula validation (`normalizeCedula()`, `isValidCedulaFisica()` — 9 digits, `isValidCedulaJuridica()` — 10 digits, all in `src/utils/validators.js`, Issue B5): `normalizeCedula()` strips dashes/spaces and **must** be used on both the validate and the persist side — comparing an un-normalized cédula against a normalized one stored earlier silently defeats duplicate detection. Used by `enterpriseService.registerEnterprise()`/`createEnterprise()` (fiscalId = jurídica, admin cédula = física) and `userService.createAndAssign()` (física).
 
 ### Column naming convention — critical
 
@@ -555,6 +561,3 @@ Documented in its own file header as the intended per-enterprise entry point, bu
 
 `analyzeCaption()` and `isShelf()` return permissive stub results (`accepted:true`/`isShelf:true`) unconditionally — even when `AZURE_VISION_ENDPOINT`/`AZURE_VISION_KEY` are set, it only logs a warning and still returns the stub, because the actual Azure AI Vision SDK call was never implemented. Needed before the shelf-photo quality gate can reject bad captions/non-shelf images in production.
 
-### 13. `migrate-add-sku-columns.js` adds columns not yet used
-
-`scripts/migrate-add-sku-columns.js` adds `Supplier`, `client_category`, `client_subcategory` to `RETSC_OP_PRODUCTS` (idempotent, run manually). As of this writing no repository or service reads/writes these columns — confirm they're actually needed before relying on their presence in a fresh DB.

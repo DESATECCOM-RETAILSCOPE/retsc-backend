@@ -5,7 +5,6 @@
 //   RETSC_AI_SKU_IMAGE_METADATA — metadata extendida en key-value
 //   RETSC_LOG_IMAGE_UPLOAD      — log de cada intento de carga
 //   RETSC_OP_SKUS               — lookup de SKU por EAN; detection_category_id define el blob path
-//   (RETSC_OP_PRODUCTS eliminada — categoría se resuelve vía SKUS.detection_category_id)
 //   RETSC_OP_CATEGORIES         — is_smart_dtc y slug del blob path
 //
 // Flujo de huérfanas:

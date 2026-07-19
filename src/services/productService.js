@@ -1,5 +1,4 @@
 const productRepo = require('../repositories/productRepo');
-const imageRepo   = require('../repositories/imageRepo');
 
 // categoryName prioriza client_category (la categoría propia del cliente, tal
 // como viene en su Excel de carga) por sobre commercial_category_dsc (el árbol
@@ -52,11 +51,4 @@ async function listCategoriesWithProducts(enterpriseId) {
   return rows.map((r) => ({ categoryId: r.client_category, categoryDsc: r.client_category }));
 }
 
-async function findById(productId, enterpriseId) {
-  const product = await productRepo.findById(productId);
-  if (!product) return null;
-  const images = await imageRepo.findByProduct(productId).catch(() => []);
-  return { ...toProductDTO(product), images };
-}
-
-module.exports = { listByEnterprise, listCategoriesWithProducts, findById };
+module.exports = { listByEnterprise, listCategoriesWithProducts };

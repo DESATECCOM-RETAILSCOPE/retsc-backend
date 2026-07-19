@@ -2,8 +2,7 @@
  * Repositorio SKU — catálogo global y segmentación enterprise.
  *
  * Esquema real en BD (verificado con INFORMATION_SCHEMA + sys.foreign_keys, 2026-07-17;
- * RETSC_OP_PRODUCTS y RETSC_OP_ENTERPRISE_SKUS NO EXISTEN — ver docs/TODO-prioridad-3.md /
- * Issue B1-B5 de QA para el historial de esta corrección):
+ * ver docs/TODO-prioridad-3.md / Issue B1-B5 de QA para el historial de esta corrección):
  *   RETSC_OP_SKUS                    (SKU global)
  *   RETSC_OP_ENTERPRISE_PRODUCT_SEG  (segmentación por enterprise — antes se escribía
  *                                      contra una tabla RETSC_OP_ENTERPRISE_SKUS que

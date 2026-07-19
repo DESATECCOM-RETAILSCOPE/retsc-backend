@@ -208,15 +208,10 @@ async function runTests() {
   console.log('\n--- Test 10: adopción retroactiva ---');
   let testSkuId = null;
   {
-    const prod = await pool.request().query(`SELECT TOP 1 product_id FROM RETSC_OP_PRODUCTS`);
-    const productId = prod.recordset[0]?.product_id;
-    if (!productId) { fail('No hay productos en la DB'); return; }
-
-    // Insertar SKU de prueba con el EAN huérfano
+    // resolveOrphansForSku solo necesita el EAN — RETSC_OP_SKUS no tiene product_id.
     const ins = await pool.request()
-      .input('ean',       sql.VarChar(18), EAN_ORPHAN)
-      .input('productId', sql.Int,         productId)
-      .query(`INSERT INTO RETSC_OP_SKUS (EAN, product_id) OUTPUT INSERTED.SKU_ID VALUES (@ean, @productId)`);
+      .input('ean', sql.VarChar(18), EAN_ORPHAN)
+      .query(`INSERT INTO RETSC_OP_SKUS (EAN) OUTPUT INSERTED.SKU_ID VALUES (@ean)`);
     testSkuId = ins.recordset[0]?.SKU_ID;
     log(`SKU de prueba: SKU_ID=${testSkuId}`);
 

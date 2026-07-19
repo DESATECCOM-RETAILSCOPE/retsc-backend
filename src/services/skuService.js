@@ -224,8 +224,7 @@ const processSkuExcel = async (
     }
 
     // ── 2. Buscar o crear SKU global por EAN ──────────────────────────────
-    // NOTA: RETSC_OP_PRODUCTS no existe; Product_dsc y categorías viven
-    // directamente en RETSC_OP_SKUS.
+    // Product_dsc y categorías viven directamente en RETSC_OP_SKUS.
     //   selected_category_id  → enterprise_category_id (PK de ENTERPRISE_CATEGORIES)
     //   detection_category_id → resolved_category_id (Category_id smart de CATEGORIES)
     let skuRow = await skuRepo.findSkuByEan(row.gtin);
