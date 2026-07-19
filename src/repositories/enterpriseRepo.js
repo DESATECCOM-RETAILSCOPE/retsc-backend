@@ -24,19 +24,6 @@ const listAll = async () => {
   return r.recordset;
 };
 
-// Enterprises the given user is actively linked to, via the bridge table.
-const listByUser = async (userId) => {
-  const pool = await getPool();
-  const r = await pool.request()
-    .input('userId', sql.Int, userId)
-    .query(`
-      SELECT e.* FROM ${TABLE} e
-      INNER JOIN RETSC_OP_USRSXENTERP ux ON ux.Enterprise_id = e.Enterprise_id
-      WHERE ux.User_id = @userId AND ux.Status = 1
-    `);
-  return r.recordset;
-};
-
 const insert = async (enterprise) => {
   const pool = await getPool();
   const r = await pool.request()
@@ -102,4 +89,4 @@ const remove = async (id) => {
   return true;
 };
 
-module.exports = { findById, findByFiscalId, listAll, listByUser, insert, update, remove };
+module.exports = { findById, findByFiscalId, listAll, insert, update, remove };
