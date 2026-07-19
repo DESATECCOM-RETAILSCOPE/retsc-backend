@@ -4,7 +4,7 @@ const enterpriseRepo = require("../repositories/enterpriseRepo");
 const userRepo = require("../repositories/userRepo");
 const userEnterpriseRepo = require("../repositories/userEnterpriseRepo");
 const roleRepo = require("../repositories/roleRepo");
-const { isValidEmail } = require("../utils/validators");
+const { isValidEmail, normalizeCedula, isValidCedulaFisica, isValidCedulaJuridica } = require("../utils/validators");
 const { ROLES } = require("../config/roles");
 
 const VALID_TYPES = ["Proveedor", "Detallista", "Empresa de servicios"];
@@ -86,11 +86,22 @@ const registerEnterprise = async (payload) => {
   if (!isValidEmail(invoiceMail)) throw serviceError('Formato de invoiceMail inválido', 400);
   if (!isValidEmail(contactMail)) throw serviceError('Formato de contactMail inválido', 400);
   if (!isValidEmail(adminEmail))  throw serviceError('Formato de adminEmail inválido', 400);
+  if (!isValidCedulaJuridica(fiscalId)) {
+    throw serviceError('La cédula jurídica debe tener 10 dígitos (formato Costa Rica).', 400);
+  }
+  if (!isValidCedulaFisica(adminCedula)) {
+    throw serviceError('La cédula física del administrador debe tener 9 dígitos (formato Costa Rica).', 400);
+  }
+
+  // Normalizadas a solo dígitos — mismo criterio en toda la app (Issue B5),
+  // así el chequeo de duplicados no falla por formato (guiones sí/no).
+  const normalizedFiscalId = normalizeCedula(fiscalId);
+  const normalizedAdminCedula = normalizeCedula(adminCedula);
 
   // ───── Fail-fast: verificar duplicados ANTES de cualquier insert ─────
 
   // 1. Empresa: fiscalId único
-  if (await enterpriseRepo.findByFiscalId(fiscalId)) {
+  if (await enterpriseRepo.findByFiscalId(normalizedFiscalId)) {
     throw serviceError(
       "Ya existe una empresa registrada con ese fiscalId",
       409,
@@ -102,7 +113,7 @@ const registerEnterprise = async (payload) => {
   const userByEmail = await userRepo.findByEmail(adminEmail);
 
   // 3. Cédula: si existe, no debe tener relaciones activas
-  const userByCedula = await userRepo.findByCedula(adminCedula);
+  const userByCedula = await userRepo.findByCedula(normalizedAdminCedula);
 
   if (userByCedula) {
     const activeRelations = await userEnterpriseRepo.findActiveByUserId(
@@ -149,7 +160,7 @@ const registerEnterprise = async (payload) => {
       User_name: adminName,
       Email: adminEmail,
       PasswordHash: passwordHash,
-      ced_identidad: adminCedula,
+      ced_identidad: normalizedAdminCedula,
       Status: 1,
       Created_date: new Date().toISOString(),
     });
@@ -175,7 +186,7 @@ const registerEnterprise = async (payload) => {
   let insertedEnterprise = null;
   try {
     insertedEnterprise = await enterpriseRepo.insert({
-      Fiscal_id: fiscalId,
+      Fiscal_id: normalizedFiscalId,
       Enterprise_dsc: enterpriseDsc,
       Country: country,
       State: state,
@@ -316,8 +327,12 @@ const createEnterprise = async (payload) => {
 
   if (!isValidEmail(invoiceMail)) throw serviceError('Formato de invoiceMail inválido', 400);
   if (!isValidEmail(contactMail)) throw serviceError('Formato de contactMail inválido', 400);
+  if (!isValidCedulaJuridica(fiscalId)) {
+    throw serviceError('La cédula jurídica debe tener 10 dígitos (formato Costa Rica).', 400);
+  }
 
-  if (await enterpriseRepo.findByFiscalId(fiscalId)) {
+  const normalizedFiscalId = normalizeCedula(fiscalId);
+  if (await enterpriseRepo.findByFiscalId(normalizedFiscalId)) {
     throw serviceError(
       "Ya existe una empresa registrada con ese fiscalId",
       409,
@@ -325,7 +340,7 @@ const createEnterprise = async (payload) => {
   }
 
   const inserted = await enterpriseRepo.insert({
-    Fiscal_id: fiscalId,
+    Fiscal_id: normalizedFiscalId,
     Enterprise_dsc: enterpriseDsc,
     Country: country,
     State: state,

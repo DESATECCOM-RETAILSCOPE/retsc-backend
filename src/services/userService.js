@@ -2,7 +2,7 @@ const bcrypt = require('bcryptjs');
 const userRepo           = require('../repositories/userRepo');
 const userEnterpriseRepo = require('../repositories/userEnterpriseRepo');
 const roleRepo           = require('../repositories/roleRepo');
-const { isValidEmail }   = require('../utils/validators');
+const { isValidEmail, normalizeCedula, isValidCedulaFisica } = require('../utils/validators');
 
 function svcError(msg, statusCode, payload) {
   const err = new Error(msg);
@@ -54,8 +54,13 @@ const createAndAssign = async (payload, enterpriseId) => {
 
   if (password.length < 8) throw svcError('La contraseña debe tener al menos 8 caracteres', 400);
   if (!isValidEmail(email)) throw svcError('Formato de email inválido', 400);
+  if (!isValidCedulaFisica(cedIdentidad)) {
+    throw svcError('La cédula física debe tener 9 dígitos (formato Costa Rica).', 400);
+  }
 
-  const normalizedCedula = cedIdentidad.trim();
+  // Normalizada a solo dígitos — así el chequeo de duplicados no falla porque
+  // una vez se tipeó con guiones y otra sin ellos.
+  const normalizedCedula = normalizeCedula(cedIdentidad);
   const existingByCedula = await userRepo.findByCedula(normalizedCedula);
 
   let reactivating = false;
