@@ -23,9 +23,10 @@ const listUsers = async (req, res) => {
 const createUser = async (req, res) => {
   try {
     const result = await userService.createAndAssign(req.body, req.user.enterpriseId);
-    const message = result.reactivated
+    let message = result.reactivated
       ? 'Usuario reactivado y asignado a la empresa.'
       : 'Usuario creado y asignado a la empresa.';
+    if (!result.emailSent) message += ' No se pudo enviar el correo de bienvenida.';
     return res.status(201).json({ success: true, userId: result.userId, message });
   } catch (err) { return handleError(res, err); }
 };

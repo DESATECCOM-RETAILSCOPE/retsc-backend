@@ -3,12 +3,38 @@ const userRepo           = require('../repositories/userRepo');
 const userEnterpriseRepo = require('../repositories/userEnterpriseRepo');
 const roleRepo           = require('../repositories/roleRepo');
 const { isValidEmail, normalizeCedula, isValidCedulaFisica } = require('../utils/validators');
+const { sendMail }       = require('../utils/mailer');
 
 function svcError(msg, statusCode, payload) {
   const err = new Error(msg);
   err.statusCode = statusCode;
   if (payload !== undefined) err.payload = payload;
   return err;
+}
+
+// Issue B6 (feedback dueña). CONFIRMAR: el prompt asumía que ya existe un
+// flujo de cambio de contraseña con token de reset (rama feat--cambiar-contrasena,
+// mergeada en 29f1f89) para armar un enlace directo. Verificado con grep sobre
+// src/ completo: no hay ningún endpoint change-password ni token de reset en
+// el código actual — coincide con el TODO #1 de CLAUDE.md ("NOT IMPLEMENTED").
+// El diff de ese commit tocó authController/authService/mailer.js pero ese
+// código no está en el árbol actual (revertido o pisado en un merge posterior).
+// Sin token que enlazar, el correo solo manda la URL de login — el usuario
+// entra con la contraseña que le indicó su administrador (la que se tipeó en
+// el formulario de alta) y, si necesita cambiarla, usa "¿Olvidaste tu
+// contraseña?" (POST /api/auth/forgot-password, ya existe). Avisar a la
+// dueña de este gap antes de considerar B6 completo end-to-end.
+async function sendWelcomeEmail({ email, userName }) {
+  const url = process.env.FRONTEND_URL || 'http://localhost:5173';
+  await sendMail({
+    to: email,
+    subject: 'Bienvenido a RetailScope',
+    text: `Hola ${userName},\n\nSe creó tu cuenta en RetailScope. Ingresá en ${url} con la contraseña que te indicó tu administrador.\n\nSi no la tenés o querés cambiarla, usá la opción "¿Olvidaste tu contraseña?" en la pantalla de inicio de sesión.\n\nEquipo RetailScope`,
+    html: `<p>Hola <strong>${userName}</strong>,</p>
+           <p>Se creó tu cuenta en RetailScope. Ingresá en <a href="${url}">${url}</a> con la contraseña que te indicó tu administrador.</p>
+           <p>Si no la tenés o querés cambiarla, usá la opción "¿Olvidaste tu contraseña?" en la pantalla de inicio de sesión.</p>
+           <p>Equipo RetailScope</p>`,
+  });
 }
 
 // ── 1.1 ──────────────────────────────────────────────────────────────────────
@@ -127,6 +153,17 @@ const createAndAssign = async (payload, enterpriseId) => {
     throw err;
   }
 
+  // El envío de correo NUNCA debe revertir la creación — ya quedó persistida
+  // en SQL antes de llegar acá. Un fallo de SMTP solo se loguea y se refleja
+  // en emailSent para que el controller ajuste el mensaje de éxito.
+  let emailSent = true;
+  try {
+    await sendWelcomeEmail({ email: normalizedEmail, userName: userName.trim() });
+  } catch (err) {
+    console.error(`[userService] no se pudo enviar el correo de bienvenida a ${normalizedEmail}:`, err.message);
+    emailSent = false;
+  }
+
   return {
     userId: user.User_id,
     enterpriseId,
@@ -134,6 +171,7 @@ const createAndAssign = async (payload, enterpriseId) => {
     reactivated: reactivating,
     email: normalizedEmail,
     userName: userName.trim(),
+    emailSent,
   };
 };
 
