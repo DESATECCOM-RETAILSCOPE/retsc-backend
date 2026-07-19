@@ -116,13 +116,48 @@ async function deleteOldRegions(projectId, rows) {
   }
 }
 
+// Guarda anti-duplicados (ajuste post-revisión jefatura, Issue 8.2): una anotación con
+// cv_region_id ya seteado se considera sincronizada de forma definitiva y NUNCA se reenvía a
+// Custom Vision, aunque syncRegionsForPhoto se vuelva a llamar para la misma foto — cubre:
+//   1. Usuario guarda, sale y vuelve → cajitas recargadas desde BD → las ya sincronizadas
+//      no se reenvían (cv_region_id ya está seteado).
+//   2. Retry automático tras un fallo de sync → no reintenta las que ya quedaron SYNCED.
+//   3. Doble submit (doble clic antes de que responda el servidor) → si el primer submit ya
+//      alcanzó a persistir cv_region_id antes del segundo, el segundo las salta.
+// NOTA — ventana de carrera real en el caso 3: si dos requests concurrentes llegan a este punto
+// ANTES de que markSynced() del primero escriba cv_region_id, ambos ven cv_region_id=NULL para
+// las mismas anotaciones y ambos intentarían crear la región (duplicado real en Custom Vision,
+// no solo trabajo redundante). El filtro de abajo no cierra esa ventana — TODO: si el doble
+// submit resulta ser un caso real (no solo teórico) desde el canvas, evaluar un mecanismo de
+// idempotencia (p. ej. UPDATE optimista "reservar" con cv_sync_status antes de llamar a CV, o
+// una constraint) — no se toca estructura de tablas en este ajuste sin acordarlo antes.
+function splitByCvRegionId(rows) {
+  const pendingSync   = rows.filter(r => !r.cv_region_id);
+  const alreadySynced = rows.filter(r => r.cv_region_id);
+  return { pendingSync, alreadySynced };
+}
+
 // Sincroniza las cajitas actuales de una foto contra Custom Vision:
 // borra las regiones viejas y crea las nuevas a partir de las coordenadas actuales en SQL.
+// Solo procesa anotaciones sin cv_region_id (ver splitByCvRegionId) — las ya sincronizadas
+// quedan intactas, no se tocan ni se borran ni se recrean.
 // Nunca lanza — cualquier fallo se registra vía markFailed y se loguea.
 async function syncRegionsForPhoto(rows) {
   const first      = rows[0];
   const categoryId = first.dtc_category_id;
-  const annotationIds = rows.map(r => r.annotation_id);
+
+  const { pendingSync, alreadySynced } = splitByCvRegionId(rows);
+
+  if (alreadySynced.length) {
+    console.log(`[annotationSync] photo_id=${first.photo_id}: ${alreadySynced.length} anotación(es) ya tenían cv_region_id — se omiten (no se reenvían a Custom Vision)`);
+  }
+
+  if (!pendingSync.length) {
+    console.log(`[annotationSync] photo_id=${first.photo_id}: todas las anotaciones ya estaban sincronizadas — nada que enviar a Custom Vision`);
+    return;
+  }
+
+  const annotationIds = pendingSync.map(r => r.annotation_id);
 
   const model     = await aiModelRepo.findByCategoryId(categoryId);
   const projectId = model?.customvision_project_id ?? null;
@@ -133,7 +168,9 @@ async function syncRegionsForPhoto(rows) {
   }
 
   try {
-    await deleteOldRegions(projectId, rows);
+    // pendingSync ya filtró todo lo que tenía cv_region_id, así que esto es un no-op hoy —
+    // se deja por si en el futuro un cv_region_id "huérfano" (sin fila SYNCED) llegara a colarse.
+    await deleteOldRegions(projectId, pendingSync);
 
     const cvImageId = extractCvImageId(rows);
     if (!cvImageId) {
@@ -141,7 +178,7 @@ async function syncRegionsForPhoto(rows) {
     }
     const tagId = resolveTagId(first.canal);
 
-    const regionsToCreate = rows.filter(r =>
+    const regionsToCreate = pendingSync.filter(r =>
       r.bbox_left != null && r.bbox_top != null && r.bbox_width != null && r.bbox_height != null
     );
 

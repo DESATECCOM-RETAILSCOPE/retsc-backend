@@ -169,9 +169,13 @@ async function deleteImages(projectId, imageIds) {
 // Formato verificado (Custom Vision Training API v3.3 — no se pudo abrir la página interactiva
 // de Microsoft Learn desde este entorno, se confirmó por búsqueda):
 //
-//   POST {endpoint}/customvision/v3.3/training/projects/{projectId}/train?trainingType=Advanced
-//     Sin body. `trainingType` default es 'Regular'; acá se usa siempre 'Advanced' (decisión
-//     del issue). Devuelve el objeto Iteration recién creado: { id, name, status, created, ... }.
+//   POST {endpoint}/customvision/v3.3/training/projects/{projectId}/train?trainingType=Regular
+//     Sin body. `trainingType` default es 'Regular' si se omite el query param — acá se manda
+//     explícito de todas formas (decisión post-revisión de jefatura, BETA: no se reserva
+//     presupuesto Advanced, Regular alcanza con el volumen actual de 15 fotos por categoría por
+//     canal; Advanced se evalúa post-BETA). Se prefiere explícito antes que depender del default
+//     no documentado oficialmente de la API, por si Azure lo cambia sin aviso. Devuelve el
+//     objeto Iteration recién creado: { id, name, status, created, ... }.
 //
 //   GET {endpoint}/customvision/v3.3/training/projects/{projectId}/iterations/{iterationId}
 //     Devuelve el mismo objeto Iteration actualizado. `status` observado: 'New' | 'Training' |
@@ -184,7 +188,9 @@ async function deleteImages(projectId, imageIds) {
 
 // Inicia el entrenamiento de un proyecto. Devuelve la iteración creada ({ id, status, ... }).
 // Lanza si la API falla (el llamador en modelTrainingService decide cómo reaccionar).
-async function trainProject(projectId, { trainingType = 'Advanced' } = {}) {
+// trainingType default 'Regular' — ver nota de cabecera de esta sección. No manda
+// reservedBudgetInHours (parámetro exclusivo de Advanced, no aplica a Regular).
+async function trainProject(projectId, { trainingType = 'Regular' } = {}) {
   const params = new URLSearchParams({ trainingType });
   const iteration = await cvFetch(`projects/${projectId}/train?${params}`, { method: 'POST' });
   console.log(`[customVision] entrenamiento iniciado — proyecto=${projectId} iterationId=${iteration.id} status=${iteration.status} trainingType=${trainingType}`);
