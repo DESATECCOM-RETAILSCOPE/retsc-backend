@@ -32,6 +32,25 @@ function getTrainingContainer() {
   return process.env.AZURE_GLOBAL_TRAINING_CONTAINER || 'global-sku-training';
 }
 
+// BUG (encontrado en prueba E2E, 2026-07-19): RETSC_AI_DETECTION_MODELS.prediction_resource_id
+// es VARCHAR(100), pero un Azure Resource ID completo (/subscriptions/.../resourceGroups/.../
+// providers/Microsoft.CognitiveServices/accounts/{nombre}) fácilmente supera esa longitud —
+// en este ambiente mide 122 caracteres. Enviarlo tal cual rompe el protocolo TDS del UPDATE
+// ("Data type 0xA7 has an invalid data length or metadata length"), y como updateCustomVisionRefs
+// se llama DESPUÉS de crear el proyecto real en Custom Vision, el resultado es un proyecto CV
+// huérfano: existe en Azure pero customvision_project_id nunca queda guardado en la fila.
+// No se trunca el valor (quedaría un Resource ID inválido y parecería válido) — se guarda null
+// y se loguea la advertencia. Ampliar la columna es una migración de estructura, fuera de
+// alcance acá; hacerlo si en el futuro se necesita el valor completo persistido.
+function getSafePredictionResourceId() {
+  const raw = process.env.CUSTOM_VISION_PREDICTION_RESOURCE_ID || null;
+  if (raw && raw.length > 100) {
+    console.warn(`[aiInfra] CUSTOM_VISION_PREDICTION_RESOURCE_ID mide ${raw.length} caracteres, excede prediction_resource_id VARCHAR(100) — se guarda NULL en vez de truncar.`);
+    return null;
+  }
+  return raw;
+}
+
 // ─── Paso de Blob: marker + registro de container ─────────────────────────────
 //
 // El container 'global-sku-training' es COMPARTIDO entre todas las categorías smart.
@@ -50,18 +69,35 @@ async function provisionBlobForCategory({ categoryId, prefix, containerName, err
   const existingContainer = await globalBlobContainerRepo.findByContainerName(containerName);
 
   if (!existingContainer) {
-    // Primera categoría en usar este container: registrar en DB
-    const blobStatus = errors.some(e => e.startsWith('Blob marker')) ? 'PENDING_AZURE' : 'ACTIVE';
-    await globalBlobContainerRepo.insert({
-      categoryId,
-      containerName,
-      containerType:  'GLOBAL_TRAINING',
-      // TODO: extraer el nombre de la cuenta del AZURE_STORAGE_CONNECTION_STRING en lugar de hardcodear.
-      storageAccount: 'storagescopeprod',
-      prefix,
-      description:    '',
-      status:         blobStatus,
-    });
+    // Primera categoría en usar este container: registrar en DB.
+    // BUG (encontrado en prueba E2E, 2026-07-19): este insert no estaba protegido — con varias
+    // categorías provisionando en paralelo (fire-and-forget), dos podían pasar el chequeo de
+    // findByContainerName antes de que la primera hiciera commit, y la segunda chocaba contra
+    // la UNIQUE constraint. Como categoryService.js llama a provisionForCategory().then(...) sin
+    // .catch(), esa excepción sin capturar abortaba TODO el resto del provisioning de esa
+    // categoría (ni siquiera llegaba a crear su fila en RETSC_AI_DETECTION_MODELS).
+    try {
+      const blobStatus = errors.some(e => e.startsWith('Blob marker')) ? 'PENDING_AZURE' : 'ACTIVE';
+      await globalBlobContainerRepo.insert({
+        categoryId,
+        containerName,
+        containerType:  'GLOBAL_TRAINING',
+        // TODO: extraer el nombre de la cuenta del AZURE_STORAGE_CONNECTION_STRING en lugar de hardcodear.
+        storageAccount: 'storagescopeprod',
+        prefix,
+        description:    '',
+        status:         blobStatus,
+      });
+    } catch (err) {
+      // Error 2627/2601 de SQL Server = violación de UNIQUE constraint — significa que otra
+      // categoría ganó la carrera y ya registró el container; no es un error real, es el mismo
+      // caso que existingContainer ya intentaba prevenir. Cualquier otro error sí se registra.
+      if (err.number === 2627 || err.number === 2601) {
+        console.log(`[aiInfra] container "${containerName}" ya fue registrado por otra categoría (carrera de provisioning en paralelo) — se ignora.`);
+      } else {
+        errors.push(`Blob container registro: ${err.message}`);
+      }
+    }
   }
   // Si ya existe el container, no insertamos nada (UNIQUE constraint).
   // El prefix de esta categoría queda trazado solo en RETSC_AI_DETECTION_MODELS.model_name.
@@ -111,7 +147,7 @@ const provisionForCategory = async ({ categoryId, categoryName }) => {
       if (project) {
         await aiModelRepo.updateCustomVisionRefs(model.detection_model_id, {
           customvisionProjectId: project.id,
-          predictionResourceId:  process.env.CUSTOM_VISION_PREDICTION_RESOURCE_ID || null,
+          predictionResourceId:  getSafePredictionResourceId(),
         });
         await aiModelRepo.updateStatus(model.detection_model_id, 'PROJECT_CREATED');
       }
@@ -166,7 +202,7 @@ const retryForCategory = async (categoryId) => {
       if (project) {
         await aiModelRepo.updateCustomVisionRefs(existingModel.detection_model_id, {
           customvisionProjectId: project.id,
-          predictionResourceId:  process.env.CUSTOM_VISION_PREDICTION_RESOURCE_ID || null,
+          predictionResourceId:  getSafePredictionResourceId(),
         });
         await aiModelRepo.updateStatus(existingModel.detection_model_id, 'PROJECT_CREATED');
       }

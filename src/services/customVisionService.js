@@ -70,28 +70,55 @@ async function createProject(name) {
 // TODO (8.3): getPublishedIterations(projectId) — obtener el modelo publicado.
 
 // Sube una imagen a Custom Vision SIN regiones para que el equipo DTC anote después (Issue 7.2 / #42).
-// Devuelve { stub, cvImageId }.
+// Devuelve { stub, cvImageId, duplicate }.
 //
-// Si !isConfigured() o projectId es null (modelo aún en PENDING): devuelve stub con ID simulado.
-// Esto permite probar el flujo end-to-end en mock sin bloquear por credenciales.
+// IMPLEMENTADO (Issue 8.2, 2026-07-19 — cierre del hueco que bloqueaba el E2E: sin esto,
+// annotationSyncService.createImageRegions() recibía un cvImageId falso y Custom Vision
+// respondía 400 "No image regions provided" para el 100% de las fotos).
 //
-// tagId resuelve el canal de la foto (OMT/DTT/CONVENIENCE → tag de Custom Vision).
-// El mapeo de canal a tagId vendrá del Issue #35. Por ahora se pasa null en stub
-// o desde env opcionales CV_TAG_OMT / CV_TAG_DTT / CV_TAG_CONVENIENCE.
+// Formato verificado contra CV real (API v3.3, no hay SDK):
+//   POST {endpoint}/customvision/v3.3/training/projects/{projectId}/images?tagIds={tagId}
+//     Content-Type: application/octet-stream, body: el binario crudo de la imagen (NO
+//     multipart/form-data — un intento con FormData + 'imageData' devolvió 415 Unsupported
+//     Media Type; el endpoint correcto para subir UNA imagen desde bytes es este, no
+//     /images/imagefiles ni /images/files, que son variantes para otros casos de uso).
+//     tagIds es opcional y repetible (?tagIds=a&tagIds=b) — acá se manda una sola.
+//   Respuesta: { isBatchSuccessful, images: [{ status, image: { id, ... } }] }
+//     status observado: 'OK' (subida nueva) | 'OKDuplicate' (Custom Vision ya tenía esta
+//     imagen — probablemente por hash interno — y devuelve el id existente; se trata como
+//     éxito, no como error, reutilizando ese id).
 //
-// TODO: implementar cuando se complete Issue 8.2:
-//   const params = tagId ? `?tagIds=${tagId}` : '';
-//   const formData = new FormData();
-//   formData.append('imageData', new Blob([buffer]));
-//   await cvFetch(`projects/${projectId}/images/imagefiles${params}`, { method: 'POST', body: formData, headers: {} });
-
-async function createImageFromData(projectId, _buffer, _tagId) {
+// Si !isConfigured() o projectId es null (modelo aún en PENDING): devuelve stub con ID
+// simulado, igual que antes — permite probar el resto del flujo sin credenciales.
+//
+// tagId resuelve el canal de la foto (OMT/DTT/CONVENIENCE → tag de Custom Vision) — ver
+// resolveTagId() en annotationSyncService.js. NOTA (Issue #35, sin resolver acá): el mapeo
+// hoy es una env var global (CV_TAG_OMT/DTT/CONVENIENCE) pero cada proyecto CV tiene sus
+// propios tag IDs — con más de una categoría con proyecto activo simultáneo, esa única env
+// var no puede ser correcta para todas a la vez. Confirmado en el E2E previo. Fuera de
+// alcance de este cierre; requiere un mapeo canal+categoría→tagId persistido, no una sola
+// env var por canal.
+async function createImageFromData(projectId, buffer, tagId) {
   if (!isConfigured() || !projectId) {
     return { stub: true, cvImageId: `stub-${crypto.randomUUID()}` };
   }
-  // TODO: implementar llamada real (ver bloque arriba).
-  console.warn('[customVision] createImageFromData aún no implementado. Devolviendo stub.');
-  return { stub: true, cvImageId: `stub-${crypto.randomUUID()}` };
+
+  const params = tagId ? `?${new URLSearchParams({ tagIds: tagId })}` : '';
+  const result = await cvFetch(`projects/${projectId}/images${params}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: buffer,
+  });
+
+  const entry = result?.images?.[0];
+  if (!entry) {
+    throw new Error('Custom Vision no devolvió ninguna imagen en la respuesta de createImageFromData.');
+  }
+  if (entry.status !== 'OK' && entry.status !== 'OKDuplicate') {
+    throw new Error(`Custom Vision rechazó la imagen (status=${entry.status}).`);
+  }
+
+  return { stub: false, cvImageId: entry.image.id, duplicate: entry.status === 'OKDuplicate' };
 }
 
 // Issue 8.2 — sincronización de anotaciones (regiones) a Custom Vision.

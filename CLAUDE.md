@@ -66,7 +66,7 @@ Copy `.env.example` to `.env` and fill in values. Required variables:
 - `BLOB_HIERARCHY_THRESHOLD` — folder-split threshold for blob paths (default: 500)
 - `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM` — email delivery; leave `SMTP_HOST` empty for mock mode (logs to console)
 - `AZURE_GLOBAL_TRAINING_CONTAINER` — blob container for AI training images (default: `global-sku-training`); shared by both the category AI infra flow and the SKU image ingestion flow
-- `CUSTOM_VISION_TRAINING_KEY`, `CUSTOM_VISION_PREDICTION_KEY`, `CUSTOM_VISION_ENDPOINT`, `CUSTOM_VISION_PREDICTION_RESOURCE_ID` — credenciales de Azure Custom Vision; `customVisionService.js` (`isConfigured()`) solo cae a comportamiento stub en `createImageFromData()` cuando faltan — el resto del servicio (crear proyecto, regiones, entrenamiento) ya hace llamadas HTTP reales una vez configurado (ver más abajo)
+- `CUSTOM_VISION_TRAINING_KEY`, `CUSTOM_VISION_PREDICTION_KEY`, `CUSTOM_VISION_ENDPOINT`, `CUSTOM_VISION_PREDICTION_RESOURCE_ID` — credenciales de Azure Custom Vision; sin ellas, `customVisionService.js` cae a comportamiento stub en todo el servicio (`isConfigured()` es el gate); con ellas configuradas, todo el servicio hace llamadas HTTP reales — incluido `createImageFromData()` (implementado 2026-07-19, ver más abajo)
 - `AZURE_VISION_ENDPOINT`, `AZURE_VISION_KEY` — Azure AI Vision (Image Analysis) credentials for shelf-photo caption/content checks; `azureVisionService.js` stays a permissive stub even when these are set (SDK call not implemented yet)
 - `AZURE_GLOBAL_SHELF_CONTAINER` — blob container for shelf-photo training images (default: `global-shelf-training`)
 - `AZURE_QUEUE_NAME` — Azure Storage Queue name `queueService.js` posts to after each SKU image upload, for an external `ProcessSkuImageQueue` Azure Function (not in this repo) to consume (default `sku-image-processing`)
@@ -140,7 +140,7 @@ POST /api/shelf-photos/upload  (shelfPhotoUploadService.uploadShelfPhoto)
   3. azureVisionService.analyzeCaption() + isShelf()     → STUB, always permissive
   4. dedup via SHA-256 (shelfPhotoRepo.findByHashGlobal, global scope, enterprise_id=NULL)
   5. blobStorageService.uploadToContainer()              → global-shelf-training/dtc-{slug}/{canal}/
-  6. customVisionService.createImageFromData()           → cvImageId (still a stub — see Custom Vision section below)
+  6. customVisionService.createImageFromData()           → cvImageId real (implemented — see Custom Vision section below)
   7. annotationRepo.insert()                              → RETSC_AI_TRAINING_ANNOTATIONS (unvalidated)
   8. threshold check → aiModelRepo.updateStatus(..., 'IMAGES_UPLOADED') when SHELF_TRAINING_THRESHOLD reached
 
@@ -206,7 +206,7 @@ categoryService.createCategory()
 Key files:
 - `src/utils/categoryNameNormalizer.js` — slug generator for blob prefix names (e.g. `"Vino Tinto"` → `"vino-tinto"`)
 - `src/services/aiInfrastructureService.js` — orchestrator; never throws, returns `{ status, errors[] }`
-- `src/services/customVisionService.js` — **ya no es un stub completo** (Issue 8.1/8.2/8.3): `createProject()`, `createImageRegions()`, `deleteImageRegion()`, `deleteImages()`, `trainProject()`, `getIteration()`, `getIterationPerformance()` hacen llamadas HTTP reales a la API v3.3 de Custom Vision Training usando `fetch` nativo (no el SDK oficial — la key de Azure AI Services unificada trae caracteres no-ASCII que el módulo `http` de Node rechaza en headers pero `fetch` acepta). Solo `createImageFromData()` sigue siendo stub (sube la imagen sin bytes reales — TODO pendiente para Issue 8.2). `isConfigured()` sigue siendo el gate para todo lo demás.
+- `src/services/customVisionService.js` — **ya no es un stub** (Issue 8.1/8.2/8.3, cerrado 2026-07-19): `createProject()`, `createImageFromData()`, `createImageRegions()`, `deleteImageRegion()`, `deleteImages()`, `trainProject()`, `getIteration()`, `getIterationPerformance()` hacen llamadas HTTP reales a la API v3.3 de Custom Vision Training usando `fetch` nativo (no el SDK oficial — la key de Azure AI Services unificada trae caracteres no-ASCII que el módulo `http` de Node rechaza en headers pero `fetch` acepta). `isConfigured()` sigue siendo el gate para todo el servicio.
 - `src/repositories/globalBlobContainerRepo.js` — wraps `RETSC_INF_GLOBAL_BLOB_CONTAINERS`; prefix stored in `description` field (TEMPORAL, see pending #7)
 
 Blob prefix format: `dtc-{slug}` inside the `AZURE_GLOBAL_TRAINING_CONTAINER` container (default: `global-sku-training`). The `.keep` marker file makes the prefix visible in the Azure Portal as a folder.
@@ -417,7 +417,7 @@ Shelf photos ("góndola" photos) are **global** training data for the shelf-dete
 4. **Content check** — `azureVisionService.isShelf()`, also a permissive stub.
 5. **Dedup** — SHA-256 hash, global scope (`ENTERPRISE_ID IS NULL`) via `shelfPhotoRepo.findByHashGlobal()`; duplicate → 409 `ERR_DUPLICATE_IMAGE`.
 6. **Upload** — to `AZURE_GLOBAL_SHELF_CONTAINER` at `dtc-{categorySlug}/{canal-lowercase}/{filename}`; filename is server-generated (`shelfPhotoFilenameGenerator.js`), never user-supplied. Then insert the `RETSC_EX_SHELFPHOTO` row.
-7. **Custom Vision registration (no regions yet)** — looks up the category's `customvision_project_id` via `aiModelRepo`, calls the stubbed `customVisionService.createImageFromData()`, then inserts an `RETSC_AI_TRAINING_ANNOTATIONS` row with `is_validated=0`, `source='ADMIN_UPLOAD'`, bboxes NULL (filled in later by the annotation-review flow below).
+7. **Custom Vision registration (no regions yet)** — looks up the category's `customvision_project_id` via `aiModelRepo`, calls `customVisionService.createImageFromData()` (real upload, implemented 2026-07-19) to get a real `cvImageId`, then inserts an `RETSC_AI_TRAINING_ANNOTATIONS` row with `is_validated=0`, `source='ADMIN_UPLOAD'`, bboxes NULL (filled in later by the annotation-review flow below).
 8. **Threshold check** (non-blocking) — if validated+approved annotation count for that category/canal reaches `SHELF_TRAINING_THRESHOLD`, the model's `status` flips to `IMAGES_UPLOADED`.
 
 `shelfPhotoQualityService.assessPhoto()` (a per-enterprise dedup variant, documented in its own file header as the intended entry point) is **dead code** — only the global-scope `validateQualityMetrics()` path above is actually wired to the controller.
@@ -450,9 +450,8 @@ Extends `RETSC_AI_DETECTION_MODELS` (already created per-category by the smart-c
 | Service | Used by | Status |
 |---|---|---|
 | `imageValidationService.js`, `jobService.js`, `queueService.js` | `/api/sku-images` (active flow) | Live — make SKU image upload async/job-based and hand off OCR/embeddings to an external Azure Function |
-| `customVisionService.js` | `aiInfrastructureService.js`, `shelfPhotoUploadService.js`, `annotationSyncService.js`, `modelTrainingService.js` | Mostly live (Issues 8.1/8.2/8.3) — solo `createImageFromData()` sigue siendo stub; el resto llama a la API real de Custom Vision Training v3.3 vía `fetch` |
+| `customVisionService.js` | `aiInfrastructureService.js` (project creation), `shelfPhotoUploadService.js` (image upload), `annotationSyncService.js` (region sync), `modelTrainingService.js` (training) | Live (Issues 8.1/8.2/8.3, cerrado 2026-07-19) — every function calls the real Custom Vision Training API v3.3 via `fetch` once `isConfigured()`; no stubs left in this service |
 | `azureVisionService.js` | `/api/shelf-photos` only | Permissive stub; ignores real credentials until the SDK call is implemented |
-| `customVisionService.js` | `aiInfrastructureService.js` (project creation), `annotationSyncService.js` (region sync), `modelTrainingService.js` (training) | Mixed — `createProject`/region CRUD/training calls are real (Issues 8.1–8.3); `createImageFromData()` is still a stub |
 | `aiService.js`, `hierarchyService.js` | `pipelineOrchestrator.js` only | Tied to the legacy/broken Excel image pipeline (see `loadStateRepo.js` note above) |
 | `matchingService.js` | `pipelineOrchestrator.js` (legacy), plus `extractGTINFromFilename()` used standalone by `productController.js` | Mixed — the service as a whole is legacy, but that one function still has a live caller |
 
@@ -521,10 +520,10 @@ What needs to be built:
 
 `src/controllers/authController.js:66-68` — The logout handler is intentionally stateless. The comment explicitly notes: if real session-kill is needed in the future, add a revoked-tokens table and mark the `refreshToken` from the request body as revoked. No implementation is needed now, but be aware that blacklisting refresh tokens will require a new DB table and a check inside `authService.refreshAccessToken()`.
 
-### 6. ~~Custom Vision — integración pendiente de credenciales~~ — MAYORMENTE COMPLETADO (Issues 8.1/8.2/8.3)
+### 6. ~~Custom Vision — integración pendiente de credenciales~~ — COMPLETADO (Issues 8.1/8.2/8.3)
 
-`src/services/customVisionService.js` ya **no** es un stub completo. `createProject()`, `createImageRegions()`, `deleteImageRegion()`, `deleteImages()`, `trainProject()`, `getIteration()`, `getIterationPerformance()` hacen llamadas HTTP reales (vía `fetch` nativo, no el SDK oficial — la key de Azure AI Services unificada tiene caracteres no-ASCII que el módulo `http` de Node rechaza en headers). Queda pendiente:
-- **`createImageFromData()` sigue en stub** — sube la imagen sin bytes reales (`imageData` como FormData); necesario para que el Issue 8.2 quede completo end-to-end.
+`src/services/customVisionService.js` ya **no** es un stub. `createProject()`, `createImageFromData()` (implementado 2026-07-19 — cerraba el único hueco que bloqueaba el sync E2E), `createImageRegions()`, `deleteImageRegion()`, `deleteImages()`, `trainProject()`, `getIteration()`, `getIterationPerformance()` hacen llamadas HTTP reales (vía `fetch` nativo, no el SDK oficial — la key de Azure AI Services unificada tiene caracteres no-ASCII que el módulo `http` de Node rechaza en headers). Probado end-to-end contra CV real: upload real → `createImageRegions` → `cv_region_id` poblado → segunda pasada no duplica (guarda `splitByCvRegionId`). Queda pendiente:
+- **Issue #35 (tags por proyecto)**: `CV_TAG_OMT`/`DTT`/`CONVENIENCE` siguen siendo env vars globales, pero cada proyecto CV tiene sus propios tag IDs — con más de una categoría con proyecto activo simultáneo, una sola env var por canal no alcanza. Confirmado como limitación real en el E2E, no solo teórica. Requiere un mapeo canal+categoría→tagId persistido (no resuelto en el cierre de `createImageFromData()`, fuera de ese alcance).
 - **Issue 8.4 (publicación)**: `publishIteration(projectId, iterationId)` no existe todavía.
 - Correr la migración `006_add_metrics_to_detection_models.sql` — verificada como no aplicada en la BD real (ver sección de entrenamiento); sin ella `aiModelRepo.saveMetrics()` falla (silenciosamente, no bloquea el flujo).
 - Los modelos en `RETSC_AI_DETECTION_MODELS` con `status='PENDING'` se actualizan mediante `POST /api/categories/:id/retry-ai-infra`.
