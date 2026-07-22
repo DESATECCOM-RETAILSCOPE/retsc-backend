@@ -44,6 +44,7 @@ node scripts/test-model-versioning.js    # Integration tests for model retrain/a
 node scripts/test-shelf-photo-quality.js # Integration tests for shelf-photo quality gate + dedup (hits real DB)
 node scripts/check-connectivity.js       # Read-only diagnostic: pings SQL, blob storage, and other external services
 node scripts/cleanup-for-testing.js      # DESTRUCTIVE — wipes all tables except users/enterprises/roles + global-sku-training blobs
+node scripts/verify-smart-categories-dedup.js <enterpriseId>  # Read-only: checks for duplicate category/parent names in an enterprise's smart-category listing (Issue B4 regression check)
 node src/utils/gtinValidator.js    # Run inline GTIN self-tests
 node src/utils/imageQualityAnalyzer.js   # Run inline image-quality self-tests (sharp-based)
 node src/utils/imageQualityValidator.js  # Run inline quality-validator self-tests
@@ -536,27 +537,35 @@ Migración `migrations/003_add_prefix_to_global_blob_containers.sql` agrega la c
 
 Script creado en `scripts/backfill-smart-categories.js`. Correr con `npm run backfill:smart-categories -- --dry-run` primero, luego sin `--dry-run`. Pre-requisito: migración 003 debe estar aplicada. El script es idempotente.
 
-### 10. Annotation "review queue" endpoints not wired
-
-`annotationRepo.js` has `listPhotos({categoryId, canal, status})` and `getPhotoWithRegions(photoId)` — intended for a photo-review-queue listing screen (status: `PENDING_ANNOTATION|PENDING_REVIEW|APPROVED|REJECTED`) and `approvePhoto(photoId, reviewerId)` (bulk-approve every annotation on a photo). None of these are called by `annotationController.js`/`annotationRoutes.js` yet — no HTTP route exposes them.
-
-### 11. Azure Vision integration pending
-
-`src/services/azureVisionService.js` is a stub: `analyzeCaption()` and `isShelf()` always return permissive results even when `AZURE_VISION_ENDPOINT`/`AZURE_VISION_KEY` are set. To finish: install `@azure-rest/ai-vision-image-analysis` + `@azure/core-auth` and implement the two TODO'd calls.
-
 ### 9. Enterprise registration not wrapped in a SQL transaction
 
 `src/services/enterpriseService.js` — The `POST /api/enterprises` flow (enterprise + admin user creation) uses manual compensating rollbacks instead of a real DB transaction. If a step fails mid-way, the service manually deletes the already-inserted enterprise or user. This is a known gap. If this flow is expanded, consider wrapping it in `pool.transaction()` following the `enterpriseCategoryRepo.js` pattern.
 
-### 10. `annotationRepo.approvePhoto()` is unwired
+### 10. Annotation "review queue" endpoints not wired
 
-Added in the most recent commit (`2f08672`), exported from `annotationRepo.js`, but no service method or route calls it. If a "approve entire photo at once" endpoint is requested (as opposed to approving annotations one at a time), this is most of the repo-layer work already done — it just needs a service method + a route (likely `PATCH /api/annotations/photo/:photoId/approve`, gated by `ANNOTATION_VALIDATOR_ROLES`).
+`annotationRepo.js` has `listPhotos({categoryId, canal, status})`, `getPhotoWithRegions(photoId)` (intended for a photo-review-queue listing screen — status: `PENDING_ANNOTATION|PENDING_REVIEW|APPROVED|REJECTED`), and `approvePhoto(photoId, reviewerId)` (bulk-approve every annotation on a photo). None of these are called by `annotationController.js`/`annotationRoutes.js` yet — no HTTP route exposes them. If a "approve entire photo at once" endpoint is requested (as opposed to approving annotations one at a time), most of the repo-layer work is already done — it just needs a service method + a route (likely `PATCH /api/annotations/photo/:photoId/approve`, gated by `ANNOTATION_VALIDATOR_ROLES`).
 
-### 11. `shelfPhotoQualityService.assessPhoto()` is dead code
+### 11. `azureVisionService.js` ignores real credentials
+
+`analyzeCaption()` and `isShelf()` return permissive stub results (`accepted:true`/`isShelf:true`) unconditionally — even when `AZURE_VISION_ENDPOINT`/`AZURE_VISION_KEY` are set, it only logs a warning and still returns the stub, because the actual Azure AI Vision SDK call was never implemented. To finish: install `@azure-rest/ai-vision-image-analysis` + `@azure/core-auth` and implement the two TODO'd calls. Needed before the shelf-photo quality gate can reject bad captions/non-shelf images in production.
+
+### 12. `shelfPhotoQualityService.assessPhoto()` is dead code
 
 Documented in its own file header as the intended per-enterprise entry point, but `shelfPhotoUploadService.js` only calls `validateQualityMetrics()` (the global-scope helper) instead. No controller or route calls `assessPhoto()`. Either wire it up if a per-enterprise shelf-upload flow is needed, or remove it.
 
-### 12. `azureVisionService.js` ignores real credentials
+### 13. Cédula format validation not implemented (documented proposal, not built — `docs/TODO-prioridad-3.md`)
 
-`analyzeCaption()` and `isShelf()` return permissive stub results (`accepted:true`/`isShelf:true`) unconditionally — even when `AZURE_VISION_ENDPOINT`/`AZURE_VISION_KEY` are set, it only logs a warning and still returns the stub, because the actual Azure AI Vision SDK call was never implemented. Needed before the shelf-photo quality gate can reject bad captions/non-shelf images in production.
+`ced_identidad`/`cedIdentidad` is checked for "not empty" only, in three places: `userService.createAndAssign()`, `enterpriseService` (admin cédula on enterprise registration), and `userRepo.findByCedula()` (exact-match lookup, no format check). There is no `src/utils/cedulaValidator.js` today, unlike `gtinValidator.js` which does have a real checksum validator. Proposed design (not agreed/built): física = 9 digits, jurídica = 10 digits starting with `3`, no official public check-digit (format/length only, not checksum); a `validateCedula(value, { tipo })` helper mirroring `gtinValidator.js`'s self-test pattern. Open question flagged in the doc: whether legacy production data already conforms to these rules before enforcing on existing reads vs. only new writes.
+
+### 14. Role-based authorization gap on core business endpoints (`docs/TODO-prioridad-3.md`)
+
+`requireRole`/`requireAdmin` are applied on the newer AI/shelf-photo route groups (see mount table above), but the "core" business endpoints — `/api/users`, `/api/enterprises` (aside from the `ADMIN_DTC`-only routes already listed), `/api/categories`, `/api/products`, `/api/skus` — only authenticate via `authMiddleware`, not authorize by role: any authenticated user of an enterprise can call any of these regardless of `roleName`. Explicitly **not** implemented pending a product decision (roleName → allowed-actions matrix agreed with the team, likely per frontend screen) — do not invent a permissions matrix unprompted. Once a matrix exists, the existing `requireRole(...roles)` pattern is sufficient; no new middleware is needed unless the matrix grows complex enough to warrant a DB-backed `RETSC_OP_ROLE_PERMISSIONS` table (mentioned in the doc as a future option, not needed yet).
+
+### 15. Welcome-email "set your own password" flow not implemented (`docs/TODO-prioridad-3.md`)
+
+When an admin creates a user (`userService.createAndAssign`), the admin supplies the password directly in the request body — there is no "user gets an email, clicks a link, sets their own password" flow (the only email-driven password flow today is `forgotPassword`, which generates and emails a random password). A table `RETSC_INF_ACTIVATION_TOKENS` (`token_id`, `token`, `enterprise_id`, `admin_email`, `created_at`, `expires_at`, `used`, `used_at`) exists in the DB but has **no code reference** anywhere except being wiped by `scripts/cleanup-for-testing.js` — it's empty in production and, by its shape (`enterprise_id`+`admin_email`, no `user_id`), looks like it was meant for activating a new enterprise's admin (`POST /api/enterprises`) rather than a user created later by that admin. Do not assume it's reusable for the latter without confirming with the team what it was originally built for. Proposed design in the doc: new (or extended) token table with `user_id`, a `POST /api/auth/set-password` public endpoint, and a new `FRONTEND_URL` env var that doesn't exist yet.
+
+### 16. Menu reordering / role-based visibility — blocked on design (`docs/TODO-menu-roles.md`)
+
+Frontend menu needs reordering and per-role show/hide, per project-owner feedback (2026-07-01), but is blocked on mockups the owner hasn't sent yet — do not implement until they arrive. What's already in place for when they do: `src/config/roles.js` (`ROLES` + `normalizeRole()`) matches `user.roleName` returned by login/JWT with no extra mapping needed, and the `requireRole`-per-route-group pattern (see `enterpriseController.js`'s `isAdminDtc()` branching and `categoryRoutes.js`'s role-restricted route group) is the established precedent if new endpoints also need restricting once the design lands. Still open: whether visibility is purely frontend (reading `roleName`) or also requires new backend restrictions — depends on which sections change.
 

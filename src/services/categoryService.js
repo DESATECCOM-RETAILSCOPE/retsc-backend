@@ -107,7 +107,11 @@ const listByEnterprise = async (enterpriseId) => {
   return enriched.filter(Boolean);
 };
 
-// Solo AGREGA categorías nuevas — no inactiva nada, no duplica
+// Reemplaza la selección completa de la empresa: agrega lo nuevo, inactiva lo que ya no
+// viene en categoryIds, y deja intacto lo que sigue presente en ambos lados.
+// NOTA: antes esta función solo agregaba y nunca inactivaba nada — un PUT con una
+// categoría removida del array no la borraba (bug reportado: no se puede quitar una
+// categoría desde la pantalla de selección). Corregido para que PUT reemplace de verdad.
 const replaceForEnterprise = async (enterpriseId, categoryIds) => {
   if (!Array.isArray(categoryIds)) {
     throw svcError("categoryIds debe ser un array", 400);
@@ -130,12 +134,22 @@ const replaceForEnterprise = async (enterpriseId, categoryIds) => {
   const alreadySelected = new Set(
     currentRelations.map((r) => r.selected_category_id),
   );
+  const requested = new Set(categoryIds);
 
-  // Filtrar solo las categorías NUEVAS (que no están ya guardadas)
+  // Nuevas: pedidas pero todavía no guardadas
   const newCategoryIds = categoryIds.filter((id) => !alreadySelected.has(id));
+  // Removidas: guardadas pero ya no están en la selección enviada
+  const removedCategoryIds = [...alreadySelected].filter(
+    (id) => !requested.has(id),
+  );
 
-  if (newCategoryIds.length === 0) {
-    return { added: 0, alreadyExisted: categoryIds.length, changed: false };
+  if (newCategoryIds.length === 0 && removedCategoryIds.length === 0) {
+    return {
+      added: 0,
+      removed: 0,
+      alreadyExisted: categoryIds.length,
+      changed: false,
+    };
   }
 
   // Resolver las categorías inteligentes solo para las nuevas
@@ -145,11 +159,14 @@ const replaceForEnterprise = async (enterpriseId, categoryIds) => {
     records.push(...resolved);
   }
 
-  // Insertar solo las nuevas (sin tocar las existentes)
-  await enterpriseCategoryRepo.addForEnterprise(enterpriseId, records);
+  await enterpriseCategoryRepo.syncForEnterprise(enterpriseId, {
+    toRemoveSelectedIds: removedCategoryIds,
+    toAddRecords: records,
+  });
 
   return {
     added: newCategoryIds.length,
+    removed: removedCategoryIds.length,
     alreadyExisted: categoryIds.length - newCategoryIds.length,
     changed: true,
   };

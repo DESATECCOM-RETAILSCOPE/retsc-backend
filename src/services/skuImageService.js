@@ -162,7 +162,7 @@ const processBatch = async ({
       const parsed = parseFilename(file.originalname);
       if (!parsed) {
         detail.status = "error";
-        detail.message = `Nombre no válido: '${file.originalname}'. Formato esperado: {EAN}_{vista}.{ext}`;
+        detail.message = `El archivo "${file.originalname}" no se pudo leer: el nombre debe iniciar con el código EAN del producto (ejemplo: 7501234567890_front.jpg). Renombrá el archivo con el EAN correcto y volvé a subirlo.`;
         summary.errors.push(detail.message);
         await skuImageLogRepo.insertLog({
           enterpriseId,

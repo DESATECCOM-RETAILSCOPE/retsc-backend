@@ -31,7 +31,8 @@ const listByEnterprise = async (req, res) => {
   }
 };
 
-// PUT /api/enterprises/me/categories  — agrega categorías (no reemplaza, no duplica)
+// PUT /api/enterprises/me/categories  — reemplaza la selección: agrega lo nuevo,
+// quita lo que ya no viene en categoryIds, no duplica lo que sigue igual.
 const replaceForEnterprise = async (req, res) => {
   try {
     const { categoryIds } = req.body;
@@ -39,12 +40,18 @@ const replaceForEnterprise = async (req, res) => {
       req.user.enterpriseId,
       categoryIds,
     );
+
+    const parts = [];
+    if (result.added > 0) parts.push(`${result.added} agregada(s)`);
+    if (result.removed > 0) parts.push(`${result.removed} quitada(s)`);
+
     return res.json({
       success: true,
       added: result.added,
+      removed: result.removed,
       alreadyExisted: result.alreadyExisted,
       message: result.changed
-        ? `${result.added} categoría(s) agregada(s).`
+        ? `Categoría(s): ${parts.join(", ")}.`
         : "Las categorías seleccionadas ya estaban guardadas.",
     });
   } catch (err) {

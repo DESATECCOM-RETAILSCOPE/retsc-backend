@@ -60,15 +60,38 @@ const deactivateByEnterprise = async (enterpriseId) => {
     `);
 };
 
-// Solo inserta los registros nuevos — NO inactiva nada de lo existente
-const addForEnterprise = async (enterpriseId, records) => {
+// Reemplazo atómico de la selección: inactiva las selecciones que el cliente ya no envía
+// e inserta las nuevas, dentro de la misma transacción (evita dejar la selección a medias
+// si falla a mitad de camino). Las que siguen presentes en ambos lados no se tocan.
+const syncForEnterprise = async (
+  enterpriseId,
+  { toRemoveSelectedIds = [], toAddRecords = [] },
+) => {
   const pool = await getPool();
   const transaction = pool.transaction();
   await transaction.begin();
   try {
+    if (toRemoveSelectedIds.length > 0) {
+      const removeRequest = transaction
+        .request()
+        .input("enterpriseId", sql.Int, enterpriseId);
+      const placeholders = toRemoveSelectedIds.map((id, i) => {
+        const paramName = `removeId${i}`;
+        removeRequest.input(paramName, sql.Int, id);
+        return `@${paramName}`;
+      });
+      await removeRequest.query(`
+        UPDATE ${TABLE}
+        SET status = 'INACTIVE'
+        WHERE enterprise_id       = @enterpriseId
+          AND status              = 'ACTIVE'
+          AND selected_category_id IN (${placeholders.join(", ")})
+      `);
+    }
+
     const inserted = [];
     const now = new Date();
-    for (const rec of records) {
+    for (const rec of toAddRecords) {
       const r = await transaction
         .request()
         .input("enterpriseId", sql.Int, enterpriseId)
@@ -174,7 +197,7 @@ module.exports = {
   findByEnterpriseAndCategory,
   insertOne,
   deactivateByEnterprise,
-  addForEnterprise,
+  syncForEnterprise,
   listCommercialCategories,
   listSmartForEnterprise,
   findEnterpriseCategoryById,
