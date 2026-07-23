@@ -85,6 +85,23 @@ Copy `.env.example` to `.env` and fill in values. Required variables:
 - `CV_TAG_OMT`, `CV_TAG_DTT`, `CV_TAG_CONVENIENCE` — Custom Vision tag IDs per canal; TODO — replace with a DB-backed tag lookup (Issue #35)
 - `TRAINING_ADMIN_ROLES` — CSV de roles autorizados a disparar entrenamiento vía `/api/training` (default `ADMIN,ADMIN_DTC`)
 
+## API docs (Swagger)
+
+`GET /api/docs` sirve Swagger UI generado por `swagger-jsdoc` desde comentarios `@swagger` puestos arriba de cada ruta en `src/routes/*.js` (config en `src/config/swagger.js`) — no hay `openapi.yaml` a mano, así se documenta al lado del código real. **Solo se monta si `NODE_ENV !== 'production'`** (`src/app.js`) — en producción la ruta no existe en absoluto. Documentadas como muestra (2026-07-20): `POST /api/auth/login`, `GET /api/roles`, `GET /api/products` (con el footgun de `categoryId` explícito en la descripción del parámetro). El resto de los 15+ endpoints queda pendiente — copiar el patrón documentado en el header de `src/config/swagger.js`, revisando primero cuál de los 3 patrones de montaje de auth aplica a esa ruta (ver sección "Middleware mounting pattern" más abajo).
+
+## Deployment readiness (Railway, auditoría 2026-07-23)
+
+Auditoría de solo-lectura (sin cambios de código) para evaluar qué falta antes de desplegar en Railway. Hallazgos:
+
+- `server.js` lee `PORT` correctamente (`process.env.PORT || 3000`) — Railway puede asignar su propio puerto sin fricción.
+- **Dos riesgos silenciosos** (la app arranca y responde normal, pero falla mal solo en runtime):
+  - `BLOB_STORAGE_MODE` — default `mock`. Si se olvida poner `azure` explícitamente en las env vars de Railway, la app escribe imágenes en disco local; ese disco es efímero en Railway y las imágenes se pierden en cada redeploy/restart, sin ningún error visible hasta que alguien note que "desaparecieron".
+  - `NODE_ENV` — si no se setea a `production`, el gate de `/api/docs` (ver sección Swagger arriba) lo deja expuesto por defecto.
+- **6 env vars son bloqueantes reales** si faltan (rompen en el primer request que las use, no al bootear): `SQL_SERVER`, `SQL_USER`, `SQL_PASSWORD`, `SQL_DATABASE`, `JWT_SECRET`, `JWT_REFRESH_SECRET` — ninguna tiene default en el código.
+- **Hardcodes encontrados** (no bloqueantes, pero a revisar si Railway usa recursos distintos a los de `-prod`): `aiInfrastructureService.js` tiene `storageAccount: 'storagescopeprod'` hardcodeado (ya tenía su propio TODO previo — de fallar, solo afecta metadata/auditoría del container, no la subida real de blobs); `src/config/swagger.js` tiene `http://localhost:3032` como único `server` de la spec (cosmético, Swagger ya está gateado fuera de prod).
+- **Checklist manual** (no verificable desde el código, requiere acceso a Azure/Railway): firewall de Azure SQL debe permitir las IPs de salida de Railway; red hacia Blob Storage y Custom Vision sin restricciones que bloqueen a Railway; confirmar que la base de destino tiene aplicadas **todas** las migraciones (`001`–`006`), no solo la 006; el polling de training en memoria (Issue 8.3, ver sección de entrenamiento más abajo) se pierde si Railway reinicia el contenedor mientras un modelo está en `TRAINING` — más probable en un ambiente con redeploys frecuentes que en producción estable.
+- **Migración 006 — re-confirmada como NO aplicada** (2026-07-23) contra `sqldb-rscope-prod`, la única base accesible desde el `.env` de este repo — mismo hallazgo que ya documentaba la sección de entrenamiento más abajo, ahora reverificado específicamente para esta auditoría. No se aplicó nada — pendiente de decisión de equipo sobre si Railway apunta a esta misma base o a una distinta que Carlos gestiona por separado.
+
 ## Architecture
 
 Express layered architecture. All persistence is **Azure SQL (MSSQL)** via a single lazy-initialized connection pool in `src/config/db.js`.
