@@ -25,6 +25,11 @@
  *   detection_category_id (el árbol oficial de RETSC_OP_CATEGORIES, usado para
  *   IA/DTC). Brand/Supplier/volume/Relevant_feature mapean 1:1 a las columnas
  *   BRAND/MANUFACTURER/VOLUME/RELEVANT del mismo Excel.
+ *   NOTA: normalized_name existe en el esquema pero insertEnterpriseSku/updateEnterpriseSku
+ *   nunca la escriben — queda NULL siempre, a propósito. Decisión confirmada con el equipo
+ *   de negocio (2026-07-23): no se va a implementar, porque las reglas de normalización de
+ *   nombres de producto en Costa Rica son demasiado complejas y no existe un catálogo
+ *   electrónico nacional de referencia. No es un bug ni un TODO pendiente.
  *
  * Mapeo de categorías en RETSC_OP_SKUS:
  *   selected_category_id  → enterprise_category_id (PK de RETSC_OP_ENTERPRISE_CATEGORIES)
