@@ -45,6 +45,7 @@ node scripts/test-shelf-photo-quality.js # Integration tests for shelf-photo qua
 node scripts/check-connectivity.js       # Read-only diagnostic: pings SQL, blob storage, and other external services
 node scripts/cleanup-for-testing.js      # DESTRUCTIVE — wipes all tables except users/enterprises/roles + global-sku-training blobs
 node scripts/verify-smart-categories-dedup.js <enterpriseId>  # Read-only: checks for duplicate category/parent names in an enterprise's smart-category listing (Issue B4 regression check)
+node scripts/test-user-role-gates.js     # Guard anti-escalada a ADMIN_DTC (userService.assertCanAssignRole); NO toca la BD — stubea repos vía require.cache
 node src/utils/gtinValidator.js    # Run inline GTIN self-tests
 node src/utils/imageQualityAnalyzer.js   # Run inline image-quality self-tests (sharp-based)
 node src/utils/imageQualityValidator.js  # Run inline quality-validator self-tests
@@ -144,6 +145,8 @@ Roles were renamed to **uppercase** in the DB (`scripts/sync-roles-with-qa.js`) 
 - `GET/PUT /api/enterprises/:id` — 403 for a plain `ADMIN` if `:id` doesn't match their own `enterpriseId`; `ADMIN_DTC` can access any.
 - `POST /api/enterprises/create` (creating a new client enterprise) is restricted to `ADMIN_DTC` via `requireRole` at the route level.
 - Taxonomy/category-tree management (`/api/categories` write routes) is exclusive to `ADMIN_DTC` (Issue B4).
+- `/api/users` (all routes) and `/api/roles` (write routes — `POST`/`PUT`/`PATCH`) are `ADMIN_DTC`-or-`ADMIN`/`ADMIN_DTC`-only respectively (audit 2026-07-25, see Pending Work #14 below).
+- **Invariant: `ADMIN_DTC` can only be granted by another `ADMIN_DTC`.** `requireAdmin`/`requireRole(ROLES.ADMIN, ROLES.ADMIN_DTC)` treats `ADMIN` and `ADMIN_DTC` as equally privileged for *route access*, but a plain `ADMIN` must never be able to *assign* the `ADMIN_DTC` role to a user — that would let any per-enterprise admin mint themselves (or anyone) a platform-wide superuser. Enforced in `userService.js` via `assertCanAssignRole(role, actorRoleName)`, called from both `createAndAssign()` and `updateUserEnterprise()` right after the target role is looked up. Fails closed: if a callsite forgets to pass `actorRoleName`, `normalizeRole(undefined)` is `''`, which never matches `ROLES.ADMIN_DTC`, so the assignment is rejected rather than silently allowed.
 
 `src/repositories/jsonRepo.js` is dead code — it exists but no repository imports it. All real persistence uses MSSQL.
 
@@ -302,9 +305,9 @@ Forgot password flow: `POST /api/auth/forgot-password` accepts `{ identifier }` 
 /api/products                                — no global auth (each route decides)
 /api/sku-images                              — no global auth (each route decides, but applied inline on every route)
 /api/skus                                    — no global auth (each route decides)
-/api/users                        authMiddleware
+/api/users                        authMiddleware  + requireAdmin on ALL routes (router.use, added 2026-07-25)
 /api/categories                   authMiddleware
-/api/roles                        authMiddleware
+/api/roles                        authMiddleware  + requireAdmin on GET routes, requireRole(ADMIN_DTC) on write routes (added 2026-07-25)
 /api/enterprises/me/categories               authMiddleware
 /api/enterprises/me/enterprise-categories    authMiddleware   (enterpriseCommercialCategoryRoutes.js)
 /api/annotations                  authMiddleware  + requireRole(ANNOTATION_VALIDATOR_ROLES) inline on approve/correct/reject
@@ -332,15 +335,15 @@ Forgot password flow: `POST /api/auth/forgot-password` accepts `{ identifier }` 
 | `GET /api/enterprises/:id` | Bearer + Admin | Enterprise detail; 403 for a plain `ADMIN` if `:id` isn't their own enterprise |
 | `POST /api/enterprises/create` | Bearer + `ADMIN_DTC` | Create enterprise (no admin user) — DTC-only |
 | `PUT /api/enterprises/:id` | Bearer + Admin | Update enterprise (accepts status field); same per-enterprise restriction as the GET above |
-| `GET /api/users` | Bearer | Users of the authenticated enterprise |
-| `POST /api/users` | Bearer | Create + assign user to enterprise; sends a best-effort welcome email; if cédula belongs to a user with no active relations, reactivates instead of creating; if it belongs to a user with an active relation elsewhere, 409 `{code:'CEDULA_EXISTS'}` without revealing user data (traslado gestionado por el call center de DTC) |
-| `PUT /api/users/:id` | Bearer | Update user |
-| `PUT /api/users/:userId/enterprises/:enterpriseId` | Bearer | Update user-enterprise relation |
-| `GET /api/roles` | Bearer | List all roles; `?active=1` filters to `status=1` only |
-| `GET /api/roles/:id` | Bearer | Role detail |
-| `POST /api/roles` | Bearer | Create role |
-| `PUT /api/roles/:id` | Bearer | Update role |
-| `PATCH /api/roles/:id/status` | Bearer | Activate/deactivate role |
+| `GET /api/users` | Bearer + Admin | Users of the authenticated enterprise |
+| `POST /api/users` | Bearer + Admin | Create + assign user to enterprise; sends a best-effort welcome email; if cédula belongs to a user with no active relations, reactivates instead of creating; if it belongs to a user with an active relation elsewhere, 409 `{code:'CEDULA_EXISTS'}` without revealing user data (traslado gestionado por el call center de DTC); assigning `roleId=ADMIN_DTC` additionally 403s unless the actor is themselves `ADMIN_DTC` (`assertCanAssignRole`) |
+| `PUT /api/users/:id` | Bearer + Admin | Update user |
+| `PUT /api/users/:userId/enterprises/:enterpriseId` | Bearer + Admin | Update user-enterprise relation; assigning `roleId=ADMIN_DTC` additionally 403s unless the actor is themselves `ADMIN_DTC` (`assertCanAssignRole`) |
+| `GET /api/roles` | Bearer + Admin | List all roles; `?active=1` filters to `status=1` only |
+| `GET /api/roles/:id` | Bearer + Admin | Role detail |
+| `POST /api/roles` | Bearer + `ADMIN_DTC` | Create role |
+| `PUT /api/roles/:id` | Bearer + `ADMIN_DTC` | Update role |
+| `PATCH /api/roles/:id/status` | Bearer + `ADMIN_DTC` | Activate/deactivate role |
 | `GET /api/categories` | Bearer | Global category tree |
 | `GET /api/categories/roots` | Bearer | Root categories only |
 | `GET /api/categories/:id/children` | Bearer | Children of a category |
@@ -574,9 +577,13 @@ Documented in its own file header as the intended per-enterprise entry point, bu
 
 `ced_identidad`/`cedIdentidad` is checked for "not empty" only, in three places: `userService.createAndAssign()`, `enterpriseService` (admin cédula on enterprise registration), and `userRepo.findByCedula()` (exact-match lookup, no format check). There is no `src/utils/cedulaValidator.js` today, unlike `gtinValidator.js` which does have a real checksum validator. Proposed design (not agreed/built): física = 9 digits, jurídica = 10 digits starting with `3`, no official public check-digit (format/length only, not checksum); a `validateCedula(value, { tipo })` helper mirroring `gtinValidator.js`'s self-test pattern. Open question flagged in the doc: whether legacy production data already conforms to these rules before enforcing on existing reads vs. only new writes.
 
-### 14. Role-based authorization gap on core business endpoints (`docs/TODO-prioridad-3.md`)
+### 14. Role-based authorization gap on core business endpoints (`docs/TODO-prioridad-3.md`) — PARTIALLY CLOSED 2026-07-25
 
-`requireRole`/`requireAdmin` are applied on the newer AI/shelf-photo route groups (see mount table above), but the "core" business endpoints — `/api/users`, `/api/enterprises` (aside from the `ADMIN_DTC`-only routes already listed), `/api/categories`, `/api/products`, `/api/skus` — only authenticate via `authMiddleware`, not authorize by role: any authenticated user of an enterprise can call any of these regardless of `roleName`. Explicitly **not** implemented pending a product decision (roleName → allowed-actions matrix agreed with the team, likely per frontend screen) — do not invent a permissions matrix unprompted. Once a matrix exists, the existing `requireRole(...roles)` pattern is sufficient; no new middleware is needed unless the matrix grows complex enough to warrant a DB-backed `RETSC_OP_ROLE_PERMISSIONS` table (mentioned in the doc as a future option, not needed yet).
+`/api/users` and `/api/roles` are **no longer** in this gap — see the audit below. What's still open: `/api/categories` (read routes only — writes are already `ADMIN_DTC`-only, Issue B4), `/api/enterprises/me/categories` (both read **and** write), `/api/products`, `/api/skus`, `/api/sku-images`, and `/api/annotations` (read routes — the approve/correct/reject writes already gate on `ANNOTATION_VALIDATOR_ROLES`). Any authenticated user of an enterprise can still call any of these regardless of `roleName`. Still explicitly **not** implemented pending a product decision (roleName → allowed-actions matrix agreed with the team, likely per frontend screen) — do not invent a permissions matrix unprompted for these. Once a matrix exists, the existing `requireRole(...roles)` pattern is sufficient; no new middleware is needed unless the matrix grows complex enough to warrant a DB-backed `RETSC_OP_ROLE_PERMISSIONS` table (mentioned in the doc as a future option, not needed yet).
+
+**Audit 2026-07-25 (pre menu-reorder, closed for users/roles):** verified by exercising all 47 routes against tokens for the 5 roles — `POST /api/roles`, `PUT /api/roles/:id`, `PATCH /api/roles/:id/status`, `GET/POST /api/users`, `PUT /api/users/:id`, and `PUT /api/users/:userId/enterprises/:enterpriseId` responded 200/400/404 (never 403) for `EJECUTIVO CAMPO`/`GERENCIA`/`AUDITOR CAMPO` tokens. Concrete impact: `userService.createAndAssign()` accepted any `roleId` from the request body with no check beyond "role exists" — any authenticated user could create an `ADMIN` or `ADMIN_DTC`; and `userService.updateUserEnterprise()` let a user reassign their **own** enterprise-relation role, so an `AUDITOR CAMPO` could self-promote to `ADMIN` inside their own enterprise. Fixed by: `userRoutes.js` now applies `requireAdmin` to the whole router; `roleRoutes.js` splits read (`requireAdmin`) from write (`requireRole(ROLES.ADMIN_DTC)`, matching the category-taxonomy precedent in Issue B4); and `userService.assertCanAssignRole()` adds defense-in-depth so that even an `ADMIN` (not just non-admins) cannot assign the `ADMIN_DTC` role to anyone — only an existing `ADMIN_DTC` can grant `ADMIN_DTC`. Verified with `scripts/test-user-role-gates.js` (9/9, no DB access).
+
+**On the "do not invent a permissions matrix" rule above:** that instruction was revoked *only* for `/api/users` and `/api/roles`, and only because the gap there was a live privilege-escalation path (any authenticated role could mint an `ADMIN_DTC`), not a product preference to weigh in on. It still applies as written to every other endpoint listed at the top of this section — those are pending the owner's role↔menu mapping, not a security hole, and should not be gated unprompted.
 
 ### 15. Welcome-email "set your own password" flow not implemented (`docs/TODO-prioridad-3.md`)
 

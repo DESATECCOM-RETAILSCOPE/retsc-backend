@@ -4,12 +4,28 @@ const userEnterpriseRepo = require('../repositories/userEnterpriseRepo');
 const roleRepo           = require('../repositories/roleRepo');
 const { isValidEmail, normalizeCedula, isValidCedulaFisica } = require('../utils/validators');
 const { sendMail }       = require('../utils/mailer');
+const { ROLES, normalizeRole } = require('../config/roles');
 
 function svcError(msg, statusCode, payload) {
   const err = new Error(msg);
   err.statusCode = statusCode;
   if (payload !== undefined) err.payload = payload;
   return err;
+}
+
+// Defensa en profundidad (auditoría 2026-07-25): requireAdmin deja pasar tanto a
+// ADMIN (administrador de SU empresa) como a ADMIN_DTC (superusuario de toda la
+// plataforma) por igual. Sin este guard, un ADMIN podía crear un usuario — o
+// reasignar una relación existente — con Role_id de ADMIN_DTC y volverse
+// superusuario por interpósita persona. Solo permite asignar ADMIN_DTC si quien
+// hace la petición YA es ADMIN_DTC.
+// Si un callsite futuro se olvida de pasar actorRoleName, normalizeRole(undefined)
+// da '' y la comparación con ROLES.ADMIN_DTC falla — el guard falla CERRADO
+// (asume que el actor no es ADMIN_DTC), no abierto. Intencional.
+function assertCanAssignRole(role, actorRoleName) {
+  if (normalizeRole(role?.Role_name) !== ROLES.ADMIN_DTC) return;
+  if (normalizeRole(actorRoleName) === ROLES.ADMIN_DTC) return;
+  throw svcError('Solo un ADMIN_DTC puede asignar el rol ADMIN_DTC.', 403);
 }
 
 // Issue B6 (feedback dueña). CONFIRMAR: el prompt asumía que ya existe un
@@ -71,7 +87,7 @@ const listByEnterprise = async (enterpriseId) => {
 // relaciones activas (el call center ya la liberó), se reactiva el usuario
 // con los datos del formulario y se lo vincula a esta empresa — mismo patrón
 // que enterpriseService.createEnterprise() usa para su admin.
-const createAndAssign = async (payload, enterpriseId) => {
+const createAndAssign = async (payload, enterpriseId, actorRoleName) => {
   const { cedIdentidad, userName, email, telephone, password, roleId } = payload;
 
   const required = { cedIdentidad, userName, email, password, roleId };
@@ -112,6 +128,7 @@ const createAndAssign = async (payload, enterpriseId) => {
 
   const role = await roleRepo.findById(Number(roleId));
   if (!role) throw svcError(`El rol con id ${roleId} no existe.`, 400);
+  assertCanAssignRole(role, actorRoleName);
 
   const passwordHash = await bcrypt.hash(password, 10);
 
@@ -208,7 +225,7 @@ const updateUser = async (userId, payload, enterpriseId) => {
 };
 
 // ── 1.6 ──────────────────────────────────────────────────────────────────────
-const updateUserEnterprise = async (userId, enterpriseId, payload) => {
+const updateUserEnterprise = async (userId, enterpriseId, payload, actorRoleName) => {
   const relation = await userEnterpriseRepo.findByUserAndEnterprise(userId, enterpriseId);
   if (!relation) throw svcError('Relación usuario-empresa no encontrada', 404);
 
@@ -218,6 +235,7 @@ const updateUserEnterprise = async (userId, enterpriseId, payload) => {
   if (roleId != null) {
     const role = await roleRepo.findById(Number(roleId));
     if (!role) throw svcError(`El rol con id ${roleId} no existe.`, 400);
+    assertCanAssignRole(role, actorRoleName);
     partial.Role_id = role.Role_id;
   }
   if (status != null)            partial.Status             = status;

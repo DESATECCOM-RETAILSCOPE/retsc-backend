@@ -22,7 +22,7 @@ const listUsers = async (req, res) => {
 // userService.js para el detalle de ambas ramas.
 const createUser = async (req, res) => {
   try {
-    const result = await userService.createAndAssign(req.body, req.user.enterpriseId);
+    const result = await userService.createAndAssign(req.body, req.user.enterpriseId, req.user.roleName);
     let message = result.reactivated
       ? 'Usuario reactivado y asignado a la empresa.'
       : 'Usuario creado y asignado a la empresa.';
@@ -49,7 +49,8 @@ const updateUserEnterprise = async (req, res) => {
     const relation = await userService.updateUserEnterprise(
       Number(req.params.userId),
       urlEnterpriseId,
-      req.body
+      req.body,
+      req.user.roleName
     );
     return res.json({ success: true, relation });
   } catch (err) { return handleError(res, err); }
