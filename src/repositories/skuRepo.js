@@ -40,6 +40,62 @@ const { getPool, sql } = require("../config/db");
 
 // ── RETSC_OP_SKUS ──────────────────────────────────────────────────────────
 
+// Arma el WHERE compartido por el SELECT paginado y el COUNT(*) de listGlobal.
+// Mismo patrón que productRepo.buildFilters.
+function buildGlobalFilters(req, filters) {
+  let whereExtra = '';
+
+  if (filters.search) {
+    req.input('search', sql.NVarChar(200), `%${filters.search}%`);
+    whereExtra += ' AND (EAN LIKE @search OR Product_dsc LIKE @search)';
+  }
+
+  return whereExtra;
+}
+
+// GET /api/skus/global — listado global del catálogo (menú por rol 2026-07-25, ítem
+// "SKUs globales" de ADMIN_DTC). Paginado con OFFSET/FETCH + COUNT(*), mismo estilo que
+// productRepo.listByEnterprise. A propósito NO hace JOIN a RETSC_OP_CATEGORIES para
+// resolver nombres de categoría: selected_category_id en esta tabla es en realidad un FK a
+// RETSC_OP_ENTERPRISE_CATEGORIES.enterprise_category_id, NO a RETSC_OP_CATEGORIES.Category_id
+// (ver header de este archivo) — unirlo directo a RETSC_OP_CATEGORIES devolvería una
+// descripción de categoría incorrecta la mayoría de las veces. Solo detection_category_id
+// mapea directo a RETSC_OP_CATEGORIES.Category_id, pero se deja sin resolver acá para no
+// mezclar un JOIN correcto con uno incorrecto en la misma fila — el frontend puede resolver
+// ambos IDs con los endpoints de categorías que ya existen si los necesita mostrar.
+const listGlobal = async (filters = {}) => {
+  const pool = await getPool();
+  const page   = Math.max(1, Number(filters.page)  || 1);
+  const limit  = Math.max(1, Number(filters.limit) || 50);
+  const offset = (page - 1) * limit;
+
+  const countReq = pool.request();
+  const whereExtraCount = buildGlobalFilters(countReq, filters);
+  const countResult = await countReq.query(`
+    SELECT COUNT(*) AS total
+    FROM RETSC_OP_SKUS
+    WHERE 1=1
+    ${whereExtraCount}
+  `);
+  const total = countResult.recordset[0]?.total ?? 0;
+
+  const listReq = pool.request()
+    .input('offset', sql.Int, offset)
+    .input('limit',  sql.Int, limit);
+  const whereExtraList = buildGlobalFilters(listReq, filters);
+  const r = await listReq.query(`
+    SELECT
+      SKU_ID, EAN, Product_dsc, status, image_url, image_status,
+      creation_date, selected_category_id, detection_category_id
+    FROM RETSC_OP_SKUS
+    WHERE 1=1
+    ${whereExtraList}
+    ORDER BY Product_dsc ASC
+    OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY
+  `);
+  return { rows: r.recordset, total };
+};
+
 const findSkuByEan = async (ean) => {
   const pool = await getPool();
   const r = await pool.request().input("ean", sql.VarChar(18), ean).query(`
@@ -202,4 +258,5 @@ module.exports = {
   insertEnterpriseSku,
   updateEnterpriseSku,
   logSkuRow,
+  listGlobal,
 };

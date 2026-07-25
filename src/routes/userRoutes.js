@@ -1,6 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const requireAdmin = require('../middlewares/requireAdmin');
+const requireRole  = require('../middlewares/requireRole');
+const { ROLES }    = require('../config/roles');
 const c = require('../controllers/userController');
 
 // GET /by-cedula/:ced y POST /assign (flujo viejo de "buscar y asignar usuario
@@ -20,6 +22,14 @@ const c = require('../controllers/userController');
 // de este router.use() y darle su propio requireRole — el resto de las rutas
 // (creación/edición/cambio de rol) tiene que seguir restringido a Admin.
 router.use(requireAdmin);
+
+// GET /api/users/global — cross-empresa, exclusivo ADMIN_DTC (Issue B3 mismo criterio que
+// GET /api/enterprises: un ADMIN de empresa no debe ver usuarios de otras empresas).
+// requireRole(ADMIN_DTC) se suma AL requireAdmin de arriba, no lo reemplaza — un ADMIN
+// pasa el requireAdmin del router.use() pero no este requireRole más estricto.
+// Declarada ANTES de GET '/' (aunque no colisionan: distinta cantidad de segmentos,
+// "/global" vs "/") para que quede a prueba de que alguien agregue GET '/:id' después.
+router.get('/global', requireRole(ROLES.ADMIN_DTC), c.listGlobalUsers);
 
 router.get('/',                                  c.listUsers);
 router.post('/',                                 c.createUser);

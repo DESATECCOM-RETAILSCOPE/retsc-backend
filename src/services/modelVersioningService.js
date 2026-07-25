@@ -161,6 +161,20 @@ async function listVersions(categoryId) {
   return aiModelRepo.listByCategory(categoryId);
 }
 
+// GET /api/models — listado global (todas las categorías, todas las versiones).
+// Alimenta el ítem "Modelos de detección" del menú ADMIN_DTC.
+//
+// NOTA (menú por rol, 2026-07-25): aiModelRepo.listAll() hace `SELECT *` sobre
+// RETSC_AI_DETECTION_MODELS, así que nunca referencia por nombre las columnas de
+// la migración 006 (precision_score/recall_score/mean_ap/metrics_json) — no hay
+// "Invalid column name" posible aunque esa migración no esté aplicada, porque
+// `SELECT *` simplemente no devuelve columnas que no existen en la tabla real.
+// Verificado contra la BD real (2026-07-25): migración 006 sigue sin aplicar y
+// listAll() responde igual, solo que los modelos no traen esas 4 columnas.
+async function listAll() {
+  return aiModelRepo.listAll();
+}
+
 module.exports = {
   canRetrain,
   startRetrain,
@@ -169,6 +183,7 @@ module.exports = {
   rejectVersion,
   rollback,
   listVersions,
+  listAll,
   // exportadas para tests unitarios
   isWorse,
 };

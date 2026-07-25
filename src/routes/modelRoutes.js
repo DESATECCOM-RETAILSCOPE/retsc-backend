@@ -16,6 +16,35 @@ const MANAGER_ROLES = (process.env.MODEL_MANAGER_ROLES || 'ADMIN,ADMIN_DTC')
 
 const canManage = requireRole(...MANAGER_ROLES);
 
+/**
+ * @swagger
+ * /api/models:
+ *   get:
+ *     summary: Listado global de modelos de detección (todas las categorías y versiones)
+ *     tags: [Models]
+ *     security:
+ *       - bearerAuth: []
+ *     description: Montaje patrón 1 — authMiddleware global en app.js sobre /api/models,
+ *       más requireRole(MODEL_MANAGER_ROLES) inline (canManage) en esta ruta. Alimenta el
+ *       ítem "Modelos de detección" del menú ADMIN_DTC (F4). No hay colisión de ruta con
+ *       /category/:categoryId (path distinto) ni con ningún GET /:modelId (no existe).
+ *     responses:
+ *       200:
+ *         description: Lista de modelos (todas las categorías/versiones, activos e inactivos)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 models: { type: array, items: { type: object } }
+ *       401:
+ *         description: Sin token, o token expirado
+ *       403:
+ *         description: Autenticado pero sin rol MODEL_MANAGER_ROLES (default ADMIN,ADMIN_DTC)
+ */
+router.get('/',                                 canManage, c.listAll);
+
 // Lectura
 router.get('/category/:categoryId',             canManage, c.listVersions);
 router.get('/category/:categoryId/can-retrain', canManage, c.canRetrain);

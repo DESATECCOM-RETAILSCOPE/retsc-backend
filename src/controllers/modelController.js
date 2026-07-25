@@ -18,6 +18,17 @@ function parseId(value, label) {
   return id;
 }
 
+// GET /api/models  — listado global de modelos (todas las categorías/versiones)
+// Alimenta el ítem "Modelos de detección" del menú ADMIN_DTC (F4).
+const listAll = async (req, res) => {
+  try {
+    const models = await modelVersioningService.listAll();
+    return res.json({ success: true, models });
+  } catch (err) {
+    return handleError(res, err);
+  }
+};
+
 // GET /api/models/category/:categoryId  — lista de versiones
 const listVersions = async (req, res) => {
   try {
@@ -98,4 +109,4 @@ const rollback = async (req, res) => {
   }
 };
 
-module.exports = { listVersions, canRetrain, retrain, complete, approve, reject, rollback };
+module.exports = { listAll, listVersions, canRetrain, retrain, complete, approve, reject, rollback };

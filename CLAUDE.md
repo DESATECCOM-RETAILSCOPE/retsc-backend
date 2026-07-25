@@ -150,6 +150,20 @@ Roles were renamed to **uppercase** in the DB (`scripts/sync-roles-with-qa.js`) 
 
 `src/repositories/jsonRepo.js` is dead code — it exists but no repository imports it. All real persistence uses MSSQL.
 
+### Menú por rol (F4, confirmado por María 2026-07-25)
+
+Tres menús **web**: `ADMIN_DTC`, `ADMIN`, `GERENCIA`. `EJECUTIVO CAMPO` y `AUDITOR CAMPO` **no tienen menú web** — son roles exclusivos de la app móvil.
+
+**El bloqueo de `EJECUTIVO CAMPO`/`AUDITOR CAMPO` fuera del menú web vive ÚNICAMENTE en el frontend web, nunca en este backend.** `POST /api/auth/login` sigue sin tocarse y sigue emitiendo el mismo JWT para los 5 roles — la app móvil comparte el mismo backend, el mismo login y esos mismos roles, así que bloquearlos acá adentro rompería la app móvil. Esto es lo primero que alguien va a querer "arreglar" en el backend pensando que es un descuido de seguridad — no lo es, es la razón de diseño de por qué este backend no gatea `login` por rol.
+
+Cuatro ítems del menú nuevo necesitaron endpoints que no existían (2026-07-25):
+- **Modelos de detección** (`ADMIN_DTC`) → `GET /api/models`
+- **Anotaciones** (`ADMIN_DTC`) / **Revisar cajitas** (`ADMIN`) → `GET /api/annotations/photos`, `GET /api/annotations/photos/:photoId`, `PATCH /api/annotations/photos/:photoId/approve` (activó código muerto del Issue 8.2 — ver esa sección)
+- **Usuarios globales** (`ADMIN_DTC`) → `GET /api/users/global`
+- **SKUs globales** (`ADMIN_DTC`) → `GET /api/skus/global`
+
+Todo lo demás del menú se resolvió con endpoints que ya existían. Explícitamente **fuera de alcance** (sin tabla/datos en la BD para soportarlo, implementado como "Pronto" en el frontend sin backend): Tiendas activas, Planogramas (no hay tabla de retailers — `RETSC_EX_SHELFPHOTO.Retailer_id` es solo una columna suelta sin catálogo detrás), y todo el bloque operativo de `GERENCIA` (Visitas, KPIs de cumplimiento, Faltantes detectados, Reportes por tienda/producto/ejecutivo, Ejecutivos de campo). No inventar tablas/migraciones/endpoints para esto sin que el equipo lo pida explícitamente.
+
 ### Shelf photo annotation & model training pipeline (Issues 3.1.1 follow-on, 8.5, 42)
 
 Distinct from the SKU-level AI infra above, this pipeline trains **object-detection models on shelf/gondola photos** for smart-DTC categories:
@@ -176,7 +190,7 @@ Key files: `src/services/shelfPhotoUploadService.js` (orchestrator), `src/servic
 
 `src/services/azureVisionService.js` is a **stub**: `isConfigured()` checks `AZURE_VISION_ENDPOINT`/`AZURE_VISION_KEY`, but `analyzeCaption()` and `isShelf()` always return permissive stub results regardless — the real SDK (`@azure-rest/ai-vision-image-analysis`) is not installed yet, only TODO'd.
 
-`RETSC_AI_TRAINING_ANNOTATIONS` columns: `annotation_id` (PK), `photo_id`, `dtc_category_id`, `bbox_left/top/width/height` (float, normalized 0–1), `source`, `is_validated` (bit), `photo_approved` (bit), `photo_notes`, `photo_reviewed_at`, `photo_reviewer_id`, `cv_region_id`, `canal` (`OMT`|`DTT`|`CONVENIENCE`, NOT NULL). A photo cannot be left with zero annotations — `annotationService.reject()` returns 409 if it's the last one for that photo. `annotationRepo.approvePhoto()` (bulk-approve all annotations for a photo) and `listPhotos()`/`getPhotoWithRegions()` exist in the repo but have **no route wired to them yet** — dead code pending a future "review queue" endpoint.
+`RETSC_AI_TRAINING_ANNOTATIONS` columns: `annotation_id` (PK), `photo_id`, `dtc_category_id`, `bbox_left/top/width/height` (float, normalized 0–1), `source`, `is_validated` (bit), `photo_approved` (bit), `photo_notes`, `photo_reviewed_at`, `photo_reviewer_id`, `cv_region_id`, `canal` (`OMT`|`DTT`|`CONVENIENCE`, NOT NULL), plus `blob_path`, `cv_sync_status`, `cv_sync_error`, `cv_sync_attempts` (present in the real table, not originally in this header — see annotationRepo.js). A photo cannot be left with zero annotations — `annotationService.reject()` returns 409 if it's the last one for that photo. `annotationRepo.approvePhoto()` (bulk-approve all annotations for a photo) and `listPhotos()`/`getPhotoWithRegions()` are **wired** as of 2026-07-25 (menú por rol, see Pending Work #10 below) — no longer dead code.
 
 `RETSC_EX_SHELFPHOTO` gained quality/dedup columns via migration 005 (`image_hash`, `quality_status`, `quality_error_code`, `width`, `height`, `blur_score`, `brightness`); unique filtered index on `(ENTERPRISE_ID, image_hash)`.
 
@@ -188,7 +202,7 @@ Role gates (CSV env vars, all default to `ADMIN,ADMIN_DTC`): `ANNOTATION_VALIDAT
 
 `src/services/annotationSyncService.js` **no expone ruta HTTP propia**: es la interfaz acordada con el disparador de aprobación del cliente (Issue #54, construido por otra persona, todavía no integrado en este repo). Dos puntos de entrada:
 
-- **`syncApprovedPhoto(photoId, { clienteAjustoCajitas })`** — se debe llamar inmediatamente después de que #54 setee `photo_approved=1`. Si `clienteAjustoCajitas === false` no se toca Custom Vision (las cajitas ya estaban sincronizadas de una corrección previa); en cualquier otro caso se borran las regiones viejas y se recrean todas las cajitas actuales de la foto. Luego siempre corre `checkAndUpdateThreshold`.
+- **`syncApprovedPhoto(photoId, { clienteAjustoCajitas })`** — se debe llamar inmediatamente después de que algo setee `photo_approved=1`. Si `clienteAjustoCajitas === false` no se toca Custom Vision (las cajitas ya estaban sincronizadas de una corrección previa); en cualquier otro caso se borran las regiones viejas y se recrean todas las cajitas actuales de la foto. Luego siempre corre `checkAndUpdateThreshold`. **Desde 2026-07-25 tiene DOS disparadores**: el Issue #54 original (externo, sigue sin integrarse) y `PATCH /api/annotations/photos/:photoId/approve` (menú por rol, Pending Work #10). Si #54 se integra más adelante, decidir cuál de los dos llama a `syncApprovedPhoto` para la misma foto — no debería ser ambos. No es urgente: `syncRegionsForPhoto` ya es idempotente por `cv_region_id` (`splitByCvRegionId`), así que una doble llamada no duplica regiones en Custom Vision, solo generaría llamadas HTTP redundantes.
 - **`removeRejectedPhoto(photoId)`** — borra las regiones (y la imagen) en Custom Vision pero **conserva la fila en SQL** — el issue pide no borrar registros.
 
 Ninguna de las dos lanza por fallos de Custom Vision — la aprobación/rechazo ya quedó persistida en SQL antes de llamarlas y no debe revertirse por un problema de sincronización; los fallos se registran en `cv_sync_status='FAILED'` / `cv_sync_error` / `cv_sync_attempts` (columnas ya presentes en `RETSC_AI_TRAINING_ANNOTATIONS`) para reintento manual.
@@ -255,6 +269,10 @@ Each file in `src/repositories/` maps to one SQL table:
 | `shelfPhotoRepo.js` | `RETSC_EX_SHELFPHOTO` |
 | `annotationRepo.js` | `RETSC_AI_TRAINING_ANNOTATIONS` |
 
+`userEnterpriseRepo.js` gained `findAllGlobal()` (2026-07-25, F4 menu) — a single JOIN across `RETSC_OP_USRSXENTERP` + `RETSC_OP_USERS` + `RETSC_OP_ROLES` + `RETSC_OP_ENTERPRISE`, used by `userService.listAllGlobal()` (`GET /api/users/global`). Deliberately different from `listByEnterprise`'s N+1 pattern (a `findById` for the user and another for the role per relation) — at global/cross-enterprise scale that N+1 gets expensive fast, and the JOIN's fixed shape (user + role + enterprise, no per-row conditional logic) doesn't need the loop. `listByEnterprise` itself was left as-is (out of scope for this change).
+
+`skuRepo.js` gained `listGlobal(filters)` (2026-07-25, F4 menu) — paginated (`OFFSET`/`FETCH` + `COUNT(*)`) global listing over `RETSC_OP_SKUS`, search by `EAN`/`Product_dsc`, same `buildFilters`-style pattern as `productRepo.listByEnterprise`. Deliberately does **not** JOIN to `RETSC_OP_CATEGORIES` to resolve category names: `selected_category_id` on `RETSC_OP_SKUS` is an FK to `RETSC_OP_ENTERPRISE_CATEGORIES.enterprise_category_id`, not to `RETSC_OP_CATEGORIES.Category_id` (see the SKU ingestion flow section above) — joining it directly against `RETSC_OP_CATEGORIES` would silently show the wrong category description most of the time. Only `detection_category_id` maps directly to `RETSC_OP_CATEGORIES.Category_id`, but it's returned unresolved too, to avoid mixing a correct join with an incorrect one in the same row — the frontend can resolve both IDs via the existing category endpoints if it needs display names.
+
 `RETSC_LOG_JOBS` (migration `004_create_jobs_table.sql`) tracks generic async batch jobs — currently only `job_type='SKU_IMAGE_UPLOAD'`. Columns: `job_id` (PK), `user_id`, `enterprise_id`, `job_type`, `status` (`QUEUED → RUNNING → COMPLETED|FAILED`), `total_files`, `processed_count`, `orphan_count`, `duplicate_count`, `error_count`, `warning_count`, `error_summary`, `created_at`, `started_at`, `finished_at`. On server boot, `app.js` calls `jobRepo.failStaleRunning(...)` to mark any job left `RUNNING` from a crash/restart as `FAILED`.
 
 `RETSC_EX_SHELFPHOTO` base columns: `Photo_id` (PK), `Retailer_id`, `Shelfunit_id`, `photo_date`, `URL_blob`, `ENTERPRISE_ID`, `CATEGORY_ID`, `visit_id`. Migration `005_add_quality_fields_to_shelfphoto.sql` adds `image_hash`, `quality_status` (`PASSED`/`REJECTED`), `quality_error_code`, `width`, `height`, `blur_score`, `brightness`, plus a filtered unique index `UX_RETSC_EX_SHELFPHOTO_enterprise_hash` on `(ENTERPRISE_ID, image_hash) WHERE image_hash IS NOT NULL` for per-enterprise dedup. This migration must be applied manually via SSMS, not from Node.
@@ -304,14 +322,14 @@ Forgot password flow: `POST /api/auth/forgot-password` accepts `{ identifier }` 
 /api/enterprises                             — no global auth (each route decides)
 /api/products                                — no global auth (each route decides)
 /api/sku-images                              — no global auth (each route decides, but applied inline on every route)
-/api/skus                                    — no global auth (each route decides)
-/api/users                        authMiddleware  + requireAdmin on ALL routes (router.use, added 2026-07-25)
+/api/skus                                    — no global auth; GET /global adds authMiddleware + requireRole(ADMIN_DTC) inline (added 2026-07-25, F4 menu)
+/api/users                        authMiddleware  + requireAdmin on ALL routes (router.use, added 2026-07-25); GET /global additionally requires requireRole(ADMIN_DTC) (F4 menu)
 /api/categories                   authMiddleware
 /api/roles                        authMiddleware  + requireAdmin on GET routes, requireRole(ADMIN_DTC) on write routes (added 2026-07-25)
 /api/enterprises/me/categories               authMiddleware
 /api/enterprises/me/enterprise-categories    authMiddleware   (enterpriseCommercialCategoryRoutes.js)
-/api/annotations                  authMiddleware  + requireRole(ANNOTATION_VALIDATOR_ROLES) inline on approve/correct/reject
-/api/models                        authMiddleware  + requireRole(MODEL_MANAGER_ROLES) inline on all routes
+/api/annotations                  authMiddleware  + requireRole(ANNOTATION_VALIDATOR_ROLES) inline on approve/correct/reject AND on the /photos review-queue routes (added 2026-07-25, F4 menu) — GET /photo/:photoId (singular, older route) stays open to any authenticated user
+/api/models                        authMiddleware  + requireRole(MODEL_MANAGER_ROLES) inline on all routes, including the new GET / (F4 menu, 2026-07-25)
 /api/shelf-photos                  authMiddleware  + requireRole(SHELF_UPLOAD_ROLES) inline on upload
 /api/training                      authMiddleware  + requireRole(TRAINING_ADMIN_ROLES) inline on all routes
 ```
@@ -339,6 +357,7 @@ Forgot password flow: `POST /api/auth/forgot-password` accepts `{ identifier }` 
 | `POST /api/users` | Bearer + Admin | Create + assign user to enterprise; sends a best-effort welcome email; if cédula belongs to a user with no active relations, reactivates instead of creating; if it belongs to a user with an active relation elsewhere, 409 `{code:'CEDULA_EXISTS'}` without revealing user data (traslado gestionado por el call center de DTC); assigning `roleId=ADMIN_DTC` additionally 403s unless the actor is themselves `ADMIN_DTC` (`assertCanAssignRole`) |
 | `PUT /api/users/:id` | Bearer + Admin | Update user |
 | `PUT /api/users/:userId/enterprises/:enterpriseId` | Bearer + Admin | Update user-enterprise relation; assigning `roleId=ADMIN_DTC` additionally 403s unless the actor is themselves `ADMIN_DTC` (`assertCanAssignRole`) |
+| `GET /api/users/global` | Bearer + `ADMIN_DTC` | Cross-enterprise user listing (F4 menu, "Usuarios globales"); single JOIN (not N+1 like `listByEnterprise`), includes `enterpriseDsc` |
 | `GET /api/roles` | Bearer + Admin | List all roles; `?active=1` filters to `status=1` only |
 | `GET /api/roles/:id` | Bearer + Admin | Role detail |
 | `POST /api/roles` | Bearer + `ADMIN_DTC` | Create role |
@@ -356,6 +375,7 @@ Forgot password flow: `POST /api/auth/forgot-password` accepts `{ identifier }` 
 | `GET /api/enterprises/me/enterprise-categories` | Bearer | Enterprise's commercial categories with `enterprise_category_id` (used for SKU upload) |
 | `GET /api/enterprises/me/enterprise-categories/smart` | Bearer | Enterprise's smart-DTC categories only, with parent info (feeds SKU/shelf-photo upload category pickers) |
 | `GET /api/products` | Bearer | Products with pagination/search |
+| `GET /api/skus/global` | Bearer + `ADMIN_DTC` | Global paginated SKU catalog listing (F4 menu, "SKUs globales"); search by EAN/`Product_dsc` |
 | `POST /api/products/upload-excel` | Bearer | Parse `.xlsx`; returns rows + errors |
 | `POST /api/products/upload-images` | Bearer | Up to 200 images → `uploads-temp/<jobId>/` |
 | `POST /api/products/process/:jobId` | Bearer | Start async pipeline |
@@ -369,9 +389,13 @@ Forgot password flow: `POST /api/auth/forgot-password` accepts `{ identifier }` 
 | `POST /api/sku-images/:featureId/validate` | Bearer | Runs the local pixel quality gate (`imageValidationService`) on an already-uploaded SKU image |
 | `GET /api/annotations/photo/:photoId` | Bearer | List bounding-box annotations for a shelf photo |
 | `GET /api/annotations/photo/:photoId/readiness` | Bearer | `{ total, validated, ready }` — whether photo has ≥1 validated annotation |
+| `GET /api/annotations/photos` | Bearer + `ANNOTATION_VALIDATOR_ROLES` | Review queue (F4 menu, "Anotaciones"/"Revisar cajitas"); optional `categoryId`/`canal`/`status` query params, one row per photo |
+| `GET /api/annotations/photos/:photoId` | Bearer + `ANNOTATION_VALIDATOR_ROLES` | Single photo detail with all its bounding boxes |
+| `PATCH /api/annotations/photos/:photoId/approve` | Bearer + `ANNOTATION_VALIDATOR_ROLES` | Bulk-approves every annotation on a photo, then triggers `annotationSyncService.syncApprovedPhoto()`; body `{clienteAjustoCajitas?: boolean}` (default `true`); never 500s on a Custom Vision sync failure — returns `sync` result alongside `annotations` |
 | `PATCH /api/annotations/:id/approve` | Bearer + `ANNOTATION_VALIDATOR_ROLES` | Mark one annotation validated |
 | `PATCH /api/annotations/:id` | Bearer + `ANNOTATION_VALIDATOR_ROLES` | Correct bbox coordinates and mark validated |
 | `DELETE /api/annotations/:id` | Bearer + `ANNOTATION_VALIDATOR_ROLES` | Hard-delete (reject) an annotation; 409 if it's the photo's last remaining one |
+| `GET /api/models` | Bearer + `MODEL_MANAGER_ROLES` | Global model listing, all categories/versions (F4 menu, "Modelos de detección") |
 | `GET /api/models/category/:categoryId` | Bearer + `MODEL_MANAGER_ROLES` | List all model versions for a category |
 | `GET /api/models/category/:categoryId/can-retrain` | Bearer + `MODEL_MANAGER_ROLES` | Check the ≥`MODEL_RETRAIN_MIN_PHOTOS` rule |
 | `POST /api/models/category/:categoryId/retrain` | Bearer + `MODEL_MANAGER_ROLES` | Start a new training version (202) |
@@ -561,9 +585,13 @@ Script creado en `scripts/backfill-smart-categories.js`. Correr con `npm run bac
 
 `src/services/enterpriseService.js` — The `POST /api/enterprises` flow (enterprise + admin user creation) uses manual compensating rollbacks instead of a real DB transaction. If a step fails mid-way, the service manually deletes the already-inserted enterprise or user. This is a known gap. If this flow is expanded, consider wrapping it in `pool.transaction()` following the `enterpriseCategoryRepo.js` pattern.
 
-### 10. Annotation "review queue" endpoints not wired
+### 10. ~~Annotation "review queue" endpoints not wired~~ — RESUELTO 2026-07-25 (menú por rol)
 
-`annotationRepo.js` has `listPhotos({categoryId, canal, status})`, `getPhotoWithRegions(photoId)` (intended for a photo-review-queue listing screen — status: `PENDING_ANNOTATION|PENDING_REVIEW|APPROVED|REJECTED`), and `approvePhoto(photoId, reviewerId)` (bulk-approve every annotation on a photo). None of these are called by `annotationController.js`/`annotationRoutes.js` yet — no HTTP route exposes them. If a "approve entire photo at once" endpoint is requested (as opposed to approving annotations one at a time), most of the repo-layer work is already done — it just needs a service method + a route (likely `PATCH /api/annotations/photo/:photoId/approve`, gated by `ANNOTATION_VALIDATOR_ROLES`).
+`annotationRepo.js`'s `listPhotos({categoryId, canal, status})`, `getPhotoWithRegions(photoId)`, and `approvePhoto(photoId, reviewerId)` were dead code (no route) until the F4 menu work needed a review queue for the "Anotaciones" (`ADMIN_DTC`) and "Revisar cajitas" (`ADMIN`) menu items. Now wired as `GET /api/annotations/photos`, `GET /api/annotations/photos/:photoId`, `PATCH /api/annotations/photos/:photoId/approve` (all gated by `ANNOTATION_VALIDATOR_ROLES`, unlike the older `GET /photo/:photoId` which is open to any authenticated user).
+
+Two things fixed/added along the way:
+- `listPhotos()`'s `categoryId` was bound unconditionally (even `undefined`), and the `WHERE dtc_category_id = @categoryId` was unconditional too — with no `categoryId`, SQL Server's `NULL` comparison matched **zero rows**, silently breaking the exact "all categories" case this new global endpoint needs. Confirmed empirically (`listPhotos({})` returned 0 rows before the fix) — now `categoryId` only appears in the `WHERE` when actually provided, same pattern as `canal`/`status`.
+- The approve route now calls `annotationSyncService.syncApprovedPhoto()` right after `approvePhoto()` persists — see the Custom Vision sync section above for why, and the note there about this being a second trigger alongside the still-unintegrated Issue #54.
 
 ### 11. `azureVisionService.js` ignores real credentials
 
@@ -589,7 +617,7 @@ Documented in its own file header as the intended per-enterprise entry point, bu
 
 When an admin creates a user (`userService.createAndAssign`), the admin supplies the password directly in the request body — there is no "user gets an email, clicks a link, sets their own password" flow (the only email-driven password flow today is `forgotPassword`, which generates and emails a random password). A table `RETSC_INF_ACTIVATION_TOKENS` (`token_id`, `token`, `enterprise_id`, `admin_email`, `created_at`, `expires_at`, `used`, `used_at`) exists in the DB but has **no code reference** anywhere except being wiped by `scripts/cleanup-for-testing.js` — it's empty in production and, by its shape (`enterprise_id`+`admin_email`, no `user_id`), looks like it was meant for activating a new enterprise's admin (`POST /api/enterprises`) rather than a user created later by that admin. Do not assume it's reusable for the latter without confirming with the team what it was originally built for. Proposed design in the doc: new (or extended) token table with `user_id`, a `POST /api/auth/set-password` public endpoint, and a new `FRONTEND_URL` env var that doesn't exist yet.
 
-### 16. Menu reordering / role-based visibility — blocked on design (`docs/TODO-menu-roles.md`)
+### 16. ~~Menu reordering / role-based visibility — blocked on design~~ — UNBLOCKED 2026-07-25 (`docs/TODO-menu-roles.md`)
 
-Frontend menu needs reordering and per-role show/hide, per project-owner feedback (2026-07-01), but is blocked on mockups the owner hasn't sent yet — do not implement until they arrive. What's already in place for when they do: `src/config/roles.js` (`ROLES` + `normalizeRole()`) matches `user.roleName` returned by login/JWT with no extra mapping needed, and the `requireRole`-per-route-group pattern (see `enterpriseController.js`'s `isAdminDtc()` branching and `categoryRoutes.js`'s role-restricted route group) is the established precedent if new endpoints also need restricting once the design lands. Still open: whether visibility is purely frontend (reading `roleName`) or also requires new backend restrictions — depends on which sections change.
+María (project owner) confirmed the menu↔role mapping on 2026-07-25 — see "Menú por rol (F4)" below for the mapping itself and what it did/didn't require from this backend. `src/config/roles.js` (`ROLES` + `normalizeRole()`) and the `requireRole`-per-route-group pattern (precedent: `enterpriseController.js`'s `isAdminDtc()` branching, `categoryRoutes.js`'s role-restricted route group) turned out to be exactly what was needed — no new middleware pattern was invented for this. Visibility ended up being **both**: the frontend hides/shows menu items by reading `user.roleName` (no backend change needed for that part), but four menu items also needed brand-new endpoints (see below) since nothing existed to power them yet.
 

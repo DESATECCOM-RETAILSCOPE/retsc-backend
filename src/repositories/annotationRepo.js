@@ -214,12 +214,23 @@ const STATUS_CLAUSES = {
   REJECTED:           ' AND photo_approved = 0',
 };
 
+// NOTA (menú por rol, 2026-07-25): categoryId es opcional — el endpoint de review queue
+// global (GET /api/annotations/photos, sin categoryId) necesita ver fotos de TODAS las
+// categorías. Antes @categoryId se bindeaba siempre (incluso undefined → NULL) y el WHERE
+// era incondicional (`dtc_category_id = @categoryId`); con NULL esa comparación nunca
+// matchea ninguna fila en SQL Server, así que "sin categoryId" devolvía silenciosamente
+// 0 filas en vez de "todas" — confirmado corriendo listPhotos({}) contra la BD real antes
+// del fix. Se cambió a WHERE 1=1 + condición opcional, mismo patrón que canal/status.
 const listPhotos = async ({ categoryId, canal, status } = {}) => {
   const pool = await getPool();
-  const req  = pool.request()
-    .input('categoryId', sql.Int, categoryId);
+  const req  = pool.request();
 
   let whereExtra = '';
+
+  if (categoryId != null) {
+    req.input('categoryId', sql.Int, categoryId);
+    whereExtra += ' AND dtc_category_id = @categoryId';
+  }
 
   if (canal) {
     req.input('canalFilter', sql.VarChar(20), canal);
@@ -241,7 +252,7 @@ const listPhotos = async ({ categoryId, canal, status } = {}) => {
       MAX(CAST(photo_approved AS INT)) AS photo_approved,
       MIN(created_at)                  AS created_at
     FROM ${TABLE}
-    WHERE dtc_category_id = @categoryId
+    WHERE 1=1
       ${whereExtra}
     GROUP BY photo_id
     ORDER BY MIN(created_at) DESC

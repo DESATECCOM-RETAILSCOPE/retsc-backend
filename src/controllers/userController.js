@@ -16,6 +16,15 @@ const listUsers = async (req, res) => {
   } catch (err) { return handleError(res, err); }
 };
 
+// GET /api/users/global — cross-empresa, exclusivo ADMIN_DTC (gate en userRoutes.js).
+// Alimenta el ítem "Usuarios globales" del menú ADMIN_DTC (F4).
+const listGlobalUsers = async (req, res) => {
+  try {
+    const users = await userService.listAllGlobal();
+    return res.json({ success: true, users });
+  } catch (err) { return handleError(res, err); }
+};
+
 // POST /api/users
 // createAndAssign maneja tanto el alta de un usuario nuevo como el caso de una
 // cédula ya existente sin relaciones activas (reactivación silenciosa) — ver
@@ -56,4 +65,4 @@ const updateUserEnterprise = async (req, res) => {
   } catch (err) { return handleError(res, err); }
 };
 
-module.exports = { listUsers, createUser, updateUser, updateUserEnterprise };
+module.exports = { listUsers, listGlobalUsers, createUser, updateUser, updateUserEnterprise };

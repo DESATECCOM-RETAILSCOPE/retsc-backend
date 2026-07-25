@@ -78,6 +78,29 @@ const listByEnterprise = async (enterpriseId) => {
   return enriched;
 };
 
+// Listado global cross-empresa (menú por rol 2026-07-25, ítem "Usuarios globales" de
+// ADMIN_DTC — GET /api/users/global). Nunca selecciona PasswordHash (ver
+// userEnterpriseRepo.findAllGlobal) — no hace falta excluirlo acá, ni siquiera se trae
+// de la BD. Mismo shape que listByEnterprise + enterpriseDsc, para que el frontend
+// muestre a qué empresa pertenece cada usuario.
+const listAllGlobal = async () => {
+  const rows = await userEnterpriseRepo.findAllGlobal();
+
+  return rows.map((r) => ({
+    userId:            r.User_id,
+    userName:          r.User_name ?? null,
+    email:             r.Email ?? null,
+    cedIdentidad:      r.ced_identidad ?? null,
+    roleId:            r.Role_id ?? null,
+    roleName:          r.Role_name ?? null,
+    enterpriseId:      r.Enterprise_id,
+    enterpriseDsc:     r.Enterprise_dsc ?? null,
+    status:            (r.Status === 1 || r.Status === true) ? 1 : 0,
+    fechaActivacion:   r.Fecha_activacion,
+    fechaInactivacion: r.Fecha_inactivacion,
+  }));
+};
+
 // ── 1.3 ──────────────────────────────────────────────────────────────────────
 // Decisión de negocio (feedback dueña, 1 Jul): una cédula duplicada con
 // relación activa en OTRA empresa no debe revelar nada del usuario ni ofrecer
@@ -247,6 +270,7 @@ const updateUserEnterprise = async (userId, enterpriseId, payload, actorRoleName
 
 module.exports = {
   listByEnterprise,
+  listAllGlobal,
   createAndAssign,
   updateUser,
   updateUserEnterprise,

@@ -74,4 +74,32 @@ const update = async (userId, enterpriseId, partial) => {
   return r.recordset[0] ?? null;
 };
 
-module.exports = { findActiveByUserId, findByEnterprise, findByUserAndEnterprise, insert, update };
+// Listado global cross-empresa (menú por rol 2026-07-25, ítem "Usuarios globales" de
+// ADMIN_DTC). A diferencia de findByEnterprise + el enriquecimiento N+1 que hace
+// userService.listByEnterprise (un findById de usuario y otro de rol POR relación),
+// acá se resuelve todo en un solo JOIN — a escala global (todas las empresas, todos los
+// usuarios) el N+1 se vuelve costoso rápido, y el shape de salida es simple (usuario +
+// rol + empresa), sin la lógica condicional que sí justificaba el loop en otros lados.
+// LEFT JOIN en rol/empresa (no INNER) para no perder la fila si alguna quedó huérfana de
+// esas FKs — se prioriza que el listado nunca sea más corto que RETSC_OP_USRSXENTERP.
+const findAllGlobal = async () => {
+  const pool = await getPool();
+  const r = await pool.request().query(`
+    SELECT
+      u.User_id, u.User_name, u.Email, u.ced_identidad,
+      r.Role_id, r.Role_name,
+      ux.Enterprise_id, ux.Status, ux.Fecha_activacion, ux.Fecha_inactivacion,
+      e.Enterprise_dsc
+    FROM ${TABLE} ux
+    JOIN RETSC_OP_USERS u
+      ON u.User_id = ux.User_id
+    LEFT JOIN RETSC_OP_ROLES r
+      ON r.Role_id = ux.Role_id
+    LEFT JOIN RETSC_OP_ENTERPRISE e
+      ON e.Enterprise_id = ux.Enterprise_id
+    ORDER BY e.Enterprise_dsc ASC, u.User_name ASC
+  `);
+  return r.recordset;
+};
+
+module.exports = { findActiveByUserId, findByEnterprise, findByUserAndEnterprise, insert, update, findAllGlobal };

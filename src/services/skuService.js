@@ -316,4 +316,31 @@ const processSkuExcel = async (
   return { metrics, errors };
 };
 
-module.exports = { processSkuExcel };
+// GET /api/skus/global — listado global paginado del catálogo (menú por rol 2026-07-25,
+// ítem "SKUs globales" de ADMIN_DTC). toDTO mapea Pascal/snake_case real de la tabla a
+// camelCase (convención del repo — ver "Column naming convention" en CLAUDE.md).
+function toSkuDTO(row) {
+  return {
+    skuId:               row.SKU_ID,
+    ean:                 row.EAN,
+    productDsc:          row.Product_dsc,
+    status:              row.status,
+    imageUrl:            row.image_url ?? null,
+    imageStatus:         row.image_status ?? null,
+    creationDate:        row.creation_date,
+    selectedCategoryId:  row.selected_category_id ?? null,
+    detectionCategoryId: row.detection_category_id ?? null,
+  };
+}
+
+const listGlobal = async (filters = {}) => {
+  const { search, page = 1, limit = 50 } = filters;
+  const { rows, total } = await skuRepo.listGlobal({
+    search,
+    page: Number(page),
+    limit: Number(limit),
+  });
+  return { skus: rows.map(toSkuDTO), total, page: Number(page), limit: Number(limit) };
+};
+
+module.exports = { processSkuExcel, listGlobal };
