@@ -250,6 +250,86 @@ const logSkuRow = async (data) => {
     `);
 };
 
+// Expresión de agrupación para GET /api/products/global (menú por rol 2026-07-25, ítem
+// "Productos" de ADMIN_DTC). No hay FK que distinga "producto" de "SKU" — RETSC_OP_PRODUCTS
+// fue eliminada (commit b775f86) y hoy cada fila de RETSC_OP_SKUS ES un EAN individual, no
+// necesariamente un "producto" en el sentido de catálogo. Jefatura pidió que "Productos" sea
+// una vista distinta de "SKUs globales" (GET /api/skus/global, una fila por EAN) — el criterio
+// elegido para agrupar es (Product_dsc, detection_category_id): dos EANs con la MISMA
+// descripción Y la MISMA categoría global se muestran como un solo producto (ej. un rediseño
+// de empaque que reemplaza el EAN pero mantiene nombre/categoría); dos EANs con la misma
+// descripción mientras el nombre coincide por texto pero la categoría difiere NO se
+// mezclan (evita colapsar dos productos distintos que casualmente comparten texto
+// descriptivo). Con los datos reales de hoy (3 SKUs, cada uno con Product_dsc distinto —
+// "Fideos"/"Lasaña"/"Tallarín", verificado 2026-07-26) esta agrupación no colapsa nada
+// todavía; el criterio queda listo para cuando sí haya EANs repetidos bajo un mismo producto.
+// Product_dsc es NULLABLE en el esquema real (aunque hoy no hay ninguna fila NULL) — un GROUP
+// BY directo sobre Product_dsc mezclaría TODAS las filas sin descripción en un solo grupo
+// falso; PRODUCT_GROUP_KEY_EXPR usa el propio SKU_ID como fallback para que cada SKU sin
+// descripción quede en su propio grupo en vez de fusionarse con otros.
+const PRODUCT_GROUP_KEY_EXPR = `CASE WHEN Product_dsc IS NULL THEN CONCAT('__nodesc_', SKU_ID) ELSE Product_dsc END`;
+
+function buildGlobalProductFilters(req, filters) {
+  let whereExtra = '';
+
+  // Solo por descripción — a nivel agrupado no hay un EAN único por fila (puede haber
+  // más de uno detrás de un mismo producto), a diferencia de listGlobal (SKUs).
+  if (filters.search) {
+    req.input('search', sql.NVarChar(200), `%${filters.search}%`);
+    whereExtra += ' AND Product_dsc LIKE @search';
+  }
+
+  return whereExtra;
+}
+
+// GET /api/products/global — catálogo global derivado de RETSC_OP_SKUS, SIN ninguna
+// columna de RETSC_OP_ENTERPRISE_PRODUCT_SEG (esta vista no lleva marca/segmento/categoría
+// comercial de cliente — eso es exactamente lo que la distingue de GET /api/products,
+// que sí está scopeado por empresa vía esa tabla).
+const listGlobalProducts = async (filters = {}) => {
+  const pool = await getPool();
+  const page   = Math.max(1, Number(filters.page)  || 1);
+  const limit  = Math.max(1, Number(filters.limit) || 50);
+  const offset = (page - 1) * limit;
+
+  const countReq = pool.request();
+  const whereExtraCount = buildGlobalProductFilters(countReq, filters);
+  const countResult = await countReq.query(`
+    SELECT COUNT(*) AS total FROM (
+      SELECT ${PRODUCT_GROUP_KEY_EXPR} AS group_key
+      FROM RETSC_OP_SKUS
+      WHERE 1=1
+      ${whereExtraCount}
+      GROUP BY ${PRODUCT_GROUP_KEY_EXPR}, detection_category_id
+    ) AS grouped
+  `);
+  const total = countResult.recordset[0]?.total ?? 0;
+
+  const listReq = pool.request()
+    .input('offset', sql.Int, offset)
+    .input('limit',  sql.Int, limit);
+  const whereExtraList = buildGlobalProductFilters(listReq, filters);
+  const r = await listReq.query(`
+    SELECT
+      MIN(SKU_ID)          AS sample_sku_id,
+      MAX(Product_dsc)     AS Product_dsc,
+      detection_category_id,
+      COUNT(*)             AS sku_count,
+      CASE WHEN SUM(CASE WHEN status = 'ACTIVE' THEN 1 ELSE 0 END) > 0
+           THEN 'ACTIVE' ELSE MAX(status) END AS status,
+      MAX(image_url)       AS image_url,
+      MAX(image_status)    AS image_status,
+      MIN(creation_date)   AS creation_date
+    FROM RETSC_OP_SKUS
+    WHERE 1=1
+    ${whereExtraList}
+    GROUP BY ${PRODUCT_GROUP_KEY_EXPR}, detection_category_id
+    ORDER BY MAX(Product_dsc) ASC
+    OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY
+  `);
+  return { rows: r.recordset, total };
+};
+
 module.exports = {
   findSkuByEan,
   insertSku,
@@ -259,4 +339,5 @@ module.exports = {
   updateEnterpriseSku,
   logSkuRow,
   listGlobal,
+  listGlobalProducts,
 };

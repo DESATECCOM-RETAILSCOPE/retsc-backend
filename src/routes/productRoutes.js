@@ -5,6 +5,8 @@ const fs         = require('fs');
 const router     = express.Router();
 const controller = require('../controllers/productController');
 const authMiddleware = require('../middlewares/authMiddleware');
+const requireRole    = require('../middlewares/requireRole');
+const { ROLES }      = require('../config/roles');
 
 const UPLOADS_TEMP = path.join(__dirname, '..', '..', 'uploads-temp');
 fs.mkdirSync(UPLOADS_TEMP, { recursive: true });
@@ -111,6 +113,53 @@ router.get('/categories',                 authMiddleware,                control
  *       401:
  *         description: Sin token, o token expirado (code TOKEN_EXPIRED)
  */
+/**
+ * @swagger
+ * /api/products/global:
+ *   get:
+ *     summary: Catálogo global de productos (derivado de RETSC_OP_SKUS), sin datos de empresa
+ *     tags: [Products]
+ *     security:
+ *       - bearerAuth: []
+ *     description: Montaje patrón 3 (auth inline, igual que el resto de este router) —
+ *       authMiddleware + requireRole(ADMIN_DTC). Ítem "Productos" del menú ADMIN_DTC (F4).
+ *       RETSC_OP_PRODUCTS ya no existe (commit b775f86) — esta vista agrupa RETSC_OP_SKUS por
+ *       (Product_dsc, detection_category_id), ver PRODUCT_GROUP_KEY_EXPR en skuRepo.js para el
+ *       porqué de ese criterio. Distinto de GET /api/skus/global (una fila por EAN, sin agrupar).
+ *       Declarada ANTES de GET '/' — no colisionan (distinta cantidad de segmentos, "/global" vs
+ *       "/"), pero se deja así para quedar a prueba de una futura ruta GET '/:id'.
+ *     parameters:
+ *       - in: query
+ *         name: search
+ *         schema: { type: string }
+ *         description: Busca por Product_dsc (LIKE). No hay búsqueda por EAN a este nivel
+ *           agrupado — puede haber más de un EAN detrás del mismo producto.
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 50 }
+ *     responses:
+ *       200:
+ *         description: Página de productos globales + total
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 products: { type: array, items: { type: object } }
+ *                 total: { type: integer }
+ *                 page: { type: integer }
+ *                 limit: { type: integer }
+ *       401:
+ *         description: Sin token, o token expirado
+ *       403:
+ *         description: Autenticado pero no es ADMIN_DTC
+ */
+router.get('/global', authMiddleware, requireRole(ROLES.ADMIN_DTC), controller.listGlobalProducts);
+
 router.get('/',                           authMiddleware,                controller.listProducts);
 
 module.exports = router;
