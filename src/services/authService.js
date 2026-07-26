@@ -117,8 +117,13 @@ const resolveLoginData = async (email, password) => {
     );
   }
 
-  // Tomar la relación más antigua (menor Id) — comportamiento original
-  const relation = relations.reduce((min, r) => r.Id < min.Id ? r : min, relations[0]);
+  // Tomar la relación más antigua. FIX 2026-07-26: esto comparaba `r.Id`, pero
+  // RETSC_OP_USRSXENTERP no tiene columna Id — la comparación era siempre
+  // `undefined < undefined` (false), así que en la práctica se devolvía la
+  // primera fila en el orden que diera SQL Server, no la más vieja. Ahora
+  // findActiveByUserId ya ordena por Fecha_activacion ASC, así que el primer
+  // elemento es directamente la relación más antigua.
+  const relation = relations[0];
 
   const role = await roleRepo.findById(relation.Role_id);
   if (!role) {
@@ -173,7 +178,9 @@ if (user.Status !== 1 && user.Status !== true) {
     );
   }
 
-  const relation = relations.reduce((min, r) => r.Id < min.Id ? r : min, relations[0]);
+  // Ver fix 2026-07-26 en resolveLoginData de arriba: relations[0] ya es la más
+  // antigua porque findActiveByUserId ordena por Fecha_activacion ASC.
+  const relation = relations[0];
 
   const role = await roleRepo.findById(relation.Role_id);
   if (!role) {
