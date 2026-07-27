@@ -234,7 +234,8 @@ When a category is created or updated with `is_smart_dtc=1`, the system automati
 categoryService.createCategory()
   └─► aiInfrastructureService.provisionForCategory()   [background]
         ├─► blobStorageService.createMarker()           → global-sku-training/dtc-{slug}/.keep
-        ├─► globalBlobContainerRepo.insert()            → RETSC_INF_GLOBAL_BLOB_CONTAINERS
+        ├─► blobStorageService.createMarker() × 3        → global-shelf-training/dtc-{slug}/{omt|dtt|convenience}/.keep
+        ├─► globalBlobContainerRepo.insert() × 4          → RETSC_INF_GLOBAL_BLOB_CONTAINERS (una fila por prefix)
         ├─► aiModelRepo.insert()                        → RETSC_AI_DETECTION_MODELS (status=PENDING)
         └─► customVisionService.createProject()         → proyecto real si hay credenciales; null si no
 ```
@@ -243,9 +244,13 @@ Key files:
 - `src/utils/categoryNameNormalizer.js` — slug generator for blob prefix names (e.g. `"Vino Tinto"` → `"vino-tinto"`)
 - `src/services/aiInfrastructureService.js` — orchestrator; never throws, returns `{ status, errors[] }`
 - `src/services/customVisionService.js` — **ya no es un stub** (Issue 8.1/8.2/8.3, cerrado 2026-07-19): `createProject()`, `createImageFromData()`, `createImageRegions()`, `deleteImageRegion()`, `deleteImages()`, `trainProject()`, `getIteration()`, `getIterationPerformance()` hacen llamadas HTTP reales a la API v3.3 de Custom Vision Training usando `fetch` nativo (no el SDK oficial — la key de Azure AI Services unificada trae caracteres no-ASCII que el módulo `http` de Node rechaza en headers pero `fetch` acepta). `isConfigured()` sigue siendo el gate para todo el servicio.
-- `src/repositories/globalBlobContainerRepo.js` — wraps `RETSC_INF_GLOBAL_BLOB_CONTAINERS`; prefix stored in `description` field (TEMPORAL, see pending #7)
+- `src/repositories/globalBlobContainerRepo.js` — wraps `RETSC_INF_GLOBAL_BLOB_CONTAINERS`
 
-Blob prefix format: `dtc-{slug}` inside the `AZURE_GLOBAL_TRAINING_CONTAINER` container (default: `global-sku-training`). The `.keep` marker file makes the prefix visible in the Azure Portal as a folder.
+Blob prefix format: `dtc-{slug}` inside `AZURE_GLOBAL_TRAINING_CONTAINER` (default: `global-sku-training`), más `dtc-{slug}/{omt|dtt|convenience}` inside `AZURE_GLOBAL_SHELF_CONTAINER` (default: `global-shelf-training`) — agregado 2026-07-26, antes `aiInfrastructureService.js` nunca tocaba el container de góndola; esos 3 prefijos quedaban invisibles en el Portal hasta que alguien subía la primera foto real vía `shelfPhotoUploadService.js`. El `.keep` marker file makes the prefix visible in the Azure Portal as a folder.
+
+⚠ **Migración 007 (`007_fix_global_blob_containers_unique.sql`) — aplicada en producción 2026-07-26.** Cambia el UNIQUE constraint de `RETSC_INF_GLOBAL_BLOB_CONTAINERS` de `container_name` solo a `(container_name, prefix)`. Antes, como `container_name` es el mismo valor compartido por todas las categorías de un container, solo la PRIMERA categoría en usar cada container quedaba registrada — el resto chocaba contra el UNIQUE y `aiInfrastructureService.js` atrapaba el error a propósito (para no romper el provisioning real), pero el efecto era que la tabla nunca reflejaba más de 1 fila por container. Con el constraint compuesto, cada categoría (y cada canal, en el caso de góndola) sí queda registrada con su propia fila.
+
+`container_type` (CHK_RETSC_GLOBAL_BLOB_TYPE, solo acepta `'GLOBAL_TRAINING'` o `'GLOBAL_SKU_PHOTOS'`) también estaba hardcodeado mal: `aiInfrastructureService.js` insertaba siempre `'GLOBAL_TRAINING'`, incluso para el container de fotos de SKU. Convención acordada 2026-07-26 (no hay migración/spec previa en este repo que lo defina — es una inferencia por naming, ya que solo existen esos 2 valores para 2 containers): `'GLOBAL_SKU_PHOTOS'` → `global-sku-training`, `'GLOBAL_TRAINING'` → `global-shelf-training`. La fila que ya existía de antes de este fix (SHAMPOO) quedó con el valor viejo (`'GLOBAL_TRAINING'` para el container de SKU) sin corregir — el `UPDATE` de corrección quedó comentado en la migración 007, pendiente de decisión.
 
 ### Database tables
 

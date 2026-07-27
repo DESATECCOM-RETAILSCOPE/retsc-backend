@@ -3,16 +3,22 @@
 // Responsabilidad: cuando se crea (o actualiza a smart) una categoría con is_smart_dtc=1,
 // este servicio aprovisiona automáticamente:
 //   1. Un prefijo en Azure Blob Storage ('global-sku-training/dtc-{slug}/') con archivo .keep
-//   2. Registro del container en RETSC_INF_GLOBAL_BLOB_CONTAINERS (solo la primera vez;
-//      el container es compartido, tiene UNIQUE constraint por container_name)
-//   3. Un registro placeholder en RETSC_AI_DETECTION_MODELS con status PENDING (uno por categoría)
-//   4. (Futuro) Un proyecto de Custom Vision — actualmente siempre PENDING
+//   2. Los 3 prefijos por canal en 'global-shelf-training' ('dtc-{slug}/omt|dtt|convenience/')
+//      con archivo .keep — agregado junto con la migración 007 (antes no se creaba nada acá)
+//   3. Registro de cada prefix en RETSC_INF_GLOBAL_BLOB_CONTAINERS (una fila por
+//      combinación container_name+prefix, ver migración 007 — antes el UNIQUE era solo
+//      sobre container_name y bloqueaba el registro de cualquier categoría que no fuera
+//      la primera en usar ese container)
+//   4. Un registro placeholder en RETSC_AI_DETECTION_MODELS con status PENDING (uno por categoría)
+//   5. (Futuro) Un proyecto de Custom Vision — actualmente siempre PENDING
 //
 // Diseño del storage:
-//   - Azure container: 'global-sku-training' (uno global, compartido por todas las categorías smart)
-//   - Prefix por categoría: 'dtc-{slug}/' (ej. 'dtc-shampoo/')
-//   - RETSC_INF_GLOBAL_BLOB_CONTAINERS: registra el container una sola vez (UNIQUE en container_name)
-//   - RETSC_AI_DETECTION_MODELS: un registro por categoría; model_name codifica el prefix
+//   - Azure containers: 'global-sku-training' (fotos de SKU) y 'global-shelf-training'
+//     (fotos de góndola) — ambos compartidos por todas las categorías smart
+//   - Prefix SKU:   'dtc-{slug}/' (ej. 'dtc-shampoo/')
+//   - Prefix góndola: 'dtc-{slug}/{omt|dtt|convenience}/' (ej. 'dtc-shampoo/omt/')
+//   - RETSC_INF_GLOBAL_BLOB_CONTAINERS: una fila por (container_name, prefix) — UNIQUE compuesto
+//   - RETSC_AI_DETECTION_MODELS: un registro por categoría; model_name codifica el prefix SKU
 //
 // Tolerancia a fallos:
 //   - NUNCA lanza excepciones por errores de Azure. Devuelve { status, errors[] }.
@@ -28,8 +34,19 @@ const blobStorageService        = require('./blobStorageService');
 const customVisionService       = require('./customVisionService');
 const { normalizeName }         = require('../utils/categoryNameNormalizer');
 
+const CANALES = ['omt', 'dtt', 'convenience'];
+
+// Tipos válidos de container_type (CHK_RETSC_GLOBAL_BLOB_TYPE): solo existen estos 2
+// valores, uno por cada container global — ver header de globalBlobContainerRepo.js.
+const CONTAINER_TYPE_SKU_PHOTOS = 'GLOBAL_SKU_PHOTOS';
+const CONTAINER_TYPE_SHELF_TRAINING = 'GLOBAL_TRAINING';
+
 function getTrainingContainer() {
   return process.env.AZURE_GLOBAL_TRAINING_CONTAINER || 'global-sku-training';
+}
+
+function getShelfContainer() {
+  return process.env.AZURE_GLOBAL_SHELF_CONTAINER || 'global-shelf-training';
 }
 
 // BUG (encontrado en prueba E2E, 2026-07-19): RETSC_AI_DETECTION_MODELS.prediction_resource_id
@@ -53,35 +70,38 @@ function getSafePredictionResourceId() {
 
 // ─── Paso de Blob: marker + registro de container ─────────────────────────────
 //
-// El container 'global-sku-training' es COMPARTIDO entre todas las categorías smart.
-// La tabla RETSC_INF_GLOBAL_BLOB_CONTAINERS tiene UNIQUE en container_name, así que
-// el container se registra solo una vez. Si ya existe, solo se crea el marker del prefix.
-async function provisionBlobForCategory({ categoryId, prefix, containerName, errors }) {
+// Los containers ('global-sku-training', 'global-shelf-training') son COMPARTIDOS entre
+// todas las categorías smart. Desde la migración 007, RETSC_INF_GLOBAL_BLOB_CONTAINERS
+// tiene UNIQUE en (container_name, prefix) — no en container_name solo — así que cada
+// categoría (y cada canal, en el caso de góndola) SÍ queda registrada con su propia fila,
+// aunque comparta container_name con otras.
+async function provisionBlobForCategory({ categoryId, prefix, containerName, containerType, errors }) {
   // Crear el marker .keep en el prefix (idempotente: no hace nada si ya existe)
   try {
     await blobStorageService.createMarker({ containerName, prefix });
   } catch (err) {
-    errors.push(`Blob marker: ${err.message}`);
+    errors.push(`Blob marker (${prefix}): ${err.message}`);
     // El marker no se pudo crear, pero seguimos para registrar en DB con status PENDING_AZURE
   }
 
-  // Verificar si el container ya está registrado (UNIQUE constraint en container_name)
-  const existingContainer = await globalBlobContainerRepo.findByContainerName(containerName);
+  // Verificar si esta combinación container_name+prefix ya está registrada (UNIQUE compuesto)
+  const existingRecord = await globalBlobContainerRepo.findByName(containerName, prefix);
 
-  if (!existingContainer) {
-    // Primera categoría en usar este container: registrar en DB.
-    // BUG (encontrado en prueba E2E, 2026-07-19): este insert no estaba protegido — con varias
-    // categorías provisionando en paralelo (fire-and-forget), dos podían pasar el chequeo de
-    // findByContainerName antes de que la primera hiciera commit, y la segunda chocaba contra
-    // la UNIQUE constraint. Como categoryService.js llama a provisionForCategory().then(...) sin
-    // .catch(), esa excepción sin capturar abortaba TODO el resto del provisioning de esa
-    // categoría (ni siquiera llegaba a crear su fila en RETSC_AI_DETECTION_MODELS).
+  if (!existingRecord) {
+    // BUG (encontrado en prueba E2E, 2026-07-19; UNIQUE compuesto agregado en migración 007):
+    // con varias categorías/canales provisionando en paralelo (fire-and-forget), dos podían
+    // pasar el chequeo de existencia antes de que la primera hiciera commit, y la segunda
+    // chocaba contra la UNIQUE constraint. Como categoryService.js llama a
+    // provisionForCategory().then(...) sin .catch(), esa excepción sin capturar abortaba TODO
+    // el resto del provisioning de esa categoría (ni siquiera llegaba a crear su fila en
+    // RETSC_AI_DETECTION_MODELS). Se mantiene el try/catch por la misma razón, aunque ahora
+    // la carrera solo puede darse si dos categorías/canales usan EXACTAMENTE el mismo prefix.
     try {
       const blobStatus = errors.some(e => e.startsWith('Blob marker')) ? 'PENDING_AZURE' : 'ACTIVE';
       await globalBlobContainerRepo.insert({
         categoryId,
         containerName,
-        containerType:  'GLOBAL_TRAINING',
+        containerType,
         // TODO: extraer el nombre de la cuenta del AZURE_STORAGE_CONNECTION_STRING en lugar de hardcodear.
         storageAccount: 'storagescopeprod',
         prefix,
@@ -89,18 +109,35 @@ async function provisionBlobForCategory({ categoryId, prefix, containerName, err
         status:         blobStatus,
       });
     } catch (err) {
-      // Error 2627/2601 de SQL Server = violación de UNIQUE constraint — significa que otra
-      // categoría ganó la carrera y ya registró el container; no es un error real, es el mismo
-      // caso que existingContainer ya intentaba prevenir. Cualquier otro error sí se registra.
+      // Error 2627/2601 de SQL Server = violación de UNIQUE constraint — significa que otro
+      // provisioning en paralelo ganó la carrera para esta MISMA combinación container+prefix;
+      // no es un error real, es el mismo caso que existingRecord ya intentaba prevenir.
+      // Cualquier otro error sí se registra.
       if (err.number === 2627 || err.number === 2601) {
-        console.log(`[aiInfra] container "${containerName}" ya fue registrado por otra categoría (carrera de provisioning en paralelo) — se ignora.`);
+        console.log(`[aiInfra] container "${containerName}" prefix "${prefix}" ya fue registrado (carrera de provisioning en paralelo) — se ignora.`);
       } else {
-        errors.push(`Blob container registro: ${err.message}`);
+        errors.push(`Blob container registro (${prefix}): ${err.message}`);
       }
     }
   }
-  // Si ya existe el container, no insertamos nada (UNIQUE constraint).
-  // El prefix de esta categoría queda trazado solo en RETSC_AI_DETECTION_MODELS.model_name.
+}
+
+// Aprovisiona los 3 prefijos de canal ('omt', 'dtt', 'convenience') en el container de
+// fotos de góndola para una categoría. Antes de esto, aiInfrastructureService nunca
+// tocaba 'global-shelf-training' — shelfPhotoUploadService creaba el path recién al
+// subir la primera foto real, sin marker previo visible en el Portal de Azure.
+async function provisionShelfPrefixesForCategory({ categoryId, slug, errors }) {
+  const shelfContainer = getShelfContainer();
+  for (const canal of CANALES) {
+    const prefix = `dtc-${slug}/${canal}`;
+    await provisionBlobForCategory({
+      categoryId,
+      prefix,
+      containerName: shelfContainer,
+      containerType: CONTAINER_TYPE_SHELF_TRAINING,
+      errors,
+    });
+  }
 }
 
 // ─── Provisioning completo ────────────────────────────────────────────────────
@@ -130,8 +167,14 @@ const provisionForCategory = async ({ categoryId, categoryName }) => {
   const slug   = normalizeName(categoryName);
   const prefix = `dtc-${slug}`;
 
-  // 4. Blob: marker + registro de container (solo si no existe ya)
-  await provisionBlobForCategory({ categoryId, prefix, containerName, errors });
+  // 4. Blob SKU: marker + registro de container (solo si no existe ya)
+  await provisionBlobForCategory({
+    categoryId, prefix, containerName, errors,
+    containerType: CONTAINER_TYPE_SKU_PHOTOS,
+  });
+
+  // 4b. Blob góndola: los 3 prefijos por canal (omt/dtt/convenience)
+  await provisionShelfPrefixesForCategory({ categoryId, slug, errors });
 
   // 5. Modelo IA placeholder
   const model = await aiModelRepo.insert({
@@ -194,6 +237,21 @@ const retryForCategory = async (categoryId) => {
       errors.push(`Blob marker: ${err.message}`);
     }
   }
+
+  // Reintentar registro en RETSC_INF_GLOBAL_BLOB_CONTAINERS por si el insert original
+  // falló (mismo chequeo por combinación container_name+prefix que usa provisionForCategory).
+  const existingRecord = await globalBlobContainerRepo.findByName(containerName, prefix);
+  if (!existingRecord) {
+    await provisionBlobForCategory({
+      categoryId, prefix, containerName, errors,
+      containerType: CONTAINER_TYPE_SKU_PHOTOS,
+    });
+  }
+
+  // Reintentar los 3 prefijos de góndola (omt/dtt/convenience) — provisionBlobForCategory
+  // ya es idempotente por combinación container_name+prefix, así que es seguro llamarla
+  // de nuevo aunque algunos canales ya estén provisionados.
+  await provisionShelfPrefixesForCategory({ categoryId, slug, errors });
 
   // Reintentar Custom Vision si el modelo sigue PENDING
   if (existingModel.status === 'PENDING' && customVisionService.isConfigured()) {

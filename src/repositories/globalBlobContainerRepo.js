@@ -4,10 +4,12 @@
 // ESQUEMA REAL (verificado con INFORMATION_SCHEMA):
 //   global_container_id  INT IDENTITY PK
 //   category_id          INT NOT NULL
-//   container_name       NVARCHAR(150) NOT NULL
+//   container_name       NVARCHAR(150) NOT NULL  — nombre del container COMPARTIDO (ej. 'global-sku-training')
 //   container_type       VARCHAR(30)   NOT NULL  — CHK_RETSC_GLOBAL_BLOB_TYPE: 'GLOBAL_TRAINING' | 'GLOBAL_SKU_PHOTOS'
+//                                                   'GLOBAL_SKU_PHOTOS' → container global-sku-training (fotos de SKU)
+//                                                   'GLOBAL_TRAINING'   → container global-shelf-training (fotos de góndola)
 //   storage_account      NVARCHAR(150) NULL
-//   prefix               VARCHAR(100)  NULL       — agregado en migración 003
+//   prefix               VARCHAR(100)  NULL       — agregado en migración 003; identifica la categoría/canal dentro del container
 //   description          NVARCHAR(300) NULL       — libre para uso futuro (descripción humana)
 //   status               TINYINT NOT NULL   ← NOT varchar; ver constantes abajo
 //   created_at           DATETIME NOT NULL
@@ -15,6 +17,9 @@
 // STATUS (tinyint):
 //   1 = ACTIVE        — blob creado correctamente en Azure
 //   0 = PENDING_AZURE — fallo al crear el blob, pendiente de retry
+//
+// UNIQUE (migración 007): (container_name, prefix) — antes era solo container_name, lo
+// que impedía que más de una categoría quedara registrada por container compartido.
 
 const { getPool, sql } = require('../config/db');
 
@@ -40,8 +45,11 @@ function toDTO(row) {
 // ─── Lectura ─────────────────────────────────────────────────────────────────
 
 // Devuelve el registro de container para una categoría, o null si no existe.
-// NOTA: como container_name tiene UNIQUE constraint, una categoría tiene registro
-// solo si fue la PRIMERA en registrar ese container. Ver findByContainerName().
+// Desde la migración 007 cada categoría registra su propia fila (container_name, prefix
+// es la combinación única), así que category_id ya no está limitado a "la primera que
+// llegó" — pero una categoría puede tener MÁS DE UNA fila si provisiona en más de un
+// container (ej. una en global-sku-training y otras en global-shelf-training por canal);
+// este helper devuelve solo la primera que encuentre, no pensado para ese caso.
 const findByCategoryId = async (categoryId) => {
   const pool = await getPool();
   const r = await pool.request()
@@ -53,8 +61,11 @@ const findByCategoryId = async (categoryId) => {
 };
 
 // Devuelve el registro del container por su nombre (independiente de categoría).
-// Usar esto para verificar si el container ya está registrado antes de insertar,
-// ya que container_name tiene UNIQUE constraint (UQ_RETSC_GLOBAL_BLOB_CONTAINER_NAME).
+// NOTA (migración 007): ya no sirve para chequear idempotencia antes de insertar —
+// el UNIQUE constraint pasó de container_name solo a (container_name, prefix), porque
+// container_name es el nombre del container COMPARTIDO entre categorías (ej.
+// 'global-sku-training'), no algo único por categoría. Usar findByName() para el
+// chequeo de "ya existe esta combinación" antes de insertar.
 const findByContainerName = async (containerName) => {
   const pool = await getPool();
   const r = await pool.request()
