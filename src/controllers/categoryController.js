@@ -31,7 +31,8 @@ const listByEnterprise = async (req, res) => {
   }
 };
 
-// PUT /api/enterprises/me/categories  — agrega categorías (no reemplaza, no duplica)
+// PUT /api/enterprises/me/categories  — reemplaza la selección: agrega lo nuevo,
+// quita lo que ya no viene en categoryIds, no duplica lo que sigue igual.
 const replaceForEnterprise = async (req, res) => {
   try {
     const { categoryIds } = req.body;
@@ -39,12 +40,18 @@ const replaceForEnterprise = async (req, res) => {
       req.user.enterpriseId,
       categoryIds,
     );
+
+    const parts = [];
+    if (result.added > 0) parts.push(`${result.added} agregada(s)`);
+    if (result.removed > 0) parts.push(`${result.removed} quitada(s)`);
+
     return res.json({
       success: true,
       added: result.added,
+      removed: result.removed,
       alreadyExisted: result.alreadyExisted,
       message: result.changed
-        ? `${result.added} categoría(s) agregada(s).`
+        ? `Categoría(s): ${parts.join(", ")}.`
         : "Las categorías seleccionadas ya estaban guardadas.",
     });
   } catch (err) {
@@ -170,11 +177,32 @@ const listCommercialCategories = async (req, res) => {
   }
 };
 
+// GET /api/enterprises/me/enterprise-categories/smart
+// Categorías inteligentes del enterprise para dropdowns de Góndola y Carga SKU.
+// Ya deduplicadas: si la empresa seleccionó un padre con varias hijas smart, cada
+// hija aparece UNA sola vez (GROUP BY + MIN en enterpriseCategoryRepo.listSmartForEnterprise).
+// Contrato de respuesta:
+//   { success: true, categories: [{ enterpriseCategoryId, categoryId, categoryDsc,
+//                                    parentCategoryId, parentDsc, levelNo }] }
+// IMPORTANTE (Issue B4/QA): la pantalla de Fotos de Góndola debe consumir este endpoint,
+// NO GET /api/categories filtrado por is_smart_dtc en el cliente — ese devuelve TODAS
+// las categorías DTC globales (no las de la empresa) y es ahí donde el padre puede
+// aparecer repetido en el dropdown si el cliente no dedupea.
+const listSmartByEnterprise = async (req, res) => {
+  try {
+    const categories = await categoryService.listSmartByEnterprise(req.user.enterpriseId);
+    return res.json({ success: true, categories });
+  } catch (err) {
+    return handleError(res, err);
+  }
+};
+
 module.exports = {
   listGlobal,
   listByEnterprise,
   replaceForEnterprise,
   listCommercialCategories,
+  listSmartByEnterprise,
   getRoots,
   getChildren,
   getById,

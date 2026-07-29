@@ -3,7 +3,9 @@ const userService = require('../services/userService');
 function handleError(res, err) {
   const status = err.statusCode || 500;
   if (status === 500) console.error('[user]', err);
-  return res.status(status).json({ success: false, message: err.message });
+  // err.payload (ej. code + user, ver createAndAssign / cédula duplicada) viaja
+  // adjunto a la respuesta sin romper el contrato { success, message } existente.
+  return res.status(status).json({ success: false, message: err.message, ...(err.payload ?? {}) });
 }
 
 // GET /api/users
@@ -14,32 +16,27 @@ const listUsers = async (req, res) => {
   } catch (err) { return handleError(res, err); }
 };
 
-// GET /api/users/by-cedula/:ced
-const findByCedula = async (req, res) => {
+// GET /api/users/global — cross-empresa, exclusivo ADMIN_DTC (gate en userRoutes.js).
+// Alimenta el ítem "Usuarios globales" del menú ADMIN_DTC (F4).
+const listGlobalUsers = async (req, res) => {
   try {
-    const result = await userService.findByCedula(req.params.ced);
-    return res.json(result);
+    const users = await userService.listAllGlobal();
+    return res.json({ success: true, users });
   } catch (err) { return handleError(res, err); }
 };
 
 // POST /api/users
+// createAndAssign maneja tanto el alta de un usuario nuevo como el caso de una
+// cédula ya existente sin relaciones activas (reactivación silenciosa) — ver
+// userService.js para el detalle de ambas ramas.
 const createUser = async (req, res) => {
   try {
-    const result = await userService.createAndAssign(req.body, req.user.enterpriseId);
-    return res.status(201).json({ success: true, userId: result.userId, message: 'Usuario creado y asignado a la empresa.' });
-  } catch (err) { return handleError(res, err); }
-};
-
-// POST /api/users/assign
-const assignUser = async (req, res) => {
-  try {
-    const { userId, roleId } = req.body;
-    const result = await userService.assignToEnterprise(userId, roleId, req.user.enterpriseId);
-    const messages = {
-      created:     'Usuario asignado a la empresa exitosamente.',
-      reactivated: 'Relación reactivada con el rol indicado.',
-    };
-    return res.status(201).json({ success: true, action: result.action, message: messages[result.action] });
+    const result = await userService.createAndAssign(req.body, req.user.enterpriseId, req.user.roleName);
+    let message = result.reactivated
+      ? 'Usuario reactivado y asignado a la empresa.'
+      : 'Usuario creado y asignado a la empresa.';
+    if (!result.emailSent) message += ' No se pudo enviar el correo de bienvenida.';
+    return res.status(201).json({ success: true, userId: result.userId, message });
   } catch (err) { return handleError(res, err); }
 };
 
@@ -61,10 +58,11 @@ const updateUserEnterprise = async (req, res) => {
     const relation = await userService.updateUserEnterprise(
       Number(req.params.userId),
       urlEnterpriseId,
-      req.body
+      req.body,
+      req.user.roleName
     );
     return res.json({ success: true, relation });
   } catch (err) { return handleError(res, err); }
 };
 
-module.exports = { listUsers, findByCedula, createUser, assignUser, updateUser, updateUserEnterprise };
+module.exports = { listUsers, listGlobalUsers, createUser, updateUser, updateUserEnterprise };

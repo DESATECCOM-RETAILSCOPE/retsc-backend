@@ -6,10 +6,13 @@ function handleError(res, err) {
   return res.status(status).json({ success: false, message: err.message });
 }
 
-// GET /api/roles
+// GET /api/roles — query opcional ?active=1 filtra solo roles con status=1
+// (usado por el frontend para el dropdown de rol en el formulario de alta de usuario).
+// Contrato de respuesta: { success, roles: [{ roleId, roleName, description, status }] }
 const listRoles = async (req, res) => {
   try {
-    const roles = await roleService.listAll();
+    const activeOnly = req.query.active === '1';
+    const roles = await roleService.listAll(activeOnly);
     return res.json({ success: true, roles });
   } catch (err) { return handleError(res, err); }
 };

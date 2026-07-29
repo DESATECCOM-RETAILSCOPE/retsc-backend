@@ -45,4 +45,17 @@ const uploadSkuExcel = async (req, res) => {
   }
 };
 
-module.exports = { uploadSkuExcel };
+// GET /api/skus/global — listado global, exclusivo ADMIN_DTC (gate en skuRoutes.js).
+// Alimenta el ítem "SKUs globales" del menú ADMIN_DTC (F4).
+// Query params opcionales: search, page, limit.
+const listGlobalSkus = async (req, res) => {
+  try {
+    const { search, page, limit } = req.query;
+    const result = await skuService.listGlobal({ search, page, limit });
+    return res.json({ success: true, ...result });
+  } catch (err) {
+    return handleError(res, err);
+  }
+};
+
+module.exports = { uploadSkuExcel, listGlobalSkus };

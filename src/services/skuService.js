@@ -43,6 +43,8 @@ const COLUMN_ALIASES = {
   manufacturer: ["manufacturer", "fabricante", "proveedor", "supplier"],
   category: ["category", "categoria"],
   subcategory: ["subcategory", "subcategoria"],
+  volume: ["volume", "volumen"],
+  relevant: ["relevant", "relevante", "relevant_feature", "checklist"],
 };
 const REQUIRED_KEYS = ["gtin", "description"];
 
@@ -151,6 +153,14 @@ function parseSkuExcel(filePath) {
       headerMap["subcategory"] && raw[headerMap["subcategory"]]
         ? String(raw[headerMap["subcategory"]]).trim()
         : null,
+    volume:
+      headerMap["volume"] && raw[headerMap["volume"]] != null
+        ? Number(String(raw[headerMap["volume"]]).replace(",", "."))
+        : null,
+    relevant:
+      headerMap["relevant"] && raw[headerMap["relevant"]] != null
+        ? String(raw[headerMap["relevant"]]).trim()
+        : null,
   }));
 }
 
@@ -214,8 +224,7 @@ const processSkuExcel = async (
     }
 
     // ── 2. Buscar o crear SKU global por EAN ──────────────────────────────
-    // NOTA: RETSC_OP_PRODUCTS no existe; Product_dsc y categorías viven
-    // directamente en RETSC_OP_SKUS.
+    // Product_dsc y categorías viven directamente en RETSC_OP_SKUS.
     //   selected_category_id  → enterprise_category_id (PK de ENTERPRISE_CATEGORIES)
     //   detection_category_id → resolved_category_id (Category_id smart de CATEGORIES)
     let skuRow = await skuRepo.findSkuByEan(row.gtin);
@@ -241,6 +250,54 @@ const processSkuExcel = async (
       }
     }
 
+    // ── 2.1 Asociar el SKU a esta empresa + datos propios del cliente ─────
+    // Un SKU global (RETSC_OP_SKUS) recién creado — o ya existente en el catálogo
+    // por otra empresa — nunca quedaba vinculado a RETSC_OP_ENTERPRISE_PRODUCT_SEG
+    // (bug B5, ya corregido). brand/category/subcategory/volume/relevant del Excel
+    // son datos POR-EMPRESA-POR-SKU (a diferencia de selected_category_id/
+    // detection_category_id, que son globales en RETSC_OP_SKUS) — se guardan acá.
+    // En recargas posteriores del mismo SKU se RESINCRONIZAN (update), no solo se
+    // insertan una vez — así una carga con datos corregidos arregla filas viejas
+    // en vez de dejarlas pegadas con el valor de la primera carga.
+    const clientData = {
+      brand: row.brand,
+      supplier: row.manufacturer,
+      clientCategory: row.category,
+      clientSubcategory: row.subcategory,
+      volume: row.volume,
+      relevantFeature: row.relevant,
+    };
+    try {
+      const existingEntSku = await skuRepo.findEnterpriseSku(enterpriseId, skuRow.SKU_ID);
+      if (!existingEntSku) {
+        await skuRepo.insertEnterpriseSku({
+          enterpriseId,
+          skuId: skuRow.SKU_ID,
+          ...clientData,
+        });
+      } else {
+        await skuRepo.updateEnterpriseSku(existingEntSku.seg_id, clientData);
+      }
+    } catch (err) {
+      errors.push({ row: row._rowNum, ean: row.gtin, reason: `Error al asociar SKU a la empresa: ${err.message}` });
+      metrics.errorsCount++;
+      await skuRepo
+        .logSkuRow({
+          enterpriseId,
+          batchId,
+          rowNumber: row._rowNum,
+          ean: row.gtin,
+          skuDescription: row.description,
+          selectedCategoryId: entCat.selected_category_id,
+          detectionCategoryId,
+          processStatus: 'ERROR',
+          errorCode: 'ENTERPRISE_SKU_LINK_FAILED',
+          errorMessage: err.message,
+        })
+        .catch(() => {});
+      continue;
+    }
+
     // ── 3. Log ────────────────────────────────────────────────────────────
     await skuRepo
       .logSkuRow({
@@ -259,4 +316,31 @@ const processSkuExcel = async (
   return { metrics, errors };
 };
 
-module.exports = { processSkuExcel };
+// GET /api/skus/global — listado global paginado del catálogo (menú por rol 2026-07-25,
+// ítem "SKUs globales" de ADMIN_DTC). toDTO mapea Pascal/snake_case real de la tabla a
+// camelCase (convención del repo — ver "Column naming convention" en CLAUDE.md).
+function toSkuDTO(row) {
+  return {
+    skuId:               row.SKU_ID,
+    ean:                 row.EAN,
+    productDsc:          row.Product_dsc,
+    status:              row.status,
+    imageUrl:            row.image_url ?? null,
+    imageStatus:         row.image_status ?? null,
+    creationDate:        row.creation_date,
+    selectedCategoryId:  row.selected_category_id ?? null,
+    detectionCategoryId: row.detection_category_id ?? null,
+  };
+}
+
+const listGlobal = async (filters = {}) => {
+  const { search, page = 1, limit = 50 } = filters;
+  const { rows, total } = await skuRepo.listGlobal({
+    search,
+    page: Number(page),
+    limit: Number(limit),
+  });
+  return { skus: rows.map(toSkuDTO), total, page: Number(page), limit: Number(limit) };
+};
+
+module.exports = { processSkuExcel, listGlobal };

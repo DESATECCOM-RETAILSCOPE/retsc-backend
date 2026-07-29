@@ -1,5 +1,7 @@
 const express = require('express');
 const cors = require('cors');
+const swaggerUi = require('swagger-ui-express');
+const swaggerSpec = require('./config/swagger');
 const authRoutes               = require('./routes/authRoutes');
 const enterpriseRoutes         = require('./routes/enterpriseRoutes');
 const userRoutes               = require('./routes/userRoutes');
@@ -10,6 +12,10 @@ const roleRoutes               = require('./routes/roleRoutes');
 const skuImageRoutes                    = require('./routes/skuImageRoutes');
 const skuRoutes                         = require('./routes/skuRoutes');
 const enterpriseCommercialCategoryRoutes = require('./routes/enterpriseCommercialCategoryRoutes');
+const annotationRoutes                  = require('./routes/annotationRoutes');
+const modelRoutes                       = require('./routes/modelRoutes');
+const shelfPhotoRoutes                  = require('./routes/shelfPhotoRoutes');
+const trainingRoutes                    = require('./routes/trainingRoutes');
 const authMiddleware                    = require('./middlewares/authMiddleware');
 const jobRepo                  = require('./repositories/jobRepo');
 
@@ -35,11 +41,25 @@ app.use('/api/roles',                     authMiddleware, roleRoutes);
 app.use('/api/sku-images',                         skuImageRoutes);
 app.use('/api/skus',                               skuRoutes);
 app.use('/api/enterprises/me/enterprise-categories', authMiddleware, enterpriseCommercialCategoryRoutes);
+app.use('/api/annotations',                authMiddleware, annotationRoutes);
+app.use('/api/models',                     authMiddleware, modelRoutes);
+app.use('/api/shelf-photos',               authMiddleware, shelfPhotoRoutes);
+app.use('/api/training',                   authMiddleware, trainingRoutes);
 
 // Recovery al startup: jobs que quedaron RUNNING de una ejecución anterior → FAILED
 jobRepo.failStaleRunning('Servidor reiniciado durante el procesamiento')
   .then(n => { if (n > 0) console.warn(`[startup] ${n} job(s) RUNNING marcados como FAILED`); })
   .catch(err => console.error('[startup] error en recovery de jobs:', err.message));
+
+// Documentación interactiva (Swagger UI) — GATE DE PRODUCCIÓN OBLIGATORIO: este backend
+// corre contra recursos -prod, y una UI que lista + ejecuta la API entera es superficie de
+// ataque. Se monta SOLO si NODE_ENV !== 'production' (mismo criterio que ya usa server.js
+// para el log de ambiente al bootear) — en producción /api/docs no responde en absoluto,
+// no queda ni siquiera detrás de un login. Si en el futuro se necesita disponible en prod,
+// cambiar a gate de rol admin en vez de sacar este check.
+if (process.env.NODE_ENV !== 'production') {
+  app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+}
 
 // Health check
 app.get('/health', (req, res) => {

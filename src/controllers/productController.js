@@ -188,4 +188,26 @@ const listProducts = async (req, res) => {
   } catch (err) { return handleError(res, err); }
 };
 
-module.exports = { uploadExcel, uploadImages, processJob, getStatus, listProducts };
+// ── Menú por rol 2026-07-25 — GET /api/products/global ───────────────────────
+// Catálogo global derivado de RETSC_OP_SKUS (RETSC_OP_PRODUCTS ya no existe —
+// commit b775f86). Exclusivo ADMIN_DTC (gate en productRoutes.js). Distinto de
+// GET /api/skus/global: acá se agrupa por producto, no una fila por EAN.
+const listGlobalProducts = async (req, res) => {
+  try {
+    const { search, page, limit } = req.query;
+    const result = await productService.listGlobal({ search, page, limit });
+    return res.json({ success: true, ...result });
+  } catch (err) { return handleError(res, err); }
+};
+
+// ── B5 QA — GET /api/products/categories ─────────────────────────────────────
+// Solo categorías que tienen SKUs cargados por la empresa actual, para que el
+// dropdown de filtro del frontend no muestre categorías vacías.
+const listProductCategories = async (req, res) => {
+  try {
+    const categories = await productService.listCategoriesWithProducts(req.user.enterpriseId);
+    return res.json({ success: true, categories });
+  } catch (err) { return handleError(res, err); }
+};
+
+module.exports = { uploadExcel, uploadImages, processJob, getStatus, listProducts, listProductCategories, listGlobalProducts };

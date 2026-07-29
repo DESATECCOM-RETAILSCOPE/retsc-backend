@@ -10,11 +10,13 @@ const findById = async (id) => {
   return r.recordset[0] ?? null;
 };
 
+// UPPER() explícito en ambos lados — la collation de esta BD es case-insensitive
+// hoy (verificado), pero no queremos que la búsqueda de rol dependa de eso.
 const findByName = async (name) => {
   const pool = await getPool();
   const r = await pool.request()
     .input('name', sql.VarChar(80), name)
-    .query(`SELECT * FROM ${TABLE} WHERE Role_name = @name`);
+    .query(`SELECT * FROM ${TABLE} WHERE UPPER(Role_name) = UPPER(@name)`);
   return r.recordset[0] ?? null;
 };
 

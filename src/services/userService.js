@@ -2,12 +2,55 @@ const bcrypt = require('bcryptjs');
 const userRepo           = require('../repositories/userRepo');
 const userEnterpriseRepo = require('../repositories/userEnterpriseRepo');
 const roleRepo           = require('../repositories/roleRepo');
-const { isValidEmail }   = require('../utils/validators');
+const { isValidEmail, normalizeCedula, isValidCedulaFisica } = require('../utils/validators');
+const { sendMail }       = require('../utils/mailer');
+const { ROLES, normalizeRole } = require('../config/roles');
 
-function svcError(msg, statusCode) {
+function svcError(msg, statusCode, payload) {
   const err = new Error(msg);
   err.statusCode = statusCode;
+  if (payload !== undefined) err.payload = payload;
   return err;
+}
+
+// Defensa en profundidad (auditoría 2026-07-25): requireAdmin deja pasar tanto a
+// ADMIN (administrador de SU empresa) como a ADMIN_DTC (superusuario de toda la
+// plataforma) por igual. Sin este guard, un ADMIN podía crear un usuario — o
+// reasignar una relación existente — con Role_id de ADMIN_DTC y volverse
+// superusuario por interpósita persona. Solo permite asignar ADMIN_DTC si quien
+// hace la petición YA es ADMIN_DTC.
+// Si un callsite futuro se olvida de pasar actorRoleName, normalizeRole(undefined)
+// da '' y la comparación con ROLES.ADMIN_DTC falla — el guard falla CERRADO
+// (asume que el actor no es ADMIN_DTC), no abierto. Intencional.
+function assertCanAssignRole(role, actorRoleName) {
+  if (normalizeRole(role?.Role_name) !== ROLES.ADMIN_DTC) return;
+  if (normalizeRole(actorRoleName) === ROLES.ADMIN_DTC) return;
+  throw svcError('Solo un ADMIN_DTC puede asignar el rol ADMIN_DTC.', 403);
+}
+
+// Issue B6 (feedback dueña). CONFIRMAR: el prompt asumía que ya existe un
+// flujo de cambio de contraseña con token de reset (rama feat--cambiar-contrasena,
+// mergeada en 29f1f89) para armar un enlace directo. Verificado con grep sobre
+// src/ completo: no hay ningún endpoint change-password ni token de reset en
+// el código actual — coincide con el TODO #1 de CLAUDE.md ("NOT IMPLEMENTED").
+// El diff de ese commit tocó authController/authService/mailer.js pero ese
+// código no está en el árbol actual (revertido o pisado en un merge posterior).
+// Sin token que enlazar, el correo solo manda la URL de login — el usuario
+// entra con la contraseña que le indicó su administrador (la que se tipeó en
+// el formulario de alta) y, si necesita cambiarla, usa "¿Olvidaste tu
+// contraseña?" (POST /api/auth/forgot-password, ya existe). Avisar a la
+// dueña de este gap antes de considerar B6 completo end-to-end.
+async function sendWelcomeEmail({ email, userName }) {
+  const url = process.env.FRONTEND_URL || 'http://localhost:5173';
+  await sendMail({
+    to: email,
+    subject: 'Bienvenido a RetailScope',
+    text: `Hola ${userName},\n\nSe creó tu cuenta en RetailScope. Ingresá en ${url} con la contraseña que te indicó tu administrador.\n\nSi no la tenés o querés cambiarla, usá la opción "¿Olvidaste tu contraseña?" en la pantalla de inicio de sesión.\n\nEquipo RetailScope`,
+    html: `<p>Hola <strong>${userName}</strong>,</p>
+           <p>Se creó tu cuenta en RetailScope. Ingresá en <a href="${url}">${url}</a> con la contraseña que te indicó tu administrador.</p>
+           <p>Si no la tenés o querés cambiarla, usá la opción "¿Olvidaste tu contraseña?" en la pantalla de inicio de sesión.</p>
+           <p>Equipo RetailScope</p>`,
+  });
 }
 
 // ── 1.1 ──────────────────────────────────────────────────────────────────────
@@ -35,23 +78,39 @@ const listByEnterprise = async (enterpriseId) => {
   return enriched;
 };
 
-// ── 1.2 ──────────────────────────────────────────────────────────────────────
-const findByCedula = async (ced) => {
-  const user = await userRepo.findByCedula(ced);
-  if (!user) return { exists: false };
-  return {
-    exists: true,
-    user: {
-      userId:      user.User_id,
-      userName:    user.User_name,
-      email:       user.Email,
-      cedIdentidad: user.ced_identidad,
-    },
-  };
+// Listado global cross-empresa (menú por rol 2026-07-25, ítem "Usuarios globales" de
+// ADMIN_DTC — GET /api/users/global). Nunca selecciona PasswordHash (ver
+// userEnterpriseRepo.findAllGlobal) — no hace falta excluirlo acá, ni siquiera se trae
+// de la BD. Mismo shape que listByEnterprise + enterpriseDsc, para que el frontend
+// muestre a qué empresa pertenece cada usuario.
+const listAllGlobal = async () => {
+  const rows = await userEnterpriseRepo.findAllGlobal();
+
+  return rows.map((r) => ({
+    userId:            r.User_id,
+    userName:          r.User_name ?? null,
+    email:             r.Email ?? null,
+    cedIdentidad:      r.ced_identidad ?? null,
+    roleId:            r.Role_id ?? null,
+    roleName:          r.Role_name ?? null,
+    enterpriseId:      r.Enterprise_id,
+    enterpriseDsc:     r.Enterprise_dsc ?? null,
+    status:            (r.Status === 1 || r.Status === true) ? 1 : 0,
+    fechaActivacion:   r.Fecha_activacion,
+    fechaInactivacion: r.Fecha_inactivacion,
+  }));
 };
 
 // ── 1.3 ──────────────────────────────────────────────────────────────────────
-const createAndAssign = async (payload, enterpriseId) => {
+// Decisión de negocio (feedback dueña, 1 Jul): una cédula duplicada con
+// relación activa en OTRA empresa no debe revelar nada del usuario ni ofrecer
+// asignación directa — es fuga de datos entre empresas. El traslado lo
+// gestiona el call center de DTC inactivando la relación vieja; recién
+// entonces esta empresa puede proceder. Si la cédula existe pero ya NO tiene
+// relaciones activas (el call center ya la liberó), se reactiva el usuario
+// con los datos del formulario y se lo vincula a esta empresa — mismo patrón
+// que enterpriseService.createEnterprise() usa para su admin.
+const createAndAssign = async (payload, enterpriseId, actorRoleName) => {
   const { cedIdentidad, userName, email, telephone, password, roleId } = payload;
 
   const required = { cedIdentidad, userName, email, password, roleId };
@@ -60,31 +119,67 @@ const createAndAssign = async (payload, enterpriseId) => {
 
   if (password.length < 8) throw svcError('La contraseña debe tener al menos 8 caracteres', 400);
   if (!isValidEmail(email)) throw svcError('Formato de email inválido', 400);
-
-  if (await userRepo.findByCedula(cedIdentidad)) {
-    throw svcError('La cédula ya existe. Use POST /api/users/assign para asignar el usuario existente.', 409);
+  if (!isValidCedulaFisica(cedIdentidad)) {
+    throw svcError('La cédula física debe tener 9 dígitos (formato Costa Rica).', 400);
   }
 
-  if (await userRepo.findByEmail(email.trim().toLowerCase())) {
+  // Normalizada a solo dígitos — así el chequeo de duplicados no falla porque
+  // una vez se tipeó con guiones y otra sin ellos.
+  const normalizedCedula = normalizeCedula(cedIdentidad);
+  const existingByCedula = await userRepo.findByCedula(normalizedCedula);
+
+  let reactivating = false;
+  if (existingByCedula) {
+    const activeRelations = await userEnterpriseRepo.findActiveByUserId(existingByCedula.User_id);
+    if (activeRelations.length > 0) {
+      // Mismo mensaje exista o no relación activa "visible" para quien pregunta
+      // — no hay rama que distinga el caso, así que no hay enumeración posible.
+      throw svcError(
+        'La cédula ya está registrada en el sistema. Comuníquese con el call center de DTC para gestionar el traslado.',
+        409,
+        { code: 'CEDULA_EXISTS' },
+      );
+    }
+    reactivating = true;
+  }
+
+  const normalizedEmail = email.trim().toLowerCase();
+  const existingByEmail = await userRepo.findByEmail(normalizedEmail);
+  if (existingByEmail && (!existingByCedula || existingByEmail.User_id !== existingByCedula.User_id)) {
     throw svcError('El email ya está registrado en el sistema.', 409);
   }
 
   const role = await roleRepo.findById(Number(roleId));
   if (!role) throw svcError(`El rol con id ${roleId} no existe.`, 400);
+  assertCanAssignRole(role, actorRoleName);
 
   const passwordHash = await bcrypt.hash(password, 10);
-  const inserted = await userRepo.insert({
-    User_name:     userName.trim(),
-    Email:         email.trim().toLowerCase(),
-    PasswordHash:  passwordHash,
-    ced_identidad: cedIdentidad.trim(),
-    Status:        1,
-    Created_date:  new Date().toISOString(),
-  });
+
+  let user;
+  let insertedUserId = null;
+  if (reactivating) {
+    const updated = await userRepo.update(existingByCedula.User_id, {
+      User_name:    userName.trim(),
+      Email:        normalizedEmail,
+      PasswordHash: passwordHash,
+      Status:       1,
+    });
+    user = updated || existingByCedula;
+  } else {
+    user = await userRepo.insert({
+      User_name:     userName.trim(),
+      Email:         normalizedEmail,
+      PasswordHash:  passwordHash,
+      ced_identidad: normalizedCedula,
+      Status:        1,
+      Created_date:  new Date().toISOString(),
+    });
+    insertedUserId = user.User_id;
+  }
 
   try {
     await userEnterpriseRepo.insert({
-      User_id:            inserted.User_id,
+      User_id:            user.User_id,
       Enterprise_id:      enterpriseId,
       Role_id:            role.Role_id,
       Status:             1,
@@ -92,47 +187,32 @@ const createAndAssign = async (payload, enterpriseId) => {
       Fecha_inactivacion: null,
     });
   } catch (err) {
-    await userRepo.remove(inserted.User_id).catch(() => {});
+    // Solo se revierte el usuario si lo creamos nosotros en este mismo request
+    // — un usuario reactivado ya existía antes, no es nuestro para borrar.
+    if (insertedUserId) await userRepo.remove(insertedUserId).catch(() => {});
     throw err;
   }
 
-  return { userId: inserted.User_id, enterpriseId, roleId: role.Role_id };
-};
-
-// ── 1.4 ──────────────────────────────────────────────────────────────────────
-const assignToEnterprise = async (userId, roleId, enterpriseId) => {
-  if (!userId || !roleId) throw svcError('userId y roleId son requeridos', 400);
-
-  if (!await userRepo.findById(userId)) throw svcError('Usuario no encontrado', 404);
-
-  const role = await roleRepo.findById(Number(roleId));
-  if (!role) throw svcError(`El rol con id ${roleId} no existe.`, 400);
-
-  const existing = await userEnterpriseRepo.findByUserAndEnterprise(userId, enterpriseId);
-
-  if (existing) {
-    if (existing.Status === 1 || existing.Status === true) {
-      throw svcError('El usuario ya está asignado a esta empresa.', 409);
-    }
-    // Relación inactiva — reactivar
-    await userEnterpriseRepo.update(userId, enterpriseId, {
-      Role_id:            role.Role_id,
-      Status:             1,
-      Fecha_activacion:   new Date().toISOString(),
-      Fecha_inactivacion: null,
-    });
-    return { userId, enterpriseId, roleId: role.Role_id, action: 'reactivated' };
+  // El envío de correo NUNCA debe revertir la creación — ya quedó persistida
+  // en SQL antes de llegar acá. Un fallo de SMTP solo se loguea y se refleja
+  // en emailSent para que el controller ajuste el mensaje de éxito.
+  let emailSent = true;
+  try {
+    await sendWelcomeEmail({ email: normalizedEmail, userName: userName.trim() });
+  } catch (err) {
+    console.error(`[userService] no se pudo enviar el correo de bienvenida a ${normalizedEmail}:`, err.message);
+    emailSent = false;
   }
 
-  await userEnterpriseRepo.insert({
-    User_id:            userId,
-    Enterprise_id:      enterpriseId,
-    Role_id:            role.Role_id,
-    Status:             1,
-    Fecha_activacion:   new Date().toISOString(),
-    Fecha_inactivacion: null,
-  });
-  return { userId, enterpriseId, roleId: role.Role_id, action: 'created' };
+  return {
+    userId: user.User_id,
+    enterpriseId,
+    roleId: role.Role_id,
+    reactivated: reactivating,
+    email: normalizedEmail,
+    userName: userName.trim(),
+    emailSent,
+  };
 };
 
 // ── 1.5 ──────────────────────────────────────────────────────────────────────
@@ -168,7 +248,7 @@ const updateUser = async (userId, payload, enterpriseId) => {
 };
 
 // ── 1.6 ──────────────────────────────────────────────────────────────────────
-const updateUserEnterprise = async (userId, enterpriseId, payload) => {
+const updateUserEnterprise = async (userId, enterpriseId, payload, actorRoleName) => {
   const relation = await userEnterpriseRepo.findByUserAndEnterprise(userId, enterpriseId);
   if (!relation) throw svcError('Relación usuario-empresa no encontrada', 404);
 
@@ -178,6 +258,7 @@ const updateUserEnterprise = async (userId, enterpriseId, payload) => {
   if (roleId != null) {
     const role = await roleRepo.findById(Number(roleId));
     if (!role) throw svcError(`El rol con id ${roleId} no existe.`, 400);
+    assertCanAssignRole(role, actorRoleName);
     partial.Role_id = role.Role_id;
   }
   if (status != null)            partial.Status             = status;
@@ -189,9 +270,8 @@ const updateUserEnterprise = async (userId, enterpriseId, payload) => {
 
 module.exports = {
   listByEnterprise,
-  findByCedula,
+  listAllGlobal,
   createAndAssign,
-  assignToEnterprise,
   updateUser,
   updateUserEnterprise,
 };

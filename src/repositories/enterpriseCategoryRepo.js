@@ -60,15 +60,38 @@ const deactivateByEnterprise = async (enterpriseId) => {
     `);
 };
 
-// Solo inserta los registros nuevos — NO inactiva nada de lo existente
-const addForEnterprise = async (enterpriseId, records) => {
+// Reemplazo atómico de la selección: inactiva las selecciones que el cliente ya no envía
+// e inserta las nuevas, dentro de la misma transacción (evita dejar la selección a medias
+// si falla a mitad de camino). Las que siguen presentes en ambos lados no se tocan.
+const syncForEnterprise = async (
+  enterpriseId,
+  { toRemoveSelectedIds = [], toAddRecords = [] },
+) => {
   const pool = await getPool();
   const transaction = pool.transaction();
   await transaction.begin();
   try {
+    if (toRemoveSelectedIds.length > 0) {
+      const removeRequest = transaction
+        .request()
+        .input("enterpriseId", sql.Int, enterpriseId);
+      const placeholders = toRemoveSelectedIds.map((id, i) => {
+        const paramName = `removeId${i}`;
+        removeRequest.input(paramName, sql.Int, id);
+        return `@${paramName}`;
+      });
+      await removeRequest.query(`
+        UPDATE ${TABLE}
+        SET status = 'INACTIVE'
+        WHERE enterprise_id       = @enterpriseId
+          AND status              = 'ACTIVE'
+          AND selected_category_id IN (${placeholders.join(", ")})
+      `);
+    }
+
     const inserted = [];
     const now = new Date();
-    for (const rec of records) {
+    for (const rec of toAddRecords) {
       const r = await transaction
         .request()
         .input("enterpriseId", sql.Int, enterpriseId)
@@ -95,22 +118,58 @@ const addForEnterprise = async (enterpriseId, records) => {
 };
 
 // GET /api/enterprises/me/enterprise-categories
-// enterprise_category_dsc no existe como columna; se obtiene de la categoría DTC seleccionada
+// Solo categorías smart (is_smart_dtc=1), deduplicadas por la categoría inteligente resuelta.
+// Si el enterprise seleccionó una categoría padre que tiene varias hijas smart (EXPAND),
+// cada hija smart aparece una sola vez con el MIN(enterprise_category_id) como representante.
+// NOTA: antes retornaba todas las filas incluyendo no-smart y duplicados; la corrección
+// es intencional (Issue correcciones backend).
 const listCommercialCategories = async (enterpriseId) => {
   const pool = await getPool();
   const r = await pool.request().input("enterpriseId", sql.Int, enterpriseId)
     .query(`
       SELECT
-        ec.enterprise_category_id,
-        ec.enterprise_id,
-        ec.selected_category_id,
-        ec.resolved_category_id,
-        c.Category_dsc  AS enterprise_category_dsc
+        MIN(ec.enterprise_category_id)                           AS enterprise_category_id,
+        @enterpriseId                                            AS enterprise_id,
+        MIN(ec.selected_category_id)                            AS selected_category_id,
+        ISNULL(ec.resolved_category_id, ec.selected_category_id) AS resolved_category_id,
+        rc.Category_dsc                                          AS enterprise_category_dsc
       FROM RETSC_OP_ENTERPRISE_CATEGORIES ec
-      JOIN RETSC_OP_CATEGORIES c ON c.Category_id = ec.selected_category_id
+      JOIN RETSC_OP_CATEGORIES rc
+        ON rc.Category_id = ISNULL(ec.resolved_category_id, ec.selected_category_id)
       WHERE ec.enterprise_id = @enterpriseId
-        AND ec.status = 'ACTIVE'
-      ORDER BY c.Category_dsc ASC
+        AND ec.status        = 'ACTIVE'
+        AND rc.is_smart_dtc  = 1
+      GROUP BY ISNULL(ec.resolved_category_id, ec.selected_category_id), rc.Category_dsc
+      ORDER BY rc.Category_dsc ASC
+    `);
+  return r.recordset;
+};
+
+// Categorías smart del enterprise para los formularios de Fotos de Góndola y Carga SKU.
+// Devuelve las smart categories resueltas únicas con datos de la categoría y su padre.
+// Usado por GET /api/enterprises/me/smart-categories.
+const listSmartForEnterprise = async (enterpriseId) => {
+  const pool = await getPool();
+  const r = await pool.request().input("enterpriseId", sql.Int, enterpriseId)
+    .query(`
+      SELECT
+        MIN(ec.enterprise_category_id)                           AS enterprise_category_id,
+        ISNULL(ec.resolved_category_id, ec.selected_category_id) AS category_id,
+        rc.Category_dsc                                          AS category_dsc,
+        rc.parent_category_id,
+        rc.level_no,
+        pc.Category_dsc                                          AS parent_dsc
+      FROM RETSC_OP_ENTERPRISE_CATEGORIES ec
+      JOIN RETSC_OP_CATEGORIES rc
+        ON rc.Category_id = ISNULL(ec.resolved_category_id, ec.selected_category_id)
+      LEFT JOIN RETSC_OP_CATEGORIES pc
+        ON pc.Category_id = rc.parent_category_id
+      WHERE ec.enterprise_id = @enterpriseId
+        AND ec.status        = 'ACTIVE'
+        AND rc.is_smart_dtc  = 1
+      GROUP BY ISNULL(ec.resolved_category_id, ec.selected_category_id),
+               rc.Category_dsc, rc.parent_category_id, rc.level_no, pc.Category_dsc
+      ORDER BY rc.Category_dsc ASC
     `);
   return r.recordset;
 };
@@ -138,7 +197,8 @@ module.exports = {
   findByEnterpriseAndCategory,
   insertOne,
   deactivateByEnterprise,
-  addForEnterprise,
+  syncForEnterprise,
   listCommercialCategories,
+  listSmartForEnterprise,
   findEnterpriseCategoryById,
 };

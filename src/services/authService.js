@@ -18,7 +18,9 @@ function serviceError(msg, statusCode) {
 
 function signAccessToken(payload) {
   return jwt.sign(payload, process.env.JWT_SECRET, {
-    expiresIn: process.env.JWT_EXPIRES_IN || '1h',
+    // Default 30m (Issue B6/QA) — antes 1h. authMiddleware ya responde 401
+    // { code: 'TOKEN_EXPIRED' } al vencer, y el frontend redirige a login con eso.
+    expiresIn: process.env.JWT_EXPIRES_IN || '30m',
   });
 }
 

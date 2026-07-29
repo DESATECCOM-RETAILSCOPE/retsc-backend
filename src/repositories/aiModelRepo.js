@@ -7,7 +7,11 @@
 //   model_name                VARCHAR(100)  NULL
 //   customvision_project_id   VARCHAR(100)  NULL  (hasta que Custom Vision esté configurado)
 //   prediction_resource_id    VARCHAR(100)  NULL
-//   status                    VARCHAR(20)   NULL  — 'PENDING' | 'TRAINING' | 'READY' | 'ERROR'
+//   status                    VARCHAR(20)   NULL  — ciclo real (más largo que el original):
+//     PENDING → PROJECT_CREATED (8.1) → IMAGES_UPLOADED (8.2) → TRAINING → TRAINED | TRAINING_FAILED (8.3)
+//     → READY (activo/publicado, 8.4) — más AWAITING_APPROVAL | REJECTED (8.5, re-entrenamiento) y ERROR
+//     (fallo de provisioning inicial, no de training). TRAINED != READY: un modelo puede terminar de
+//     entrenar sin estar publicado/activo todavía.
 //   trained_at                DATETIME      NULL
 //   created_at                DATETIME      NULL
 //   model_version             INT           NULL
@@ -138,6 +142,97 @@ const updateStatus = async (detectionModelId, status) => {
   return r.recordset[0] ?? null;
 };
 
+// ─── Versioning y re-entrenamiento (Issue 8.5) ────────────────────────────────
+
+// Devuelve un modelo por su PK.
+const findById = async (detectionModelId) => {
+  const pool = await getPool();
+  const r = await pool.request()
+    .input('id', sql.Int, detectionModelId)
+    .query(`SELECT * FROM ${TABLE} WHERE detection_model_id = @id`);
+  return r.recordset[0] ?? null;
+};
+
+// Todas las versiones de una categoría, de la más nueva a la más vieja.
+const listByCategory = async (categoryId) => {
+  const pool = await getPool();
+  const r = await pool.request()
+    .input('categoryId', sql.Int, categoryId)
+    .query(`
+      SELECT * FROM ${TABLE}
+      WHERE category_id = @categoryId
+      ORDER BY model_version DESC
+    `);
+  return r.recordset;
+};
+
+// Mayor model_version registrada para una categoría (0 si no hay ninguna).
+const getMaxVersion = async (categoryId) => {
+  const pool = await getPool();
+  const r = await pool.request()
+    .input('categoryId', sql.Int, categoryId)
+    .query(`SELECT ISNULL(MAX(model_version), 0) AS maxVersion FROM ${TABLE} WHERE category_id = @categoryId`);
+  return r.recordset[0].maxVersion;
+};
+
+// Guarda las métricas de entrenamiento de una versión y marca trained_at.
+// (migración 006: precision_score, recall_score, mean_ap, metrics_json)
+const saveMetrics = async (detectionModelId, { precisionScore, recallScore, meanAp, metricsJson }) => {
+  const pool = await getPool();
+  const r = await pool.request()
+    .input('id',        sql.Int,               detectionModelId)
+    .input('precision', sql.Float,             precisionScore ?? null)
+    .input('recall',    sql.Float,             recallScore ?? null)
+    .input('meanAp',    sql.Float,             meanAp ?? null)
+    .input('json',      sql.NVarChar(sql.MAX), metricsJson ?? null)
+    .query(`
+      UPDATE ${TABLE}
+      SET precision_score = @precision,
+          recall_score    = @recall,
+          mean_ap         = @meanAp,
+          metrics_json    = @json,
+          trained_at      = GETDATE()
+      OUTPUT INSERTED.*
+      WHERE detection_model_id = @id
+    `);
+  return r.recordset[0] ?? null;
+};
+
+// Activa una versión y desactiva las demás de la misma categoría (rollback/activación).
+// NOTA: son dos UPDATEs secuenciales; para esta escala es suficiente. Si se requiriera
+// atomicidad estricta ante concurrencia, envolver en una transacción mssql.
+const setActiveVersion = async (categoryId, detectionModelId) => {
+  const pool = await getPool();
+  await pool.request()
+    .input('categoryId', sql.Int, categoryId)
+    .query(`UPDATE ${TABLE} SET is_active = 0 WHERE category_id = @categoryId`);
+
+  const r = await pool.request()
+    .input('id', sql.Int, detectionModelId)
+    .query(`
+      UPDATE ${TABLE}
+      SET is_active = 1, status = 'READY'
+      OUTPUT INSERTED.*
+      WHERE detection_model_id = @id
+    `);
+  return r.recordset[0] ?? null;
+};
+
+// Registra quién y cuándo aprobó manualmente una versión (métricas peores).
+const setApproval = async (detectionModelId, adminId) => {
+  const pool = await getPool();
+  const r = await pool.request()
+    .input('id',    sql.Int, detectionModelId)
+    .input('admin', sql.Int, adminId ?? null)
+    .query(`
+      UPDATE ${TABLE}
+      SET approved_by = @admin, approved_at = GETDATE()
+      OUTPUT INSERTED.*
+      WHERE detection_model_id = @id
+    `);
+  return r.recordset[0] ?? null;
+};
+
 module.exports = {
   findByCategoryId,
   listAll,
@@ -145,4 +240,11 @@ module.exports = {
   insert,
   updateCustomVisionRefs,
   updateStatus,
+  // Issue 8.5
+  findById,
+  listByCategory,
+  getMaxVersion,
+  saveMetrics,
+  setActiveVersion,
+  setApproval,
 };

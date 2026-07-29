@@ -153,7 +153,7 @@ El `accessToken` expira en 1h. El campo `user.enterpriseDsc` viene en el login p
 | C | matching | Cruza nombre de archivo (`<GTIN>_sufijo.jpg`) con GTINs del Excel |
 | D | hierarchy | Calcula ruta de blob según volumen por categoría vs. umbral |
 | E | uploading | Sube imágenes en lotes de 10 con retry exponencial; falla si >50% fallan |
-| F | persisting | Upsert en `RETSC_OP_PRODUCTS` + insert en `RETSC_LOG_IMAGE_UPLOAD` |
+| F | persisting | Insert en `RETSC_LOG_IMAGE_UPLOAD` (pipeline legacy, no funcional — ver CLAUDE.md) |
 | G | ai_tracking | Registra necesidad de entrenamiento en `RETSC_AI_DETECTION_MODELS` |
 
 ---

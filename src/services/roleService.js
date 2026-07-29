@@ -16,9 +16,12 @@ function toDTO(row) {
   };
 }
 
-const listAll = async () => {
+// GET /api/roles — contrato: { success, roles: [{ roleId, roleName, description, status }] }
+// activeOnly=true filtra Status=1 (usado por el frontend en el dropdown de rol del alta de usuario).
+const listAll = async (activeOnly = false) => {
   const rows = await roleRepo.listAll();
-  return rows.map(toDTO);
+  const dtos = rows.map(toDTO);
+  return activeOnly ? dtos.filter((r) => r.status === 1) : dtos;
 };
 
 const getById = async (id) => {
