@@ -47,6 +47,24 @@ const findById = async (photoId) => {
   return r.recordset[0] ?? null;
 };
 
+// Dedup POR CANAL (Issue B4) — ¿ya existe una foto de entrenamiento con este hash PARA
+// ESTE canal específico? Esta tabla no tiene columna image_hash propia; el hash sigue
+// viajando embebido en photo_notes (mismo TEMPORAL de siempre, "sha256:<hash>"). El hash
+// SHA-256 es siempre hex ([0-9a-f]{64}) — sin caracteres comodín de LIKE — así que
+// embeberlo en el patrón vía parámetro es seguro (mismo criterio que el resto del repo:
+// nunca se concatena input de usuario en el SQL, solo se arma el patrón del LIKE).
+const findByHashAndCanal = async (hash, canal) => {
+  const pool = await getPool();
+  const r = await pool.request()
+    .input('canal',   sql.VarChar(20),  canal)
+    .input('pattern', sql.VarChar(100), `%sha256:${hash}%`)
+    .query(`
+      SELECT TOP 1 * FROM ${TABLE}
+      WHERE canal = @canal AND photo_notes LIKE @pattern
+    `);
+  return r.recordset[0] ?? null;
+};
+
 // Inserta la foto recién subida. Estado inicial 'EN_PROGRESO' (sin cajitas todavía —
 // Issue #42, equipo de anotación, todavía no vive en este repo).
 const insert = async ({
@@ -215,6 +233,7 @@ const updateCvSync = async (photoId, { syncStatus, syncError = null } = {}) => {
 
 module.exports = {
   findById,
+  findByHashAndCanal,
   insert,
   listPhotos,
   getPhotoWithRegions,

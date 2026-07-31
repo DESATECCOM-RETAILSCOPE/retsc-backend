@@ -144,51 +144,85 @@ async function uploadShelfPhoto({ buffer, dtcCategoryId, canal, uploadedBy }) {
     );
   }
 
-  // ── Etapa 4: Deduplicación por hash SHA-256 ──────────────────────────────────
+  // ── Etapa 4: Deduplicación por hash SHA-256, CONSCIENTE DE CANAL (fix Issue B4) ──
   // NOTA: el issue dice "MD5" como referencia informal, pero el repo y la columna
   // image_hash VarChar(64) usan SHA-256. Se reutiliza SHA-256 por consistencia.
-
+  //
+  // FIX 2026-07-26: antes se rechazaba CUALQUIER imagen con un hash ya visto, sin
+  // importar el canal — así que la misma foto subida para OMT y después para DTT se
+  // rechazaba como duplicada en el segundo canal, y ese canal nunca se guardaba. La
+  // regla correcta es "una vez por canal", no "una vez globalmente".
+  //
+  // RETSC_EX_SHELFPHOTO no tiene columna `canal` (el dedup original era global a
+  // propósito, antes de que existiera el concepto de canal en este flujo) y
+  // RETSC_AI_TRAINING_PHOTOS no tiene columna `image_hash` propia (el hash sigue
+  // viajando en photo_notes, mismo TEMPORAL de siempre) — ninguna de las dos tablas
+  // tiene por sí sola (hash, canal) juntos. Se resuelve cruzando ambas sin migrar nada:
+  //   1. ¿Existe ALGUNA fila en RETSC_EX_SHELFPHOTO con este hash? (bytes ya vistos)
+  //   2. Si existe, ¿ya hay una fila en RETSC_AI_TRAINING_PHOTOS con este hash PARA
+  //      ESTE canal? → 409 duplicado real (mismo canal, misma imagen).
+  //   3. Si existe el hash pero NO para este canal → NO se re-sube el blob (ver nota
+  //      abajo sobre el índice único) y se reutiliza la URL ya existente.
   const hash = quality.hash; // ya calculado por validateQualityMetrics
 
-  const existing = await shelfPhotoRepo.findByHashGlobal(hash);
-  if (existing) {
-    throw Object.assign(
-      new Error(`Imagen duplicada. Ya existe con Photo_id=${existing.Photo_id}.`),
-      { statusCode: 409, errorCode: 'ERR_DUPLICATE_IMAGE', existingPhotoId: existing.Photo_id }
-    );
+  const existingHash = await shelfPhotoRepo.findByHashGlobal(hash);
+
+  if (existingHash) {
+    const alreadyInThisChannel = await trainingPhotoRepo.findByHashAndCanal(hash, canal);
+    if (alreadyInThisChannel) {
+      throw Object.assign(
+        new Error(`Imagen duplicada para el canal ${canal}. Ya existe con photo_id=${alreadyInThisChannel.photo_id}.`),
+        { statusCode: 409, errorCode: 'ERR_DUPLICATE_IMAGE', existingPhotoId: alreadyInThisChannel.photo_id }
+      );
+    }
+    console.log(`[shelfPhoto] hash ya visto (Photo_id=${existingHash.Photo_id}) pero no para canal=${canal} — se reutiliza el blob existente, no se re-sube`);
   }
 
   // ── Etapa 5: Upload a Blob Storage + insert en RETSC_EX_SHELFPHOTO ──────────
+  // (o reutilización si el hash ya existía para OTRO canal — ver Etapa 4)
 
-  const categoriaSlug = normalizeName(category.Category_dsc);
-  const filename      = generateFilename({ categoriaSlug, canal });
-  const blobPath      = `dtc-${categoriaSlug}/${canal.toLowerCase()}/${filename}`;
+  let blobUrl, blobPath;
 
-  const { url: blobUrl } = await uploadToContainer({
-    containerName: SHELF_CONTAINER(),
-    blobPath,
-    buffer,
-    contentType: 'image/jpeg',
-  });
+  if (existingHash) {
+    // VERIFICADO EMPÍRICAMENTE (2026-07-26) contra la BD real: el índice único filtrado
+    // UX_RETSC_EX_SHELFPHOTO_enterprise_hash es (ENTERPRISE_ID, image_hash) — SQL Server
+    // trata dos NULLs como iguales dentro de un índice único, así que un segundo INSERT
+    // con el mismo hash y ENTERPRISE_ID=NULL (todas las fotos de góndola son globales)
+    // viola la constraint y tira "Cannot insert duplicate key row". Por eso NO se
+    // vuelve a insertar en RETSC_EX_SHELFPHOTO acá — se reutilizan los bytes/URL que ya
+    // están subidos, y se extrae el blobPath relativo de la URL ya guardada (mismo
+    // patrón que usa skuImageController.validateImageQuality para lo mismo).
+    blobUrl  = existingHash.URL_blob;
+    blobPath = blobUrl.split(`/${SHELF_CONTAINER()}/`)[1] || blobUrl;
+  } else {
+    const categoriaSlug = normalizeName(category.Category_dsc);
+    const filename       = generateFilename({ categoriaSlug, canal });
+    blobPath = `dtc-${categoriaSlug}/${canal.toLowerCase()}/${filename}`;
 
-  console.log(`[shelfPhoto] blob subido — path=${blobPath}`);
+    const uploadResult = await uploadToContainer({
+      containerName: SHELF_CONTAINER(),
+      blobPath,
+      buffer,
+      contentType: 'image/jpeg',
+    });
+    blobUrl = uploadResult.url;
 
-  const photo = await shelfPhotoRepo.insert({
-    enterprise_id:      null,            // foto global, sin enterprise
-    category_id:        dtcId,
-    url_blob:           blobUrl,
-    photo_date:         new Date(),
-    image_hash:         hash,
-    quality_status:     'PASSED',
-    quality_error_code: null,
-    width:              quality.metrics.width,
-    height:             quality.metrics.height,
-    blur_score:         quality.metrics.sharpness,
-    brightness:         quality.metrics.brightness,
-  });
+    console.log(`[shelfPhoto] blob subido — path=${blobPath}`);
 
-  const photoId = photo.Photo_id;
-  console.log(`[shelfPhoto] foto registrada — Photo_id=${photoId}`);
+    await shelfPhotoRepo.insert({
+      enterprise_id:      null,            // foto global, sin enterprise
+      category_id:        dtcId,
+      url_blob:           blobUrl,
+      photo_date:         new Date(),
+      image_hash:         hash,
+      quality_status:     'PASSED',
+      quality_error_code: null,
+      width:              quality.metrics.width,
+      height:             quality.metrics.height,
+      blur_score:         quality.metrics.sharpness,
+      brightness:         quality.metrics.brightness,
+    });
+  }
 
   // ── Etapa 6: Registro en Custom Vision SIN regiones ──────────────────────────
   // projectId puede ser null si la categoría aún no tiene modelo en Custom Vision (PENDING).
