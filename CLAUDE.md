@@ -435,6 +435,8 @@ Forgot password flow: `POST /api/auth/forgot-password` accepts `{ identifier }` 
 
 This operation is **not** wrapped in a SQL transaction — it uses manual compensating rollbacks (delete enterprise then delete user) if a later step fails. This is unlike `enterpriseCategoryRepo.js`, which uses an explicit `pool.transaction()`. Be aware of this gap when modifying the registration flow.
 
+Every `409` thrown by `registerEnterprise()`/`createEnterprise()` (duplicate `fiscalId` → `ERR_DUP_FISCAL_ID`, `adminCedula` already active elsewhere → `ERR_CEDULA_ACTIVE_ELSEWHERE`, `adminEmail` belonging to a different user → `ERR_DUP_EMAIL`) carries `{ field, errorCode }` alongside the Spanish `message` (Issue B6, 2026-07-26) — `enterpriseService.js`'s `serviceError(msg, statusCode, { field, errorCode })` attaches them to the error object, `enterpriseController.js`'s `handleError()` spreads them into the JSON body, so the frontend can highlight the exact input without parsing the Spanish text. Scoped to `409`s only — `400` validation/format errors on this flow were left as message-only (matches the acceptance bar this was built against).
+
 ### Enterprise status
 
 `RETSC_OP_ENTERPRISE` has a `status` column (lowercase, BIT). Note: unlike other tables in the project that use `Status` (Pascal case), this column is lowercase — always reference it as `row.status` in the repository layer, not `row.Status`.

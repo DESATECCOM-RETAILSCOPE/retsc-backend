@@ -5,10 +5,19 @@ function isAdminDtc(req) {
   return normalizeRole(req.user?.roleName) === ROLES.ADMIN_DTC;
 }
 
+// field/errorCode (Issue B6): cuando el servicio los adjunta al error (duplicados 409 de
+// fiscalId/adminCedula/adminEmail en registerEnterprise/createEnterprise), viajan en el
+// body de la respuesta junto al message en español, para que el frontend pueda marcar el
+// input exacto sin tener que parsear el texto del mensaje.
 function handleError(res, err) {
   const status = err.statusCode || 500;
   if (status === 500) console.error('[enterprise]', err);
-  return res.status(status).json({ success: false, message: err.message });
+  return res.status(status).json({
+    success: false,
+    message: err.message,
+    ...(err.field     ? { field: err.field }         : {}),
+    ...(err.errorCode ? { errorCode: err.errorCode } : {}),
+  });
 }
 
 const registerEnterprise = async (req, res) => {
