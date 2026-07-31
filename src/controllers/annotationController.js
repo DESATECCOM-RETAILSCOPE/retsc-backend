@@ -6,6 +6,7 @@
 
 const annotationService     = require('../services/annotationService');
 const annotationRepo        = require('../repositories/annotationRepo');
+const trainingPhotoRepo     = require('../repositories/trainingPhotoRepo');
 const annotationSyncService = require('../services/annotationSyncService');
 
 // Duplicado deliberado de la misma lista en shelfPhotoUploadService.js /
@@ -89,7 +90,10 @@ const readiness = async (req, res) => {
 // GET /api/annotations/photos — review queue global (Issues 8.2 + menú por rol 2026-07-25).
 // listPhotos/getPhotoWithRegions/approvePhoto ya existían en annotationRepo.js sin ninguna
 // ruta que las llamara (código muerto documentado en CLAUDE.md como "pendiente de un
-// futuro endpoint de review queue") — este es ese endpoint.
+// futuro endpoint de review queue") — este es ese endpoint. FIX 2026-07-26: las tres se
+// movieron a trainingPhotoRepo.js porque el equipo DBA migró los campos a nivel de foto
+// (canal, categoría, estado de aprobación) a la tabla nueva RETSC_AI_TRAINING_PHOTOS — ver
+// el header de ese archivo. El contrato de esta ruta no cambió.
 // Query params opcionales: categoryId, canal, status. A diferencia de GET /photo/:photoId
 // (abierta a cualquier autenticado), esta va gateada por canValidate en las rutas —
 // alimenta las pantallas "Anotaciones" (ADMIN_DTC) y "Revisar cajitas" (ADMIN) del menú.
@@ -104,7 +108,7 @@ const listPhotos = async (req, res) => {
       });
     }
 
-    const photos = await annotationRepo.listPhotos({
+    const photos = await trainingPhotoRepo.listPhotos({
       categoryId: categoryId != null ? parseId(categoryId, 'categoryId') : undefined,
       canal,
       status,
@@ -119,7 +123,7 @@ const listPhotos = async (req, res) => {
 const getPhotoDetail = async (req, res) => {
   try {
     const photoId = parseId(req.params.photoId, 'Photo ID');
-    const photo = await annotationRepo.getPhotoWithRegions(photoId);
+    const photo = await trainingPhotoRepo.getPhotoWithRegions(photoId);
     if (!photo) {
       return res.status(404).json({ success: false, message: `Foto ${photoId} no encontrada.` });
     }
@@ -130,8 +134,17 @@ const getPhotoDetail = async (req, res) => {
 };
 
 // PATCH /api/annotations/photos/:photoId/approve — aprueba TODAS las cajitas de la foto
-// de una sola vez (approvePhoto) y dispara la sincronización con Custom Vision.
+// de una sola vez y dispara la sincronización con Custom Vision.
 // Body opcional: { clienteAjustoCajitas?: boolean }, default true.
+//
+// FIX 2026-07-26: antes un solo UPDATE en annotationRepo.approvePhoto() marcaba
+// is_validated=1 Y photo_approved=1 en la misma tabla. Con la migración de esquema, el
+// estado de aprobación (con reviewer+fecha) vive en RETSC_AI_TRAINING_PHOTOS y la
+// validación de cajitas sigue en RETSC_AI_TRAINING_ANNOTATIONS — son dos updates ahora.
+// Se chequea primero que la FOTO exista (trainingPhotoRepo.approvePhoto devuelve null si
+// no) antes de validar las anotaciones, en vez de inferir "no encontrada" de que no haya
+// anotaciones — una foto recién subida sin cajitas todavía es un estado válido (ver
+// shelfPhotoUploadService.js), no un 404.
 //
 // NOTA: hasta ahora el único disparador de annotationSyncService.syncApprovedPhoto() era
 // el Issue #54 (externo, todavía no integrado en este repo) — esta ruta es un SEGUNDO
@@ -148,10 +161,11 @@ const approvePhoto = async (req, res) => {
     const photoId = parseId(req.params.photoId, 'Photo ID');
     const clienteAjustoCajitas = req.body?.clienteAjustoCajitas !== false;
 
-    const annotations = await annotationRepo.approvePhoto(photoId, req.user.userId);
-    if (!annotations.length) {
-      return res.status(404).json({ success: false, message: `Foto ${photoId} no encontrada o sin anotaciones.` });
+    const photo = await trainingPhotoRepo.approvePhoto(photoId, req.user.userId);
+    if (!photo) {
+      return res.status(404).json({ success: false, message: `Foto ${photoId} no encontrada.` });
     }
+    const annotations = await annotationRepo.validateAllByPhoto(photoId);
 
     // syncApprovedPhoto nunca lanza por fallos de Custom Vision (por diseño, ver su propio
     // header) — la aprobación ya quedó persistida en SQL en la línea de arriba y no se

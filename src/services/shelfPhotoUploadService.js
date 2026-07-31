@@ -6,10 +6,20 @@
 //   2b. Caption confidence — Azure AI Vision (stub permisivo hasta que haya credenciales)
 //   3.  Validación de contenido ("¿es una góndola?") — Azure AI Vision (stub permisivo)
 //   4.  Deduplicación por hash SHA-256 (scope global: ENTERPRISE_ID IS NULL)
-//   5.  Upload a Blob Storage + insert en RETSC_EX_SHELFPHOTO
+//   5.  Upload a Blob Storage + insert en RETSC_EX_SHELFPHOTO (hash/calidad, dedup Etapa 4)
 //   6.  Registro en Custom Vision SIN regiones → cvImageId
-//   7.  Insert en RETSC_AI_TRAINING_ANNOTATIONS
+//   7.  Insert en RETSC_AI_TRAINING_PHOTOS (FIX 2026-07-26 — ver nota más abajo)
 //   8.  Verificación de umbral por canal (no bloquea la subida)
+//
+// FIX 2026-07-26 (migración de esquema del equipo DBA): la Etapa 7 insertaba una fila
+// "placeholder" en RETSC_AI_TRAINING_ANNOTATIONS con photo_notes/canal/dtc_category_id —
+// esas columnas se movieron a la tabla nueva RETSC_AI_TRAINING_PHOTOS (una fila por foto;
+// RETSC_AI_TRAINING_ANNOTATIONS ahora es solo cajitas, FK'd a esta por photo_id). La Etapa 7
+// ahora inserta en RETSC_AI_TRAINING_PHOTOS y YA NO crea ninguna anotación — no hay cajitas
+// que crear al momento de subir la foto (eso lo hace el equipo de anotación, Issue #42,
+// externo a este repo). El photo_id que importa para el pipeline de review/anotación es el
+// de RETSC_AI_TRAINING_PHOTOS, DISTINTO del Photo_id de RETSC_EX_SHELFPHOTO (Etapa 5) — no
+// hay FK entre esas dos tablas, son namespaces de ID separados.
 //
 // La foto es GLOBAL: no pertenece a ningún enterprise. Alimenta el modelo de
 // DETECCIÓN (dónde hay producto en góndola), no el de identificación de GTIN.
@@ -32,7 +42,7 @@ const { generateFilename }        = require('../utils/shelfPhotoFilenameGenerato
 const { normalizeName }           = require('../utils/categoryNameNormalizer');
 const categoryRepo                = require('../repositories/categoryRepo');
 const shelfPhotoRepo              = require('../repositories/shelfPhotoRepo');
-const annotationRepo              = require('../repositories/annotationRepo');
+const trainingPhotoRepo           = require('../repositories/trainingPhotoRepo');
 const aiModelRepo                 = require('../repositories/aiModelRepo');
 
 const CANALES_VALIDOS = ['OMT', 'DTT', 'CONVENIENCE'];
@@ -191,27 +201,30 @@ async function uploadShelfPhoto({ buffer, dtcCategoryId, canal, uploadedBy }) {
   const { cvImageId } = await customVisionService.createImageFromData(projectId, buffer, tagId);
   console.log(`[shelfPhoto] Custom Vision — cvImageId=${cvImageId}`);
 
-  // ── Etapa 7: Insert en RETSC_AI_TRAINING_ANNOTATIONS ─────────────────────────
-  // Las bboxes y cv_region_id se completan en Issue #42 (anotación equipo DTC).
+  // ── Etapa 7: Insert en RETSC_AI_TRAINING_PHOTOS ──────────────────────────────
+  // Sin cajitas todavía (status inicial EN_PROGRESO) — las crea el equipo de anotación
+  // (Issue #42, externo). photo_notes sigue llevando el mismo resumen de trazabilidad
+  // de siempre (blob + hash + cvImageId), ahora en la fila de FOTO en vez de en una
+  // anotación placeholder.
 
   const photoNotes = `blob:${blobPath} | sha256:${hash} | cvImageId:${cvImageId}`;
-  const annotation = await annotationRepo.insert({
-    photo_id:       photoId,
-    dtc_category_id: dtcId,
+  const trainingPhoto = await trainingPhotoRepo.insert({
+    uploaded_by_user_id: uploadedBy,
+    category_id:         dtcId,
     canal,
-    source:         'ADMIN_UPLOAD',
-    is_validated:   0,
-    photo_notes:    photoNotes,
+    blob_path:            blobPath,
+    photo_notes:          photoNotes,
+    photo_status:         'EN_PROGRESO',
   });
 
-  const annotationId = annotation.annotation_id;
-  console.log(`[shelfPhoto] anotación creada — annotation_id=${annotationId}`);
+  const trainingPhotoId = trainingPhoto.photo_id;
+  console.log(`[shelfPhoto] foto de entrenamiento registrada — photo_id=${trainingPhotoId}`);
 
   // ── Etapa 8: Verificar umbral por canal (no bloquea la subida) ───────────────
   // NOTA: 'IMAGES_UPLOADED' es un status nuevo para el modelo; la columna status
   // es varchar(20) y lo soporta. Indica que hay imágenes suficientes para entrenar.
 
-  const channelCount = await annotationRepo.countValidatedApprovedByCategoryChannel(dtcId, canal);
+  const channelCount = await trainingPhotoRepo.countValidatedApprovedByCategoryChannel(dtcId, canal);
   const threshold    = TRAINING_THRESHOLD();
   const thresholdReached = channelCount >= threshold;
 
@@ -222,11 +235,10 @@ async function uploadShelfPhoto({ buffer, dtcCategoryId, canal, uploadedBy }) {
   }
 
   return {
-    photoId,
+    photoId: trainingPhotoId,
     blobPath,
     blobUrl,
     cvImageId,
-    annotationId,
     canal,
     dtcCategoryId: dtcId,
     channelCount,
