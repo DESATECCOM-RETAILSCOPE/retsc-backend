@@ -394,8 +394,8 @@ Forgot password flow: `POST /api/auth/forgot-password` accepts `{ identifier }` 
 | `PUT /api/enterprises/me/categories` | Bearer | Atomically replace enterprise category selection |
 | `GET /api/enterprises/me/enterprise-categories` | Bearer | Enterprise's commercial categories with `enterprise_category_id` (used for SKU upload) |
 | `GET /api/enterprises/me/enterprise-categories/smart` | Bearer | Enterprise's smart-DTC categories only, with parent info (feeds SKU/shelf-photo upload category pickers) |
-| `GET /api/products` | Bearer | Products with pagination/search |
-| `GET /api/products/global` | Bearer + `ADMIN_DTC` | Global product catalog (F4 menu, "Productos") derived from `RETSC_OP_SKUS` — no enterprise/client data; grouped by `(Product_dsc, detection_category_id)`, see `PRODUCT_GROUP_KEY_EXPR` in `skuRepo.js` |
+| `GET /api/products` | Bearer | Products with pagination/search. `?categoryId=` is free-text `client_category` (footgun, see swagger); `?officialCategoryId=` (added Issue B3, 2026-07-26) is the real numeric FK to `RETSC_OP_CATEGORIES` via `sk.detection_category_id` — deliberately a separate param, not an overload of `categoryId` |
+| `GET /api/products/global` | Bearer + `ADMIN_DTC` | Global product catalog (F4 menu, "Productos") derived from `RETSC_OP_SKUS` — no enterprise/client data; grouped by `(Product_dsc, detection_category_id)`, see `PRODUCT_GROUP_KEY_EXPR` in `skuRepo.js`. `?categoryId=` (added Issue B3) filters by `detection_category_id` — no naming clash here since this view has no free-text category concept |
 | `GET /api/skus/global` | Bearer + `ADMIN_DTC` | Global paginated SKU catalog listing (F4 menu, "SKUs globales"); search by EAN/`Product_dsc` |
 | `POST /api/products/upload-excel` | Bearer | Parse `.xlsx`; returns rows + errors |
 | `POST /api/products/upload-images` | Bearer | Up to 200 images → `uploads-temp/<jobId>/` |

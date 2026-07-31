@@ -26,14 +26,17 @@ function toProductDTO(row) {
 }
 
 async function listByEnterprise(enterpriseId, filters = {}) {
-  const { categoryId, search, page = 1, limit = 50 } = filters;
+  const { categoryId, officialCategoryId, search, page = 1, limit = 50 } = filters;
 
   // Paginación resuelta en SQL (OFFSET/FETCH + COUNT(*)) — antes se traía todo
   // el catálogo de la empresa y se paginaba con .slice() en Node.
   // categoryId ya no es un FK numérico — es el texto de client_category (ver
-  // productRepo.buildFilters), por eso no se castea a Number.
+  // productRepo.buildFilters), por eso no se castea a Number. officialCategoryId
+  // (Issue B3) SÍ es el FK numérico oficial (RETSC_OP_CATEGORIES.Category_id) — filtro
+  // aparte, sin pisar el significado de categoryId.
   const { rows, total } = await productRepo.listByEnterprise(enterpriseId, {
     categoryId: categoryId || undefined,
+    officialCategoryId: officialCategoryId != null && officialCategoryId !== '' ? Number(officialCategoryId) : undefined,
     search,
     page: Number(page),
     limit: Number(limit),
@@ -71,9 +74,13 @@ function toGlobalProductDTO(row) {
 }
 
 async function listGlobal(filters = {}) {
-  const { search, page = 1, limit = 50 } = filters;
+  const { search, categoryId, page = 1, limit = 50 } = filters;
+  // categoryId acá SÍ es el numérico oficial (detection_category_id, ya es lo que
+  // devuelve toGlobalProductDTO como `categoryId`) — a diferencia de listByEnterprise,
+  // esta vista no tiene un filtro de texto libre con el que pueda confundirse.
   const { rows, total } = await skuRepo.listGlobalProducts({
     search,
+    categoryId: categoryId != null && categoryId !== '' ? Number(categoryId) : undefined,
     page: Number(page),
     limit: Number(limit),
   });
