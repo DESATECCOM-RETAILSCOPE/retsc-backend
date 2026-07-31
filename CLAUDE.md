@@ -163,7 +163,18 @@ Tres menús **web**: `ADMIN_DTC`, `ADMIN`, `GERENCIA`. `EJECUTIVO CAMPO` y `AUDI
 - **SKUs globales** (`ADMIN_DTC`) → `GET /api/skus/global`
 - **Productos** (`ADMIN_DTC`) → `GET /api/products/global` — catálogo global derivado de `RETSC_OP_SKUS` (agrupado por `Product_dsc` + `detection_category_id`), **no** de una tabla `RETSC_OP_PRODUCTS` (eliminada, commit `b775f86`); distinto de "SKUs globales", que lista una fila por EAN sin agrupar. Ver `PRODUCT_GROUP_KEY_EXPR` en `skuRepo.js` para el criterio de agrupación y por qué no hay una FK que lo dicte.
 
-Todo lo demás del menú se resolvió con endpoints que ya existían. Explícitamente **fuera de alcance** (sin tabla/datos en la BD para soportarlo, implementado como "Pronto" en el frontend sin backend): Tiendas activas, Planogramas (no hay tabla de retailers — `RETSC_EX_SHELFPHOTO.Retailer_id` es solo una columna suelta sin catálogo detrás), y todo el bloque operativo de `GERENCIA` (Visitas, KPIs de cumplimiento, Faltantes detectados, Reportes por tienda/producto/ejecutivo, Ejecutivos de campo). No inventar tablas/migraciones/endpoints para esto sin que el equipo lo pida explícitamente.
+Todo lo demás del menú se resolvió con endpoints que ya existían. Al momento de este mapeo (2026-07-25) estaba **fuera de alcance** (sin tabla/datos en la BD para soportarlo, implementado como "Pronto" en el frontend sin backend): Tiendas activas, Planogramas (no había tabla de retailers — `RETSC_EX_SHELFPHOTO.Retailer_id` era solo una columna suelta sin catálogo detrás), Surtido, y todo el bloque operativo de `GERENCIA` (Visitas, KPIs de cumplimiento, Faltantes detectados, Reportes por tienda/producto/ejecutivo, Ejecutivos de campo).
+
+⚠ **ACTUALIZACIÓN 2026-07-26 — ese "fuera de alcance" ya NO es cierto a nivel de esquema.** Investigando B7 (dashboard) apareció que el equipo DBA aprovisionó, como parte de la misma migración que trajo `RETSC_AI_TRAINING_PHOTOS` (ver sección del pipeline de fotos de góndola más abajo), un set completo de tablas nuevas que respaldan justo lo que acá se decía que no existía:
+
+- `RETSC_OP_RETAILER` (`Retailer_id`, `Retailer_dsc`, `Supermarketchain_id`, `Formato`, `Ejecutivo_asignado`, `Zona`, `Canal`, lat/long...) — el catálogo de tiendas que "Tiendas activas" necesitaba.
+- `RETSC_OP_PLANOGRAM` (`Enterprise_id`, `Category_id`, `Retailer_id`, `Planogram_seq`, `Up_date`/`Down_date`, `Status`, `URL_picture`...) — Planogramas.
+- `RETSC_OP_ASSORTMENT` (`assortment_id`, `enterprise_id`, `category_id`, `sku_id`, `is_mandatory`, `priority`...) — Surtido.
+- `RETSC_EX_VISIT` (`Visit_id`, `User_id`, `Enterprise_id`, `Retailer_id`, `Visit_start`/`Visit_end`, lat/long, `Status`...) — Visitas de campo.
+- `RETSC_EX_KPI` (`kpi_id`, `photo_id`, `visit_id`, `planogram_sku_id`, `status_compliance`, `facings_eval`, `compliance_score`...) — KPIs de cumplimiento.
+- `RETSC_EX_SHELFPHOTO_DETECTION` (`Detection_id`, `Photo_id`, `EAN`, `Sku_id`, `Confidence`, `Bbox_*`, `ocr_text`...) — detecciones de producto en fotos de góndola, candidato a "Faltantes detectados".
+
+**Las seis están vacías (0 filas) y ningún archivo de este repo las lee ni las escribe todavía** (verificado 2026-07-26, `grep` sobre `src/` no encuentra ninguna referencia) — el esquema existe, pero no hay ningún servicio/repo/ruta conectado a él. Esto es un hallazgo para que el equipo decida qué priorizar, **no una luz verde para construir todo esto sin que lo pidan explícitamente** — la regla de "no inventar endpoints para esto sin pedido explícito" se mantiene igual que antes; lo único que cambió es que ahora sí hay dónde aterrizar esos endpoints el día que se pidan, sin necesitar una migración nueva.
 
 ### Shelf photo annotation & model training pipeline (Issues 3.1.1 follow-on, 8.5, 42)
 
@@ -282,6 +293,7 @@ Each file in `src/repositories/` maps to one SQL table:
 | `skuImageLogRepo.js` | `RETSC_LOG_IMAGE_UPLOAD` (shared with `imageRepo.js`, different columns) |
 | `jobRepo.js` | `RETSC_LOG_JOBS` |
 | `shelfPhotoRepo.js` | `RETSC_EX_SHELFPHOTO` |
+| `dashboardRepo.js` | Read-only aggregator (Issue B7) over `RETSC_OP_ENTERPRISE_PRODUCT_SEG`/`RETSC_OP_SKUS`/`RETSC_AI_SKU_FEATURES`/`RETSC_OP_ASSORTMENT` — no table of its own, see the dashboard section below for why each source was picked |
 | `annotationRepo.js` | `RETSC_AI_TRAINING_ANNOTATIONS` (bounding boxes only, since the 2026-07-26 schema split) |
 | `trainingPhotoRepo.js` | `RETSC_AI_TRAINING_PHOTOS` (photo-level fields, added 2026-07-26 — see Shelf photo pipeline section above) |
 
@@ -354,6 +366,7 @@ Forgot password flow: `POST /api/auth/forgot-password` accepts `{ identifier }` 
 /api/models                        authMiddleware  + requireRole(MODEL_MANAGER_ROLES) inline on all routes, including the new GET / (F4 menu, 2026-07-25)
 /api/shelf-photos                  authMiddleware  + requireRole(SHELF_UPLOAD_ROLES) inline on upload
 /api/training                      authMiddleware  + requireRole(TRAINING_ADMIN_ROLES) inline on all routes
+/api/dashboard                     authMiddleware (global) — any authenticated role; scope (own enterprise vs. global) resolved by role inside dashboardService.js, not by middleware
 ```
 
 `enterpriseCommercialCategoryRoutes.js` is distinct from `enterpriseCategoryRoutes.js` — it exposes `GET /api/enterprises/me/enterprise-categories` (commercial categories) and `GET /api/enterprises/me/enterprise-categories/smart` (only `is_smart_dtc=1` categories, used to populate SKU-upload/shelf-photo-upload dropdowns), both handled by `categoryController.js` (no separate controller file).
@@ -403,6 +416,7 @@ Forgot password flow: `POST /api/auth/forgot-password` accepts `{ identifier }` 
 | `POST /api/products/upload-images` | Bearer | Up to 200 images → `uploads-temp/<jobId>/` |
 | `POST /api/products/process/:jobId` | Bearer | Start async pipeline |
 | `GET /api/products/processing-status/:jobId` | Bearer | Poll pipeline state |
+| `GET /api/dashboard` | Bearer | Real dashboard metrics (Issue B7), replaces frontend mock data — `productCards`/`productPhotos`/`activeAssortments`/`analysesDone`, scoped to the caller's enterprise unless `ADMIN_DTC` (global) |
 | `GET /health` | No | `{status, timestamp}` |
 | `POST /api/categories/:id/retry-ai-infra` | Bearer + Admin | Reintenta provisioning IA de categoría smart |
 | `POST /api/sku-images/upload` | Bearer | Up to 200 images; enqueues a `RETSC_LOG_JOBS` row and returns 202 immediately (see async job flow below) |
@@ -440,6 +454,18 @@ Every `409` thrown by `registerEnterprise()`/`createEnterprise()` (duplicate `fi
 ### Enterprise status
 
 `RETSC_OP_ENTERPRISE` has a `status` column (lowercase, BIT). Note: unlike other tables in the project that use `Status` (Pascal case), this column is lowercase — always reference it as `row.status` in the repository layer, not `row.Status`.
+
+### Dashboard (`GET /api/dashboard`, Issue B7)
+
+Replaces the frontend's mock dashboard data with real counts, scoped by role: `ADMIN`/`GERENCIA` see their own `enterpriseId`; `ADMIN_DTC` sees the whole platform (`enterpriseId=null` internally). `dashboardService.resolveScope()` does the role check; `dashboardRepo.js` runs the actual counts and never sees a role, only an optional `enterpriseId`.
+
+Source picked for each metric (none were 100% obvious — see `dashboardRepo.js`'s header for the full reasoning):
+- **`productCards`** — `RETSC_OP_ENTERPRISE_PRODUCT_SEG` (`status='ACTIVE'`) per enterprise / `RETSC_OP_SKUS` (`status='ACTIVE'`) globally — same "product" definition `productRepo.listByEnterprise` already uses.
+- **`productPhotos`** — `RETSC_AI_SKU_FEATURES` (one row per uploaded SKU image), joined to `RETSC_OP_ENTERPRISE_PRODUCT_SEG` for the per-enterprise case.
+- **`activeAssortments`** — `RETSC_OP_ASSORTMENT`. This table is real (see the schema-discovery note in "Menú por rol (F4)" above) but has no `status`/`is_active` column, so "active" here means "every row that exists" — there's no soft-delete concept modeled. It's also **empty in production today**, so this metric legitimately returns `0` — that's a real count against a real (if empty) table, not a hardcoded placeholder.
+- **`analysesDone`** — `RETSC_OP_SKUS.image_status = 'COGNITIVELY_PROCESSED'` (the SKU-image OCR/embeddings pipeline already marks this — see "SKU image ingestion" below). Deliberately **not** `RETSC_EX_SHELFPHOTO_DETECTION`, despite that table's name sounding like a better fit for "analyses" — it's also newly-discovered, also empty, and **nothing in this repo reads or writes it yet** (it belongs to the not-yet-built GERENCIA/KPI pipeline), so using it would just return `0` forever with no real signal behind it. `image_status` has actual production data behind it today.
+
+Both `resolveScope()`'s treatment of `GERENCIA` (same as `ADMIN` — own enterprise) and the choice of `image_status` over `RETSC_EX_SHELFPHOTO_DETECTION` for `analysesDone` are judgment calls flagged with `// NOTA` in the code for the team to confirm, not settled requirements.
 
 ### Product ingestion pipeline
 
