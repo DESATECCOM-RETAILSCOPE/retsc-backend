@@ -19,7 +19,9 @@
 // Ninguna de las dos funciones lanza por fallos de Custom Vision: la aprobación/rechazo del
 // cliente ya quedó persistido en SQL antes de llamar a estas funciones y no debe revertirse
 // por un problema de sincronización. Los fallos se registran en RETSC_AI_TRAINING_PHOTOS
-// (cv_sync_status='FAILED' / cv_sync_error / cv_sync_attempts) para reintento manual posterior.
+// (cv_sync_status='ERROR' / cv_sync_error / cv_sync_attempts) para reintento manual posterior.
+// (Renombrado de 'FAILED' a 'ERROR' 2026-08-03 para alinear con el valor que usa la spec v1.4
+// — verificado que ningún filtro/consulta en el código dependía del literal 'FAILED'.)
 //
 // FIX 2026-07-26 — migración de esquema del equipo DBA (mismo cambio que en annotationRepo.js
 // y trainingPhotoRepo.js): dtc_category_id, canal, photo_notes y cv_sync_status/error/attempts
@@ -44,26 +46,48 @@
 //     envío en created[] (se probó con 4 regiones de left distinto — volvieron reordenadas). Por
 //     eso la correlación se hace por coordenadas (coordsMatch), no por índice de lote.
 
-const annotationRepo    = require('../repositories/annotationRepo');
-const trainingPhotoRepo = require('../repositories/trainingPhotoRepo');
-const aiModelRepo       = require('../repositories/aiModelRepo');
+const annotationRepo      = require('../repositories/annotationRepo');
+const trainingPhotoRepo   = require('../repositories/trainingPhotoRepo');
+const aiModelRepo         = require('../repositories/aiModelRepo');
 const customVisionService = require('./customVisionService');
+const modelTrainingService = require('./modelTrainingService');
 
 const CANALES = ['OMT', 'DTT', 'CONVENIENCE'];
 
 const THRESHOLD = () => parseInt(process.env.SHELF_TRAINING_THRESHOLD || '15', 10);
 
-// Estados de RETSC_AI_DETECTION_MODELS en los que el modelo ya avanzó más allá de
-// "esperando imágenes" — no corresponde volver a marcarlo IMAGES_UPLOADED.
-const SKIP_THRESHOLD_STATUSES = new Set(['TRAINING', 'READY', 'AWAITING_APPROVAL', 'IMAGES_UPLOADED']);
+// Estados de RETSC_AI_DETECTION_MODELS en los que un training ya está en curso — no
+// corresponde re-evaluar el umbral mientras tanto (evita llamadas repetidas a
+// modelTrainingService.startTraining() por cada foto que se sincroniza durante la ventana de
+// ~20 min que dura un entrenamiento; esas llamadas fallarían igual con 409 dentro de
+// startTraining(), pero silenciarlas acá evita ruido de logs).
+//
+// Deliberadamente NO incluye 'IMAGES_UPLOADED': `shelfPhotoUploadService.js` (Etapa 8, fuera
+// de alcance de este cableado) también puede marcar ese estado por su cuenta, en el momento
+// de SUBIR una foto — sin disparar training. Si 'IMAGES_UPLOADED' bloqueara la reevaluación
+// acá, un modelo marcado por esa vía quedaría atascado ahí para siempre (nada más lo saca de
+// ese estado). Al no bloquearlo, el próximo sync exitoso vuelve a evaluar el umbral con
+// normalidad y sí dispara training si corresponde — el flujo se autocorrige.
+//
+// Deliberadamente NO incluye 'PUBLISHED' (ni el viejo 'READY'): un modelo ya publicado debe
+// poder re-entrenarse cuando se acumulen +15 fotos SYNCED más — el propio conteo "desde el
+// último trained_at" (ver checkAndUpdateThreshold) ya evita re-disparar con las mismas fotos,
+// así que el estado no necesita bloquear ese caso.
+//
+// AWAITING_APPROVAL retirado 2026-08-03 (decisión de jefatura — ya no existe ese estado, ver
+// aiModelRepo.js y docs/DIAGNOSTICO-spec-v1.4-vs-codigo.md).
+const SKIP_THRESHOLD_STATUSES = new Set(['TRAINING']);
 
-function resolveTagId(canal) {
-  const map = {
-    OMT:         process.env.CV_TAG_OMT,
-    DTT:         process.env.CV_TAG_DTT,
-    CONVENIENCE: process.env.CV_TAG_CONVENIENCE,
-  };
-  return map[canal] || null;
+// Issue #35 (resuelto 2026-08-03, cableado spec v1.4) — antes esto leía CV_TAG_OMT/DTT/
+// CONVENIENCE (env vars globales, un solo tag id para TODAS las categorías del canal —
+// incorrecto en cuanto hay más de un proyecto CV activo). Ahora resuelve el tag DENTRO del
+// proyecto de la categoría vía customVisionService.ensureTag() (lista tags del proyecto, crea
+// si no existe, reusa si ya está — no duplica). Convención de nombre: el canal solo
+// ('OMT'/'DTT'/'CONVENIENCE'), sin componer con la categoría — el proyecto CV ya ES la
+// categoría, así que el canal alcanza como nombre de tag dentro de él.
+async function resolveTagId(projectId, canal) {
+  const tag = await customVisionService.ensureTag(projectId, canal);
+  return tag.id;
 }
 
 // Custom Vision no devuelve un ID de correlación propio en createImageRegions — se correlaciona
@@ -76,7 +100,7 @@ function resolveTagId(canal) {
 // CASO BORDE — coords idénticas en 2 anotaciones de la misma foto: Custom Vision RECHAZA todo
 // el batch con 400 "Duplicate image regions" (confirmado empíricamente) si dos regiones del
 // mismo lote tienen el mismo left/top/width/height + tag en la misma imagen. Como el batch entero
-// falla, syncRegionsForPhoto cae al catch y marca la foto entera como cv_sync_status='FAILED'
+// falla, syncRegionsForPhoto cae al catch y marca la foto entera como cv_sync_status='ERROR'
 // (no solo las cajitas duplicadas) — comportamiento correcto según la regla de "nunca
 // bloquear", pero significa que dos cajitas exactamente iguales en una foto bloquean la
 // sincronización de esa foto entera hasta que se corrijan (una de las dos debe moverse aunque
@@ -112,8 +136,8 @@ async function markSynced(photoId, cvRegionIdsByAnnotation) {
 
 async function markFailed(photoId, error) {
   const message = error?.message || String(error);
-  await trainingPhotoRepo.updateCvSync(photoId, { syncStatus: 'FAILED', syncError: message })
-    .catch(e2 => console.error(`[annotationSync] no se pudo registrar cv_sync_status=FAILED para photo_id=${photoId}:`, e2.message));
+  await trainingPhotoRepo.updateCvSync(photoId, { syncStatus: 'ERROR', syncError: message })
+    .catch(e2 => console.error(`[annotationSync] no se pudo registrar cv_sync_status=ERROR para photo_id=${photoId}:`, e2.message));
 }
 
 // Borra en Custom Vision las regiones viejas (cv_region_id) de las cajitas dadas.
@@ -184,7 +208,7 @@ async function syncRegionsForPhoto(photo, rows) {
     if (!cvImageId) {
       throw new Error(`No se encontró cvImageId en photo_notes para photo_id=${photo.photo_id}`);
     }
-    const tagId = resolveTagId(photo.canal);
+    const tagId = await resolveTagId(projectId, photo.canal);
 
     const regionsToCreate = pendingSync.filter(r =>
       r.bbox_left != null && r.bbox_top != null && r.bbox_width != null && r.bbox_height != null
@@ -260,11 +284,31 @@ async function removeRegionsForPhoto(photo, rows) {
   }
 }
 
-// Verifica, canal por canal, si una categoría alcanzó el umbral de fotos aprobadas para
-// habilitar entrenamiento. Si lo alcanzó y el modelo aún no avanzó más allá de eso,
-// marca RETSC_AI_DETECTION_MODELS.status = 'IMAGES_UPLOADED'.
-// Mismo umbral/lógica que la Etapa 8 de shelfPhotoUploadService, generalizado a todos los
-// canales de la categoría (no solo el canal de la foto recién subida/aprobada).
+// Cableado 2026-08-03 (spec v1.4, 4.3) — Verifica, canal por canal, si una categoría alcanzó
+// el umbral de fotos SINCRONIZADAS (cv_sync_status='SYNCED') para disparar entrenamiento
+// automático. El conteo es "desde el último entrenamiento" (`model.trained_at`, avanzado por
+// aiModelRepo.markTrained() al completar un training — ver modelTrainingService.js): si el
+// modelo nunca entrenó, cuenta todas las SYNCED (equivale al "primera vez, 15" de la spec);
+// si ya entrenó antes, solo cuenta las sincronizadas DESPUÉS de esa fecha (equivale al "+15
+// acumuladas desde el último entrenamiento" — evita re-disparar con las mismas fotos que ya
+// entrenaron una vez).
+//
+// Al llegar a CUALQUIER canal con ≥ umbral: se marca IMAGES_UPLOADED (guardia de estado que
+// `modelTrainingService.startTraining()` ya exige) y se dispara el training de inmediato,
+// fire-and-forget (no bloquea el sync que llamó a esta función) — entrena el PROYECTO
+// completo (todos los canales/tags juntos), no solo el canal que cruzó el umbral, porque
+// `trainProject()` opera sobre el proyecto CV entero, no por tag (spec 4.3: "20 OMT + 15 DTT
+// → entrena con las 35").
+//
+// NOTA (residual, no resuelto en este cableado): la spec 4.3 también pide que un training
+// fallido (`Failed` en Custom Vision) vuelva el modelo a PENDING para poder reintentarse sin
+// bloquear — `modelTrainingService.pollTrainingStatus()` hoy solo marca `TRAINING_FAILED` y
+// se detiene ahí (comportamiento preexistente a este cableado, no tocado). Como
+// TRAINING_FAILED no está en SKIP_THRESHOLD_STATUSES, un sync posterior SÍ vuelve a evaluar
+// el umbral con normalidad (usando el mismo `trained_at` de antes del intento fallido, que no
+// avanzó), así que en la práctica un reintento eventual ocurre en cuanto llegue una foto más
+// — pero no hay un reintento inmediato/explícito. Documentado como gap conocido, no como bug
+// de esta pasada.
 async function checkAndUpdateThreshold(categoryId) {
   const model = await aiModelRepo.findByCategoryId(categoryId);
   if (!model) {
@@ -273,16 +317,23 @@ async function checkAndUpdateThreshold(categoryId) {
   }
 
   if (SKIP_THRESHOLD_STATUSES.has(model.status)) {
-    console.log(`[annotationSync] modelo de categoría ${categoryId} ya está en estado ${model.status} — no se reevalúa umbral`);
+    console.log(`[annotationSync] modelo de categoría ${categoryId} ya está en estado ${model.status} — no se reevalúa umbral (training en curso)`);
     return;
   }
 
   const threshold = THRESHOLD();
   for (const canal of CANALES) {
-    const count = await trainingPhotoRepo.countValidatedApprovedByCategoryChannel(categoryId, canal);
+    const count = await trainingPhotoRepo.countSyncedSinceByCategoryChannel(categoryId, canal, model.trained_at);
     if (count >= threshold) {
+      console.log(`[annotationSync] umbral alcanzado — categoria=${categoryId} canal=${canal} (${count}/${threshold} SYNCED desde trained_at=${model.trained_at ?? 'nunca'}) → disparando entrenamiento automático`);
       await aiModelRepo.updateStatus(model.detection_model_id, 'IMAGES_UPLOADED');
-      console.log(`[annotationSync] umbral alcanzado — categoria=${categoryId} canal=${canal} (${count}/${threshold}) → modelo marcado IMAGES_UPLOADED`);
+
+      // Fire-and-forget — no se espera a que termine el training, el sync que llamó a esta
+      // función ya completó su trabajo. modelTrainingService.startTraining() vuelve a leer el
+      // modelo fresco de BD (ya en IMAGES_UPLOADED) y sigue el mismo camino que antes tenía el
+      // endpoint manual retirado — ver docs/DIAGNOSTICO-spec-v1.4-vs-codigo.md.
+      modelTrainingService.startTraining(categoryId, null)
+        .catch(err => console.error(`[annotationSync] disparo automático de training falló (categoria=${categoryId}):`, err.message));
       return;
     }
   }

@@ -211,6 +211,31 @@ const countValidatedApprovedByCategoryChannel = async (categoryId, canal) => {
   return r.recordset[0].n;
 };
 
+// Cuenta fotos SINCRONIZADAS (cv_sync_status='SYNCED') por categoría/canal, opcionalmente
+// solo las más nuevas que `sinceDate` — cableado del disparo automático de training (spec
+// v1.4, 4.3): "15 fotos, o +15 acumuladas desde el último entrenamiento". `sinceDate` es
+// `model.trained_at`; si es null (categoría nunca entrenada), cuenta todas las SYNCED.
+//
+// NOTA: no hay una columna `synced_at` dedicada (solo `cv_sync_status`, sin timestamp propio
+// del momento del sync) — se usa `created_at` (fecha de subida de la foto) como proxy. En la
+// práctica el sync ocurre en la misma cadena de llamadas que la aprobación (segundos después
+// de la subida), así que la diferencia es despreciable para un umbral de "15 fotos"; documentado
+// acá por si algún día se agrega un timestamp de sync real y hay que migrar este conteo.
+const countSyncedSinceByCategoryChannel = async (categoryId, canal, sinceDate) => {
+  const pool = await getPool();
+  const r = await pool.request()
+    .input('categoryId', sql.Int,      categoryId)
+    .input('canal',      sql.VarChar(20), canal)
+    .input('since',      sql.DateTime, sinceDate ?? null)
+    .query(`
+      SELECT COUNT(*) AS n
+      FROM ${TABLE}
+      WHERE category_id = @categoryId AND canal = @canal AND cv_sync_status = 'SYNCED'
+        AND (@since IS NULL OR created_at > @since)
+    `);
+  return r.recordset[0].n;
+};
+
 // Actualiza el estado de sincronización con Custom Vision A NIVEL DE FOTO (Issue 8.2).
 // Antes vivía en annotationRepo.updateCvSync operando por annotation_id — cv_sync_status/
 // error/attempts se movieron acá; cv_region_id (por cajita) sigue en annotationRepo.
@@ -236,6 +261,7 @@ module.exports = {
   findByHashAndCanal,
   insert,
   listPhotos,
+  countSyncedSinceByCategoryChannel,
   getPhotoWithRegions,
   approvePhoto,
   countValidatedApprovedByCategoryChannel,
