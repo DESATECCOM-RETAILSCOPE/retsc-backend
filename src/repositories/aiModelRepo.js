@@ -6,7 +6,8 @@
 //   category_id               INT NOT NULL
 //   model_name                VARCHAR(100)  NULL
 //   customvision_project_id   VARCHAR(100)  NULL  (hasta que Custom Vision esté configurado)
-//   prediction_resource_id    VARCHAR(100)  NULL
+//   prediction_resource_id    VARCHAR(200)  NULL  (ampliada desde VARCHAR(100) el 2026-08-04 —
+//     un Resource ID de ARM completo mide ~157 caracteres, ver aiInfrastructureService.js)
 //   status                    VARCHAR(20)   NULL  — ciclo real (más largo que el original):
 //     PENDING → PROJECT_CREATED (8.1) → IMAGES_UPLOADED (8.2) → TRAINING → TRAINED | TRAINING_FAILED (8.3)
 //     → PUBLISHED (activo/publicado, 8.4/cableado 2026-08-03 — renombrado desde READY para
@@ -80,7 +81,8 @@ const listByCategoryIds = async (categoryIds) => {
 // Inserta un nuevo modelo placeholder.
 // customvisionProjectId y predictionResourceId quedan NULL hasta que Custom Vision esté configurado.
 // Tipos reales verificados con INFORMATION_SCHEMA:
-//   model_name / customvision_project_id / prediction_resource_id → varchar(100)
+//   model_name / customvision_project_id → varchar(100)
+//   prediction_resource_id → varchar(200) (ampliada 2026-08-04 — ver aiInfrastructureService.js)
 //   status          → varchar(20)
 //   confidence_threshold → decimal
 //   is_active       → bit (nullable)
@@ -100,7 +102,7 @@ const insert = async ({
     .input('categoryId',            sql.Int,          categoryId)
     .input('modelName',             sql.VarChar(100),  modelName)
     .input('customvisionProjectId', sql.VarChar(100),  customvisionProjectId)
-    .input('predictionResourceId',  sql.VarChar(100),  predictionResourceId)
+    .input('predictionResourceId',  sql.VarChar(200),  predictionResourceId)
     .input('status',                sql.VarChar(20),   status)
     .input('modelVersion',          sql.Int,           modelVersion)
     .input('confidenceThreshold',   sql.Decimal(18,4), confidenceThreshold)
@@ -124,7 +126,7 @@ const updateCustomVisionRefs = async (detectionModelId, { customvisionProjectId,
   const r = await pool.request()
     .input('id',                    sql.Int,          detectionModelId)
     .input('customvisionProjectId', sql.VarChar(100),  customvisionProjectId ?? null)
-    .input('predictionResourceId',  sql.VarChar(100),  predictionResourceId  ?? null)
+    .input('predictionResourceId',  sql.VarChar(200),  predictionResourceId  ?? null)
     .query(`
       UPDATE ${TABLE}
       SET customvision_project_id = @customvisionProjectId,

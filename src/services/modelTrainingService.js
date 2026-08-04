@@ -50,18 +50,21 @@
 // vez se corra esa migración (fuera de alcance de este cableado — no se corre sin aviso), el
 // guardado de métricas empieza a funcionar sin tocar este código.
 //
-// ⚠ BLOQUEANTES CONOCIDOS DE AZURE para que la publicación (Custom Vision `publishIteration`)
-// funcione de punta a punta — NINGUNO de código, ambos gestionados por fuera de este repo:
-//   1. `prediction_resource_id` se guarda NULL si el Resource ID de ARM real excede el
-//      VARCHAR(100) de la columna (ver aiInfrastructureService.js, BUG documentado 2026-07-19).
-//   2. Aun con un id sintácticamente válido, el Resource ID actual de `.env` devolvió
-//      `BadRequestInvalidPublishTarget` contra Custom Vision real (probado 2026-08-03) —
-//      probablemente no es el recurso de PREDICCIÓN correcto (podría ser el de training). Se
-//      está gestionando el Resource ID correcto por fuera de este repo.
-// `publishAndActivate()` maneja ambos casos sin romper el flujo: si falla, el modelo queda en
-// TRAINED (entrenado pero sin publicar) y se loguea la razón — nunca lanza, nunca tira abajo
-// el polling ni el resto del ciclo. Cuando el Resource ID correcto esté configurado, la
-// publicación funcionará sin cambios de código acá.
+// ⚠ BLOQUEANTES DE AZURE para la publicación (Custom Vision `publishIteration`) — AMBOS
+// RESUELTOS 2026-08-04, ninguno era de código:
+//   1. `prediction_resource_id` se guardaba NULL porque el Resource ID de ARM real (157
+//      caracteres) excedía el VARCHAR(100) de la columna (BUG documentado 2026-07-19).
+//      Jefatura amplió la columna a VARCHAR(200); `aiInfrastructureService.
+//      getSafePredictionResourceId()` y los bindings de `aiModelRepo.js` se ajustaron al
+//      nuevo tamaño; las 2 categorías existentes (5 y 6) se re-poblaron manualmente con el
+//      valor completo.
+//   2. El Resource ID que antes daba `BadRequestInvalidPublishTarget` (probado 2026-08-03)
+//      resultó ser el mismo problema del punto 1, no un recurso equivocado: estaba truncado
+//      en el `.env` (le faltaba `/accounts/{nombre}`). Con el valor completo, probado contra
+//      Custom Vision real (2026-08-04): `publishIteration` publica sin error.
+// `publishAndActivate()` sigue manejando con gracia cualquier fallo futuro (Resource ID vacío
+// en una categoría todavía no re-poblada, rechazo de red, etc.): si falla, el modelo queda en
+// TRAINED sin publicar, logueado, sin romper el polling ni el resto del ciclo.
 
 const aiModelRepo         = require('../repositories/aiModelRepo');
 const customVisionService = require('./customVisionService');

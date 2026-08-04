@@ -319,17 +319,16 @@ async function ensureTag(projectId, tagName) {
 //     publishName, overwrite=true ya resuelve el caso sin necesitar un unpublish aparte.
 //     Devuelve `true` (boolean crudo, no un objeto) si la publicación fue exitosa.
 //
-// DEUDA CONOCIDA (ver aiInfrastructureService.js, BUG documentado 2026-07-19):
-// RETSC_AI_DETECTION_MODELS.prediction_resource_id es VARCHAR(100), pero un Resource ID de
-// ARM real mide ~122 caracteres en este ambiente — la fila queda con prediction_resource_id
-// = NULL en vez de truncado. Esta función NO lee la BD (recibe predictionResourceId como
-// parámetro, lo resuelve quien la llama), pero si a quien la llama solo le queda ese NULL
-// para pasar, la publicación real NO puede completarse — publicar requiere sí o sí un
-// Resource ID válido. Por eso esta función corta ANTES de llamar a Custom Vision con un id
-// vacío/inválido: lanza un error explícito en vez de un 400 genérico de la API. Resolver la
-// deuda del VARCHAR(100) (ampliar la columna, o guardar el resource id en otro lado) es
-// prerequisito para que la publicación real funcione end-to-end — no se resuelve acá, está
-// fuera del alcance de esta pasada (solo se construyen las funciones aisladas).
+// DEUDA RESUELTA 2026-08-04 (ver aiInfrastructureService.js): RETSC_AI_DETECTION_MODELS.
+// prediction_resource_id era VARCHAR(100) — un Resource ID de ARM real mide ~157 caracteres
+// en este ambiente, así que la fila quedaba con prediction_resource_id = NULL en vez de
+// truncado. Jefatura amplió la columna a VARCHAR(200) y se re-pobló manualmente; confirmado
+// contra Custom Vision real que publishIteration() acepta el id completo (ya no da
+// BadRequestInvalidPublishTarget). Esta función NO lee la BD (recibe predictionResourceId
+// como parámetro, lo resuelve quien la llama) — igual corta ANTES de llamar a Custom Vision
+// si el valor viene vacío/null (ej. una categoría que todavía no se re-poblió, o una fila
+// nueva creada antes de que el provisioning corra), lanzando un error explícito en vez de un
+// 400 genérico de la API.
 async function publishIteration(projectId, iterationId, publishName, predictionResourceId, { overwrite = false } = {}) {
   if (!predictionResourceId) {
     throw new Error(
