@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(node -e ' *)"
+      "Bash(node -e ' *)",
+      "Read(//c/Users/Joel/OneDrive/Escritorio/RSP/Functions/**)"
     ]
   }
 }
