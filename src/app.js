@@ -15,7 +15,6 @@ const enterpriseCommercialCategoryRoutes = require('./routes/enterpriseCommercia
 const annotationRoutes                  = require('./routes/annotationRoutes');
 const modelRoutes                       = require('./routes/modelRoutes');
 const shelfPhotoRoutes                  = require('./routes/shelfPhotoRoutes');
-const trainingRoutes                    = require('./routes/trainingRoutes');
 const dashboardRoutes                   = require('./routes/dashboardRoutes');
 const authMiddleware                    = require('./middlewares/authMiddleware');
 const jobRepo                  = require('./repositories/jobRepo');
@@ -45,7 +44,6 @@ app.use('/api/enterprises/me/enterprise-categories', authMiddleware, enterpriseC
 app.use('/api/annotations',                authMiddleware, annotationRoutes);
 app.use('/api/models',                     authMiddleware, modelRoutes);
 app.use('/api/shelf-photos',               authMiddleware, shelfPhotoRoutes);
-app.use('/api/training',                   authMiddleware, trainingRoutes);
 app.use('/api/dashboard',                  authMiddleware, dashboardRoutes);
 
 // Recovery al startup: jobs que quedaron RUNNING de una ejecución anterior → FAILED

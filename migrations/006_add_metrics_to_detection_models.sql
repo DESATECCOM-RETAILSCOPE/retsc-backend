@@ -1,27 +1,29 @@
--- Agrega campos de métricas y aprobación a RETSC_AI_DETECTION_MODELS.
--- Soporta el Issue 8.5: versioning y re-entrenamiento de modelos.
+-- Agrega campos de métricas a RETSC_AI_DETECTION_MODELS.
+-- Soporta el flujo automático de la spec v1.4 (fotos aprobadas → sync → umbral → training →
+-- publicación): las métricas se guardan SOLO para monitoreo, nunca condicionan la publicación.
 --
--- Reglas que habilita:
---   - "Nueva versión con métricas peores requiere aprobación manual": se necesita
---     persistir las métricas de cada versión para poder comparar la nueva vs la activa.
---   - Auditoría de quién aprobó una versión peor.
+-- AJUSTADO 2026-08-03 (decisión de jefatura, ver docs/DIAGNOSTICO-spec-v1.4-vs-codigo.md):
+-- la versión original de este script (Issue 8.5) también agregaba approved_by/approved_at
+-- para un flujo de aprobación humana manual de versiones con métricas peores. Ese flujo fue
+-- eliminado por completo del código (modelVersioningService.approveVersion/rejectVersion,
+-- aiModelRepo.setApproval, endpoints POST /api/models/:modelId/approve|reject) — la spec v1.4
+-- exige publicación 100% automática, sin gate de métricas ni aprobación humana. Se quitan esas
+-- dos columnas de este script en consecuencia. Esta migración TODAVÍA NO se aplicó contra la
+-- BD real (verificado con INFORMATION_SCHEMA, última vez 2026-07-25) — este ajuste solo
+-- corrige el script antes de correrlo; aplicarlo se coordina aparte porque toca prod.
 --
 -- Columnas nuevas (todas NULL → no rompen filas/versiones existentes):
---   precision_score  — precision del modelo (0..1)
---   recall_score     — recall del modelo (0..1)
---   mean_ap          — mean Average Precision (mAP); métrica primaria de comparación
+--   precision_score  — precision del modelo (0..1), solo monitoreo
+--   recall_score     — recall del modelo (0..1), solo monitoreo
+--   mean_ap          — mean Average Precision (mAP), solo monitoreo — NO es gate de publicación
 --   metrics_json     — payload crudo de métricas de la iteración de Custom Vision (auditoría)
---   approved_by      — user_id que aprobó manualmente una versión con métricas peores
---   approved_at      — fecha de esa aprobación
 --
 -- NOTA: se usan nombres *_score porque PRECISION es palabra reservada en T-SQL.
--- NOTA: el ciclo de vida agrega valores de status nuevos ('AWAITING_APPROVAL', 'REJECTED')
---   sobre la columna status existente (varchar(20)); no requiere cambios de esquema.
 --
 -- Correr desde SSMS (o cliente SQL) como operación manual — NO ejecutar desde Node.
 -- Validar con:
 --   SELECT detection_model_id, category_id, model_version, status, is_active,
---          precision_score, recall_score, mean_ap, approved_by, approved_at
+--          precision_score, recall_score, mean_ap
 --   FROM RETSC_AI_DETECTION_MODELS ORDER BY category_id, model_version;
 
 USE [sqldb-rscope-prod];
@@ -31,9 +33,7 @@ ALTER TABLE dbo.RETSC_AI_DETECTION_MODELS
   ADD precision_score FLOAT          NULL,
       recall_score    FLOAT          NULL,
       mean_ap         FLOAT          NULL,
-      metrics_json    NVARCHAR(MAX)  NULL,
-      approved_by     INT            NULL,
-      approved_at     DATETIME       NULL;
+      metrics_json    NVARCHAR(MAX)  NULL;
 GO
 
 -- Índice de apoyo para listar versiones de una categoría ordenadas por versión.

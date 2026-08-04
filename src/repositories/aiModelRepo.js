@@ -9,9 +9,17 @@
 //   prediction_resource_id    VARCHAR(100)  NULL
 //   status                    VARCHAR(20)   NULL  — ciclo real (más largo que el original):
 //     PENDING → PROJECT_CREATED (8.1) → IMAGES_UPLOADED (8.2) → TRAINING → TRAINED | TRAINING_FAILED (8.3)
-//     → READY (activo/publicado, 8.4) — más AWAITING_APPROVAL | REJECTED (8.5, re-entrenamiento) y ERROR
-//     (fallo de provisioning inicial, no de training). TRAINED != READY: un modelo puede terminar de
-//     entrenar sin estar publicado/activo todavía.
+//     → PUBLISHED (activo/publicado, 8.4/cableado 2026-08-03 — renombrado desde READY para
+//     coincidir con el nombre de estado de la spec v1.4) y ERROR (fallo de provisioning
+//     inicial, no de training). TRAINED != PUBLISHED: un modelo puede terminar de entrenar sin
+//     estar publicado/activo todavía (p. ej. si la publicación real en Custom Vision falla por
+//     falta de un prediction_resource_id válido — ver modelTrainingService.js).
+//     RETIRADO 2026-08-03 (decisión de jefatura — ver docs/DIAGNOSTICO-spec-v1.4-vs-codigo.md):
+//     ya NO existen los estados AWAITING_APPROVAL/REJECTED ni la aprobación humana que los producía
+//     (setApproval() eliminado de este repo; approveVersion/rejectVersion eliminados de
+//     modelVersioningService.js). La spec v1.4 exige publicación 100% automática, sin gate de
+//     métricas ni aprobación manual — cableado en modelTrainingService.handleTrainingCompleted()
+//     y annotationSyncService.checkAndUpdateThreshold() (disparo automático por umbral, 4.3).
 //   trained_at                DATETIME      NULL
 //   created_at                DATETIME      NULL
 //   model_version             INT           NULL
@@ -127,7 +135,7 @@ const updateCustomVisionRefs = async (detectionModelId, { customvisionProjectId,
   return r.recordset[0] ?? null;
 };
 
-// Cambia el status del modelo (PENDING → TRAINING → READY, etc.).
+// Cambia el status del modelo (PENDING → TRAINING → PUBLISHED, etc.).
 const updateStatus = async (detectionModelId, status) => {
   const pool = await getPool();
   const r = await pool.request()
@@ -199,8 +207,10 @@ const saveMetrics = async (detectionModelId, { precisionScore, recallScore, mean
 };
 
 // Activa una versión y desactiva las demás de la misma categoría (rollback/activación).
-// NOTA: son dos UPDATEs secuenciales; para esta escala es suficiente. Si se requiriera
-// atomicidad estricta ante concurrencia, envolver en una transacción mssql.
+// status='PUBLISHED' (renombrado desde 'READY' 2026-08-03, cableado del flujo automático
+// spec v1.4 — ver nota de cabecera). NOTA: son dos UPDATEs secuenciales; para esta escala es
+// suficiente. Si se requiriera atomicidad estricta ante concurrencia, envolver en una
+// transacción mssql.
 const setActiveVersion = async (categoryId, detectionModelId) => {
   const pool = await getPool();
   await pool.request()
@@ -211,22 +221,51 @@ const setActiveVersion = async (categoryId, detectionModelId) => {
     .input('id', sql.Int, detectionModelId)
     .query(`
       UPDATE ${TABLE}
-      SET is_active = 1, status = 'READY'
+      SET is_active = 1, status = 'PUBLISHED'
       OUTPUT INSERTED.*
       WHERE detection_model_id = @id
     `);
   return r.recordset[0] ?? null;
 };
 
-// Registra quién y cuándo aprobó manualmente una versión (métricas peores).
-const setApproval = async (detectionModelId, adminId) => {
+// Cableado 2026-08-03 (flujo automático spec v1.4) — marca `trained_at` de forma
+// INDEPENDIENTE de `saveMetrics()`. Necesario porque `saveMetrics()` toca columnas de la
+// migración 006 (precision_score/recall_score/mean_ap/metrics_json), que sigue sin aplicarse
+// en la BD real (ver modelTrainingService.js) — si `saveMetrics()` falla por columna
+// inexistente, `trained_at` nunca avanzaría, y el conteo "+15 fotos desde el último
+// entrenamiento" (annotationSyncService.checkAndUpdateThreshold) quedaría roto (recontaría
+// siempre desde el mismo baseline viejo, re-disparando training en cada foto nueva). Esta
+// función se llama SIEMPRE que un training termina (Completed), tenga o no métricas
+// persistibles.
+const markTrained = async (detectionModelId) => {
   const pool = await getPool();
   const r = await pool.request()
-    .input('id',    sql.Int, detectionModelId)
-    .input('admin', sql.Int, adminId ?? null)
+    .input('id', sql.Int, detectionModelId)
     .query(`
       UPDATE ${TABLE}
-      SET approved_by = @admin, approved_at = GETDATE()
+      SET trained_at = GETDATE()
+      OUTPUT INSERTED.*
+      WHERE detection_model_id = @id
+    `);
+  return r.recordset[0] ?? null;
+};
+
+// Cableado 2026-08-03 — persiste `model_version`/`last_publish_name` tras una publicación
+// exitosa en Custom Vision. Separado de `setActiveVersion()` (que ya hace el swap de
+// is_active/status) porque esos dos campos son específicos de la spec v1.4 y no existían en
+// el ciclo de versioning manual retirado (que versionaba insertando filas nuevas en vez de
+// incrementar `model_version` en la misma fila — ver modelTrainingService.js para el porqué
+// de mantener una sola fila por categoría en el flujo automático).
+const markPublished = async (detectionModelId, { modelVersion, lastPublishName }) => {
+  const pool = await getPool();
+  const r = await pool.request()
+    .input('id',          sql.Int,         detectionModelId)
+    .input('version',     sql.Int,         modelVersion)
+    .input('publishName', sql.VarChar(100), lastPublishName)
+    .query(`
+      UPDATE ${TABLE}
+      SET model_version     = @version,
+          last_publish_name = @publishName
       OUTPUT INSERTED.*
       WHERE detection_model_id = @id
     `);
@@ -246,5 +285,7 @@ module.exports = {
   getMaxVersion,
   saveMetrics,
   setActiveVersion,
-  setApproval,
+  // Cableado 2026-08-03 (flujo automático spec v1.4)
+  markTrained,
+  markPublished,
 };
