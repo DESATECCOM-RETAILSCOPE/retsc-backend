@@ -39,6 +39,22 @@ const STATUS_DB_BY_API = {
   REJECTED:           'RECHAZADA',
 };
 
+// Los 4 valores reales de la columna. Se aceptan TAMBIÉN como filtro, además de
+// los alias en inglés de arriba: son los nombres que usa la guía de María y los
+// que muestra la UI, así que pedir por `status=EN_PROGRESO` es lo natural. El
+// mapa de compatibilidad se mantiene para no romper a quien ya usa los viejos.
+const PHOTO_STATUS = {
+  EN_PROGRESO:         'EN_PROGRESO',
+  LISTA_PARA_REVISION: 'LISTA_PARA_REVISION',
+  APROBADA:            'APROBADA',
+  RECHAZADA:           'RECHAZADA',
+};
+
+// Traduce cualquiera de los dos vocabularios al valor de la BD. Devuelve null si
+// el valor no es válido, para que el filtro se ignore en vez de romper.
+const resolveStatus = (status) =>
+  STATUS_DB_BY_API[status] ?? PHOTO_STATUS[status] ?? null;
+
 const findById = async (photoId) => {
   const pool = await getPool();
   const r = await pool.request()
@@ -116,8 +132,9 @@ const listPhotos = async ({ categoryId, canal, status } = {}) => {
     req.input('canalFilter', sql.VarChar(20), canal);
     whereExtra += ' AND p.canal = @canalFilter';
   }
-  if (status && STATUS_DB_BY_API[status]) {
-    req.input('statusFilter', sql.VarChar(30), STATUS_DB_BY_API[status]);
+  const statusDb = resolveStatus(status);
+  if (statusDb) {
+    req.input('statusFilter', sql.VarChar(30), statusDb);
     whereExtra += ' AND p.photo_status = @statusFilter';
   }
 
@@ -130,12 +147,18 @@ const listPhotos = async ({ categoryId, canal, status } = {}) => {
       COUNT(a.annotation_id)                              AS regionCount,
       ISNULL(MAX(CAST(a.is_validated AS INT)), 0)         AS is_validated,
       CASE WHEN p.photo_status = 'APROBADA' THEN 1 ELSE 0 END AS photo_approved,
+      -- Se expone ADEMÁS del photo_approved de compatibilidad: ese flag colapsa
+      -- RECHAZADA y EN_PROGRESO en el mismo 0, así que por sí solo no alcanza
+      -- para pintar los 4 estados de la guía ni para bloquear una foto aprobada.
+      p.photo_status,
+      p.uploaded_by_enterprise_id,
       p.created_at
     FROM ${TABLE} p
     LEFT JOIN RETSC_AI_TRAINING_ANNOTATIONS a ON a.photo_id = p.photo_id
     WHERE 1=1
     ${whereExtra}
-    GROUP BY p.photo_id, p.blob_path, p.canal, p.category_id, p.photo_status, p.created_at
+    GROUP BY p.photo_id, p.blob_path, p.canal, p.category_id, p.photo_status,
+             p.uploaded_by_enterprise_id, p.created_at
     ORDER BY p.created_at DESC
   `);
   return r.recordset;
@@ -163,6 +186,12 @@ const getPhotoWithRegions = async (photoId) => {
     blob_path:       photo.blob_path,
     canal:           photo.canal,
     dtc_category_id: photo.category_id,
+    // Estado real + notas: el frontend los necesita para el badge de 4 estados,
+    // para bloquear la edición de una foto aprobada y para mostrar el motivo del
+    // rechazo a quien la retoma (guía 3.3).
+    photo_status:    photo.photo_status,
+    photo_notes:     photo.photo_notes,
+    uploaded_by_enterprise_id: photo.uploaded_by_enterprise_id,
     regions: r.recordset.map(row => ({
       annotation_id: row.annotation_id,
       bbox_left:     row.bbox_left,
@@ -276,7 +305,60 @@ const updatePhotoNotes = async (photoId, photoNotes) => {
   return r.recordset[0] ?? null;
 };
 
+// "Completado" (sección 2.4 de la guía): quien anota declara que terminó y la foto
+// queda disponible para el revisor. NO aprueba nada — ése es el doble chequeo.
+const markComplete = async (photoId) => {
+  const pool = await getPool();
+  const r = await pool.request()
+    .input('photoId', sql.Int, photoId)
+    .query(`
+      UPDATE ${TABLE}
+      SET    photo_status = 'LISTA_PARA_REVISION'
+      OUTPUT INSERTED.*
+      WHERE  photo_id = @photoId
+    `);
+  return r.recordset[0] ?? null;
+};
+
+// RECHAZAR con motivo (sección 3.2).
+//
+// El motivo se AGREGA al final de photo_notes, nunca la sobrescribe: esa columna
+// lleva embebido el "sha256:<hash>" que usa findByHashAndCanal para deduplicar
+// por canal. Pisarla rompería el dedup en silencio — la misma foto se podría
+// volver a subir. Como el dedup busca con LIKE '%sha256:<hash>%', agregar texto
+// al final no lo afecta.
+//
+// La columna es varchar(250) y el texto que ya escribe el uploader ocupa ~210
+// caracteres, así que el motivo se recorta a lo que quede libre.
+const reject = async (photoId, reviewerId, motivo) => {
+  const actual = await findById(photoId);
+  if (!actual) return null;
+
+  const previo = actual.photo_notes ?? '';
+  const sufijo = ` | rechazo: ${String(motivo ?? '').trim()}`;
+  const notas  = (previo + sufijo).slice(0, 250);
+
+  const pool = await getPool();
+  const r = await pool.request()
+    .input('photoId',  sql.Int,          photoId)
+    .input('reviewer', sql.Int,          reviewerId ?? null)
+    .input('notas',    sql.VarChar(250), notas)
+    .query(`
+      UPDATE ${TABLE}
+      SET    photo_status = 'RECHAZADA',
+             photo_notes  = @notas,
+             reviewer_id  = @reviewer,
+             reviewed_at  = GETDATE()
+      OUTPUT INSERTED.*
+      WHERE  photo_id = @photoId
+    `);
+  return r.recordset[0] ?? null;
+};
+
 module.exports = {
+  PHOTO_STATUS,
+  markComplete,
+  reject,
   findById,
   findByHashAndCanal,
   insert,

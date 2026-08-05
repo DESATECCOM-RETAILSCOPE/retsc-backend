@@ -44,6 +44,7 @@ const uploadPhoto = async (req, res) => {
       dtcCategoryId,
       canal,
       uploadedBy: req.user.userId,
+      enterpriseId: req.user.enterpriseId ?? null,
     });
 
     return res.status(201).json({ success: true, ...result });

@@ -8,6 +8,23 @@ const annotationService     = require('../services/annotationService');
 const annotationRepo        = require('../repositories/annotationRepo');
 const trainingPhotoRepo     = require('../repositories/trainingPhotoRepo');
 const annotationSyncService = require('../services/annotationSyncService');
+const blobStorageService    = require('../services/blobStorageService');
+const path                  = require('path');
+
+// Container de las fotos de góndola. MISMO valor y default que
+// shelfPhotoUploadService.js — NO es AZURE_BLOB_CONTAINER (imágenes de producto)
+// ni AZURE_GLOBAL_TRAINING_CONTAINER (imágenes de SKU). Confundirlos hace que la
+// descarga busque en el container equivocado y devuelva 404 con el blob existiendo.
+const SHELF_CONTAINER = () =>
+  process.env.AZURE_GLOBAL_SHELF_CONTAINER || 'global-shelf-training';
+
+// Los blobs se suben con uploadToContainer sin blobHTTPHeaders en algunos casos,
+// así que Azure les pone application/octet-stream y el navegador no los renderiza
+// como imagen. Se deriva de la extensión.
+const CONTENT_TYPE_BY_EXT = {
+  '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+  '.png': 'image/png',  '.webp': 'image/webp', '.gif': 'image/gif',
+};
 
 // Duplicado deliberado de la misma lista en shelfPhotoUploadService.js /
 // annotationSyncService.js — no hay un módulo compartido de constantes de canal
@@ -179,4 +196,140 @@ const approvePhoto = async (req, res) => {
   }
 };
 
-module.exports = { approve, correct, reject, listByPhoto, readiness, listPhotos, getPhotoDetail, approvePhoto };
+// ─────────────────────────────────────────────────────────────────────────────
+// Modo ANNOTATE / REVIEW de la guía de María v1.4 (secciones 2 y 3)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// GET /api/annotations/photos/:photoId/image — devuelve los BYTES de la foto.
+//
+// Es un proxy, no una URL firmada (SAS), y es deliberado: el container es privado
+// y un SAS vencería a los 60 minutos, obligando a detectar la expiración y a
+// exponer otro endpoint sólo para refrescarlo — justo en medio de una sesión de
+// anotación. Proxiando, la imagen queda protegida por el authMiddleware que ya
+// existe, no vence nunca, y el container no se expone al navegador.
+//
+// El costo es que el tráfico de imágenes pasa por el API; para una herramienta
+// interna de anotación es irrelevante.
+const getPhotoImage = async (req, res) => {
+  try {
+    const photoId = parseId(req.params.photoId, 'Photo ID');
+
+    const photo = await trainingPhotoRepo.findById(photoId);
+    if (!photo || !photo.blob_path) {
+      return res.status(404).json({ success: false, message: `Foto ${photoId} no encontrada.` });
+    }
+
+    const buffer = await blobStorageService.downloadFromContainer({
+      containerName: SHELF_CONTAINER(),
+      blobPath: photo.blob_path,
+    });
+
+    const ext = path.extname(photo.blob_path).toLowerCase();
+    res.set('Content-Type', CONTENT_TYPE_BY_EXT[ext] || 'application/octet-stream');
+    // `private` porque la imagen va detrás de autenticación: no debe quedar en
+    // caches compartidas. El blob es inmutable una vez subido, así que una hora
+    // en la caché del navegador evita rebajarla en cada foto que se abre.
+    res.set('Cache-Control', 'private, max-age=3600');
+    return res.send(buffer);
+  } catch (err) {
+    // Blob borrado o path desfasado respecto de la fila: es 404, no un fallo del
+    // servidor. Se distingue para no disparar alertas de 500 por fotos que ya no
+    // están en el storage.
+    const notFound = err.statusCode === 404
+      || err.code === 'ENOENT'
+      || err.details?.errorCode === 'BlobNotFound';
+    if (notFound) {
+      return res.status(404).json({ success: false, message: 'La imagen de la foto no está en el almacenamiento.' });
+    }
+    console.error('[annotation] error bajando la imagen:', err.message);
+    return res.status(502).json({ success: false, message: 'No se pudo obtener la imagen del almacenamiento.' });
+  }
+};
+
+// POST /api/annotations/photos/:photoId/regions — crear una cajita (sección 2.3).
+//
+// Es la contraparte del DELETE /:id que ya existía: se podían borrar y corregir
+// cajitas, pero no crear ninguna desde la API.
+//
+// Del cuerpo sólo se toman las 4 coordenadas; la foto ya sabe su categoría, canal
+// y blob_path, y esos datos no se duplican en la cajita.
+const createRegion = async (req, res) => {
+  try {
+    const photoId = parseId(req.params.photoId, 'Photo ID');
+    const { bbox_left, bbox_top, bbox_width, bbox_height } = req.body ?? {};
+
+    // Mismo validador que usa `correct`: rango [0,1] y que la cajita no se salga
+    // del marco. Se valida en el servidor porque el cliente no es la última línea
+    // de defensa.
+    annotationService.validateBbox({ bbox_left, bbox_top, bbox_width, bbox_height });
+
+    const photo = await trainingPhotoRepo.findById(photoId);
+    if (!photo) {
+      return res.status(404).json({ success: false, message: `Foto ${photoId} no encontrada.` });
+    }
+
+    const created = await annotationRepo.insert({
+      photo_id:     photoId,
+      source:       'MANUAL',   // dibujada por una persona, no por el modelo
+      is_validated: 1,          // guía 2.3
+      bbox_left, bbox_top, bbox_width, bbox_height,
+    });
+
+    // Se devuelve la fila completa: el frontend necesita el annotation_id nuevo
+    // para poder mover o borrar la cajita recién dibujada sin recargar el detalle.
+    return res.status(201).json({ success: true, annotation: created });
+  } catch (err) {
+    return handleError(res, err);
+  }
+};
+
+// PATCH /api/annotations/photos/:photoId/complete — "Completado" (sección 2.4).
+const completePhoto = async (req, res) => {
+  try {
+    const photoId = parseId(req.params.photoId, 'Photo ID');
+
+    const photo = await trainingPhotoRepo.getPhotoWithRegions(photoId);
+    if (!photo) {
+      return res.status(404).json({ success: false, message: `Foto ${photoId} no encontrada.` });
+    }
+    // Mandar a revisión una foto sin cajitas le hace perder el tiempo al revisor.
+    if (!(photo.regions ?? []).some(r => r.bbox_left != null)) {
+      return res.status(409).json({
+        success: false,
+        message: 'La foto no tiene ninguna cajita dibujada: no se puede marcar como completada.',
+      });
+    }
+
+    const updated = await trainingPhotoRepo.markComplete(photoId);
+    return res.json({ success: true, photo: updated });
+  } catch (err) {
+    return handleError(res, err);
+  }
+};
+
+// PATCH /api/annotations/photos/:photoId/reject — RECHAZAR con motivo (3.2).
+// El motivo es obligatorio: la guía (3.3) exige que quien retome la foto sepa qué
+// corregir. reviewerId sale SIEMPRE de req.user, nunca del body.
+const rejectPhotoCtrl = async (req, res) => {
+  try {
+    const photoId = parseId(req.params.photoId, 'Photo ID');
+    const motivo  = (req.body?.motivo ?? '').trim();
+
+    if (!motivo) {
+      return res.status(400).json({ success: false, message: 'El motivo del rechazo es obligatorio.' });
+    }
+
+    const updated = await trainingPhotoRepo.reject(photoId, req.user?.userId, motivo);
+    if (!updated) {
+      return res.status(404).json({ success: false, message: `Foto ${photoId} no encontrada.` });
+    }
+    return res.json({ success: true, photo: updated });
+  } catch (err) {
+    return handleError(res, err);
+  }
+};
+
+module.exports = {
+  approve, correct, reject, listByPhoto, readiness, listPhotos, getPhotoDetail, approvePhoto,
+  getPhotoImage, createRegion, completePhoto, rejectPhotoCtrl,
+};

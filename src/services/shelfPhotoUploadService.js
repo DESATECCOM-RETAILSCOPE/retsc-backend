@@ -80,7 +80,7 @@ function resolveTagId(canal) {
 // @param {string} canal           - 'OMT' | 'DTT' | 'CONVENIENCE'
 // @param {number} uploadedBy      - req.user.userId (auditoría)
 // @returns {object}               - Datos de la subida para la respuesta HTTP
-async function uploadShelfPhoto({ buffer, dtcCategoryId, canal, uploadedBy }) {
+async function uploadShelfPhoto({ buffer, dtcCategoryId, canal, uploadedBy, enterpriseId = null }) {
 
   // ── Etapa 1: Validaciones de entrada ────────────────────────────────────────
 
@@ -244,6 +244,10 @@ async function uploadShelfPhoto({ buffer, dtcCategoryId, canal, uploadedBy }) {
   const photoNotes = `blob:${blobPath} | sha256:${hash} | cvImageId:${cvImageId}`;
   const trainingPhoto = await trainingPhotoRepo.insert({
     uploaded_by_user_id: uploadedBy,
+    // De qué contribuyente vino la foto. Es lo que habilita el aislamiento por
+    // empresa del modo REVIEW (guía 3.1): que cada admin revise sólo las suyas.
+    // Sin esto la columna queda en NULL y ese filtro no puede funcionar.
+    uploaded_by_enterprise_id: enterpriseId ?? null,
     category_id:         dtcId,
     canal,
     blob_path:            blobPath,
