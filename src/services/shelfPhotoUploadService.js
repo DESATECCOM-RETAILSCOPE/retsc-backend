@@ -173,7 +173,7 @@ async function uploadShelfPhoto({ buffer, dtcCategoryId, canal, uploadedBy, ente
     const alreadyInThisChannel = await trainingPhotoRepo.findByHashAndCanal(hash, canal);
     if (alreadyInThisChannel) {
       throw Object.assign(
-        new Error(`Imagen duplicada para el canal ${canal}. Ya existe con photo_id=${alreadyInThisChannel.photo_id}.`),
+        new Error(`Esta foto ya fue subida antes para el canal ${canal}. Si es una foto distinta, verificá que no sea exactamente el mismo archivo (mismo contenido de imagen).`),
         { statusCode: 409, errorCode: 'ERR_DUPLICATE_IMAGE', existingPhotoId: alreadyInThisChannel.photo_id }
       );
     }
