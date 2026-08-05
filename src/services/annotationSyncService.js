@@ -7,8 +7,15 @@
 //   syncApprovedPhoto(photoId, { clienteAjustoCajitas })
 //     — Llamar INMEDIATAMENTE DESPUÉS de que se apruebe la foto (photo_status='APROBADA' en
 //       RETSC_AI_TRAINING_PHOTOS — ver FIX 2026-07-26 más abajo).
-//     — Si clienteAjustoCajitas === false, no se toca Custom Vision (las regiones ya estaban
-//       sincronizadas de una corrección previa); solo se verifica el umbral de entrenamiento.
+//     — Si clienteAjustoCajitas === false Y al menos una cajita de la foto ya tiene
+//       cv_region_id (ya se sincronizó antes): no se toca Custom Vision, solo se verifica el
+//       umbral. clienteAjustoCajitas=false solo tiene sentido como "no re-subas lo que ya
+//       está" — asume que había algo que preservar.
+//     — Si clienteAjustoCajitas === false pero NINGUNA cajita tiene cv_region_id (primera
+//       aprobación, foto nunca sincronizada): el flag se IGNORA y se sincroniza igual — de lo
+//       contrario la foto queda cv_sync_status='PENDING' para siempre, sin error ni log
+//       (bug encontrado 2026-08-05: photo_id=1 quedó así, 73 cajitas nunca sincronizadas,
+//       ver docs/DIAGNOSTICO-spec-v1.4-vs-codigo.md).
 //     — Si clienteAjustoCajitas es true (o no viene), se resincronizan todas las cajitas
 //       actuales de la foto contra Custom Vision antes de verificar el umbral.
 //
@@ -51,10 +58,17 @@ const trainingPhotoRepo   = require('../repositories/trainingPhotoRepo');
 const aiModelRepo         = require('../repositories/aiModelRepo');
 const customVisionService = require('./customVisionService');
 const modelTrainingService = require('./modelTrainingService');
+const blobStorageService  = require('./blobStorageService');
+const { hashBuffer }       = require('../utils/imageHasher');
 
 const CANALES = ['OMT', 'DTT', 'CONVENIENCE'];
 
 const THRESHOLD = () => parseInt(process.env.SHELF_TRAINING_THRESHOLD || '15', 10);
+
+// Mismo container que usa shelfPhotoUploadService.js — necesario acá para el auto-registro
+// defensivo (Opción C, ver autoRegisterImage()).
+const SHELF_CONTAINER = () =>
+  process.env.AZURE_GLOBAL_SHELF_CONTAINER || 'global-shelf-training';
 
 // Estados de RETSC_AI_DETECTION_MODELS en los que un training ya está en curso — no
 // corresponde re-evaluar el umbral mientras tanto (evita llamadas repetidas a
@@ -123,6 +137,56 @@ function extractCvImageId(photoNotes) {
   if (!photoNotes) return null;
   const match = /cvImageId:(\S+)/.exec(photoNotes);
   return match ? match[1] : null;
+}
+
+// Opción C (auto-registro defensivo, 2026-08-05) — mitigación mientras el equipo de anotación
+// (#42, Arthur) siga insertando fotos directo a Blob/SQL sin pasar por
+// shelfPhotoUploadService.uploadShelfPhoto (desconexión estructural confirmada — ver
+// "Desconexión con #42" en CLAUDE.md/docs). Cuando una foto llega al sync sin cvImageId en
+// photo_notes, en vez de fallar acá mismo se la registra en Custom Vision: descarga el blob,
+// la sube, y persiste photo_notes con el MISMO formato que arma uploadShelfPhoto (Etapa 7) —
+// no se inventa un formato distinto — para que un sync futuro de la misma foto no tenga que
+// volver a auto-registrar (idempotente por diseño: solo se llama cuando extractCvImageId()
+// no encontró nada).
+//
+// Solo es posible si la foto tiene blob_path Y el blob existe de verdad en
+// AZURE_GLOBAL_SHELF_CONTAINER — si no, se deja que la excepción se propague al catch de
+// syncRegionsForPhoto (mismo mecanismo de siempre: marca cv_sync_status='ERROR' con mensaje
+// claro, no rompe el resto de la corrida).
+//
+// NO se llama si Custom Vision no está configurado / sin proyecto — ese caso ya corta antes,
+// en el guard de isConfigured()/projectId de syncRegionsForPhoto, así que acá siempre hay un
+// projectId válido y CV configurado.
+//
+// ⚠ Este auto-registro es una MITIGACIÓN, no la corrección de fondo — mientras #42 no suba
+// fotos vía POST /api/shelf-photos/upload, cada una de sus fotos pasará por acá con el
+// warning de abajo. La corrección real (Opción A) es que #42 use ese endpoint.
+async function autoRegisterImage(photo, projectId, tagId) {
+  if (!photo.blob_path) {
+    throw new Error(
+      `photo_id=${photo.photo_id} no tiene cvImageId en photo_notes NI blob_path — ` +
+      `no se puede auto-registrar en Custom Vision.`
+    );
+  }
+
+  const buffer = await blobStorageService.downloadFromContainer({
+    containerName: SHELF_CONTAINER(),
+    blobPath: photo.blob_path,
+  });
+
+  const hash = await hashBuffer(buffer);
+  const { cvImageId } = await customVisionService.createImageFromData(projectId, buffer, tagId);
+
+  const photoNotes = `blob:${photo.blob_path} | sha256:${hash} | cvImageId:${cvImageId}`;
+  await trainingPhotoRepo.updatePhotoNotes(photo.photo_id, photoNotes);
+
+  console.warn(
+    `[annotationSync] photo_id=${photo.photo_id} entró SIN cvImageId (no pasó por ` +
+    `uploadShelfPhoto — ver desconexión #42), auto-registrada en Custom Vision con ` +
+    `cvImageId=${cvImageId} — corrección de fondo pendiente (Opción A, ver CLAUDE.md).`
+  );
+
+  return cvImageId;
 }
 
 // Marca sincronizadas las cajitas dadas (cv_region_id por cajita) y el estado de sync a
@@ -204,11 +268,14 @@ async function syncRegionsForPhoto(photo, rows) {
     // se deja por si en el futuro un cv_region_id "huérfano" (sin fila SYNCED) llegara a colarse.
     await deleteOldRegions(projectId, pendingSync);
 
-    const cvImageId = extractCvImageId(photo.photo_notes);
-    if (!cvImageId) {
-      throw new Error(`No se encontró cvImageId en photo_notes para photo_id=${photo.photo_id}`);
-    }
     const tagId = await resolveTagId(projectId, photo.canal);
+
+    // Auto-registro defensivo (Opción C) si la foto llegó sin cvImageId — ver
+    // autoRegisterImage() para el porqué (desconexión con #42).
+    let cvImageId = extractCvImageId(photo.photo_notes);
+    if (!cvImageId) {
+      cvImageId = await autoRegisterImage(photo, projectId, tagId);
+    }
 
     const regionsToCreate = pendingSync.filter(r =>
       r.bbox_left != null && r.bbox_top != null && r.bbox_width != null && r.bbox_height != null
@@ -354,14 +421,28 @@ async function syncApprovedPhoto(photoId, { clienteAjustoCajitas } = {}) {
     return { synced: false, reason: 'NO_ANNOTATIONS' };
   }
 
+  // clienteAjustoCajitas=false solo es honrado si HAY algo sincronizado que preservar — ver
+  // NOTA de cabecera (bug 2026-08-05: el flag se aceptaba ciegamente y una primera aprobación
+  // con clienteAjustoCajitas=false dejaba la foto en cv_sync_status='PENDING' para siempre,
+  // sin ningún log). splitByCvRegionId ya existe y la usa syncRegionsForPhoto — se reusa acá,
+  // no se reimplementa.
+  let didSync = false;
   if (clienteAjustoCajitas === false) {
-    console.log(`[annotationSync] photo_id=${photoId}: cliente no ajustó cajitas, ya estaba sincronizado — se omite llamada a Custom Vision`);
+    const { alreadySynced } = splitByCvRegionId(rows);
+    if (alreadySynced.length > 0) {
+      console.log(`[annotationSync] photo_id=${photoId}: sync omitido — clienteAjustoCajitas=false y ${alreadySynced.length}/${rows.length} cajita(s) ya sincronizada(s) con Custom Vision`);
+    } else {
+      console.warn(`[annotationSync] photo_id=${photoId}: clienteAjustoCajitas=false pero NINGUNA cajita tiene cv_region_id (nunca se sincronizó) — se ignora el flag y se sincroniza igual`);
+      await syncRegionsForPhoto(photo, rows);
+      didSync = true;
+    }
   } else {
     await syncRegionsForPhoto(photo, rows);
+    didSync = true;
   }
 
   await checkAndUpdateThreshold(photo.category_id);
-  return { synced: clienteAjustoCajitas !== false };
+  return { synced: didSync };
 }
 
 // Punto de entrada tras rechazar la foto. Conserva el registro en SQL.

@@ -256,6 +256,26 @@ const updateCvSync = async (photoId, { syncStatus, syncError = null } = {}) => {
   return r.recordset[0] ?? null;
 };
 
+// Actualiza SOLO photo_notes — usado por el auto-registro defensivo de
+// annotationSyncService.js (Opción C, 2026-08-05) cuando una foto llega al sync sin
+// cvImageId embebido (no pasó por shelfPhotoUploadService.uploadShelfPhoto — ver
+// "Desconexión con #42" en CLAUDE.md). Persiste el cvImageId recién obtenido con el MISMO
+// formato que arma uploadShelfPhoto, para que un sync futuro no tenga que auto-registrar de
+// nuevo.
+const updatePhotoNotes = async (photoId, photoNotes) => {
+  const pool = await getPool();
+  const r = await pool.request()
+    .input('photoId',    sql.Int,          photoId)
+    .input('photoNotes', sql.VarChar(250), photoNotes)
+    .query(`
+      UPDATE ${TABLE}
+      SET    photo_notes = @photoNotes
+      OUTPUT INSERTED.*
+      WHERE  photo_id = @photoId
+    `);
+  return r.recordset[0] ?? null;
+};
+
 module.exports = {
   findById,
   findByHashAndCanal,
@@ -266,4 +286,5 @@ module.exports = {
   approvePhoto,
   countValidatedApprovedByCategoryChannel,
   updateCvSync,
+  updatePhotoNotes,
 };
