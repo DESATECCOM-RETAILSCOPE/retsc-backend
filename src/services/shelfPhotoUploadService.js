@@ -6,7 +6,8 @@
 //   2b. Caption confidence — Azure AI Vision (stub permisivo hasta que haya credenciales)
 //   3.  Validación de contenido ("¿es una góndola?") — Azure AI Vision (stub permisivo)
 //   4.  Deduplicación por hash SHA-256 (scope global: ENTERPRISE_ID IS NULL)
-//   5.  Upload a Blob Storage + insert en RETSC_EX_SHELFPHOTO (hash/calidad, dedup Etapa 4)
+//   5.  Upload a Blob Storage SIEMPRE (un archivo por canal, FIX 2026-08-05) + insert en
+//       RETSC_EX_SHELFPHOTO solo si el hash es nuevo (evita violar su índice único)
 //   6.  Registro en Custom Vision SIN regiones → cvImageId
 //   7.  Insert en RETSC_AI_TRAINING_PHOTOS (FIX 2026-07-26 — ver nota más abajo)
 //   8.  Verificación de umbral por canal (no bloquea la subida)
@@ -161,8 +162,9 @@ async function uploadShelfPhoto({ buffer, dtcCategoryId, canal, uploadedBy, ente
   //   1. ¿Existe ALGUNA fila en RETSC_EX_SHELFPHOTO con este hash? (bytes ya vistos)
   //   2. Si existe, ¿ya hay una fila en RETSC_AI_TRAINING_PHOTOS con este hash PARA
   //      ESTE canal? → 409 duplicado real (mismo canal, misma imagen).
-  //   3. Si existe el hash pero NO para este canal → NO se re-sube el blob (ver nota
-  //      abajo sobre el índice único) y se reutiliza la URL ya existente.
+  //   3. Si existe el hash pero NO para este canal → se sube igual un blob nuevo bajo la
+  //      carpeta de ESTE canal (FIX 2026-08-05, ver Etapa 5) — solo se evita el segundo
+  //      INSERT en RETSC_EX_SHELFPHOTO, que violaría su índice único por (hash, NULL).
   const hash = quality.hash; // ya calculado por validateQualityMetrics
 
   const existingHash = await shelfPhotoRepo.findByHashGlobal(hash);
@@ -175,40 +177,40 @@ async function uploadShelfPhoto({ buffer, dtcCategoryId, canal, uploadedBy, ente
         { statusCode: 409, errorCode: 'ERR_DUPLICATE_IMAGE', existingPhotoId: alreadyInThisChannel.photo_id }
       );
     }
-    console.log(`[shelfPhoto] hash ya visto (Photo_id=${existingHash.Photo_id}) pero no para canal=${canal} — se reutiliza el blob existente, no se re-sube`);
+    console.log(`[shelfPhoto] hash ya visto (Photo_id=${existingHash.Photo_id}) pero no para canal=${canal} — se sube igual un blob nuevo para este canal (Etapa 5)`);
   }
 
-  // ── Etapa 5: Upload a Blob Storage + insert en RETSC_EX_SHELFPHOTO ──────────
-  // (o reutilización si el hash ya existía para OTRO canal — ver Etapa 4)
+  // ── Etapa 5: Upload a Blob Storage (SIEMPRE) + insert en RETSC_EX_SHELFPHOTO (condicional) ──
+  // FIX 2026-08-05 (decisión de producto, María): el blob se sube SIEMPRE a la carpeta del
+  // canal ACTUAL, exista o no el hash en otro canal (un archivo por canal). Antes, si el hash
+  // ya existía, se saltaba el upload y se copiaba el blob_path del canal viejo → dos bugs:
+  // (a) fila en BD sin blob, y (b) canal=OMT con blob_path bajo /dtt/. Ahora solo el registro
+  // de dedup por hash en RETSC_EX_SHELFPHOTO es condicional: su índice único filtrado
+  // (ENTERPRISE_ID, image_hash) trata dos NULL como iguales, así que un segundo INSERT con el
+  // mismo hash violaría la constraint. Subir el mismo buffer a un blob_path DISTINTO (otra
+  // carpeta de canal) no viola nada. Efecto deseado: aunque RETSC_EX_SHELFPHOTO tenga hashes
+  // viejos de pruebas, la carga vuelve a llegar al contenedor sin limpiar esa tabla a mano.
+  const categoriaSlug = normalizeName(category.Category_dsc);
+  const filename      = generateFilename({ categoriaSlug, canal });
+  const blobPath      = `dtc-${categoriaSlug}/${canal.toLowerCase()}/${filename}`;
 
-  let blobUrl, blobPath;
+  const uploadResult = await uploadToContainer({
+    containerName: SHELF_CONTAINER(),
+    blobPath,
+    buffer,
+    contentType: 'image/jpeg',
+  });
+  const blobUrl = uploadResult.url;
+  console.log(`[shelfPhoto] blob subido — path=${blobPath} (mode=${uploadResult.mode})`);
 
-  if (existingHash) {
-    // VERIFICADO EMPÍRICAMENTE (2026-07-26) contra la BD real: el índice único filtrado
-    // UX_RETSC_EX_SHELFPHOTO_enterprise_hash es (ENTERPRISE_ID, image_hash) — SQL Server
-    // trata dos NULLs como iguales dentro de un índice único, así que un segundo INSERT
-    // con el mismo hash y ENTERPRISE_ID=NULL (todas las fotos de góndola son globales)
-    // viola la constraint y tira "Cannot insert duplicate key row". Por eso NO se
-    // vuelve a insertar en RETSC_EX_SHELFPHOTO acá — se reutilizan los bytes/URL que ya
-    // están subidos, y se extrae el blobPath relativo de la URL ya guardada (mismo
-    // patrón que usa skuImageController.validateImageQuality para lo mismo).
-    blobUrl  = existingHash.URL_blob;
-    blobPath = blobUrl.split(`/${SHELF_CONTAINER()}/`)[1] || blobUrl;
-  } else {
-    const categoriaSlug = normalizeName(category.Category_dsc);
-    const filename       = generateFilename({ categoriaSlug, canal });
-    blobPath = `dtc-${categoriaSlug}/${canal.toLowerCase()}/${filename}`;
+  if (uploadResult.mode !== 'azure') {
+    console.warn(
+      `[shelfPhoto] ⚠ uploadToContainer corrió en mode='${uploadResult.mode}', NO 'azure'. ` +
+      `El blob NO llegó al contenedor de Azure. Revisar BLOB_STORAGE_MODE / connection string en Railway.`
+    );
+  }
 
-    const uploadResult = await uploadToContainer({
-      containerName: SHELF_CONTAINER(),
-      blobPath,
-      buffer,
-      contentType: 'image/jpeg',
-    });
-    blobUrl = uploadResult.url;
-
-    console.log(`[shelfPhoto] blob subido — path=${blobPath}`);
-
+  if (!existingHash) {
     await shelfPhotoRepo.insert({
       enterprise_id:      null,            // foto global, sin enterprise
       category_id:        dtcId,
@@ -222,6 +224,11 @@ async function uploadShelfPhoto({ buffer, dtcCategoryId, canal, uploadedBy, ente
       blur_score:         quality.metrics.sharpness,
       brightness:         quality.metrics.brightness,
     });
+  } else {
+    console.log(
+      `[shelfPhoto] hash ya visto (Photo_id=${existingHash.Photo_id}) — no se re-inserta en ` +
+      `RETSC_EX_SHELFPHOTO (dedup por hash), pero el blob del canal ${canal} sí quedó subido en ${blobPath}`
+    );
   }
 
   // ── Etapa 6: Registro en Custom Vision SIN regiones ──────────────────────────
@@ -276,6 +283,7 @@ async function uploadShelfPhoto({ buffer, dtcCategoryId, canal, uploadedBy, ente
     photoId: trainingPhotoId,
     blobPath,
     blobUrl,
+    blobMode: uploadResult.mode,
     cvImageId,
     canal,
     dtcCategoryId: dtcId,
