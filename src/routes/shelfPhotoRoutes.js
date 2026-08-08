@@ -17,6 +17,16 @@ const UPLOAD_ROLES = (process.env.SHELF_UPLOAD_ROLES || 'ADMIN,ADMIN_DTC')
 
 const canUpload = requireRole(...UPLOAD_ROLES);
 
+// Roles que pueden subir fotos de VISITA (Pasos 1-2, guía v1.9) — distinto de
+// SHELF_UPLOAD_ROLES de arriba (ese es para la carga de entrenamiento por un Admin).
+// Mismo default que visitRoutes.js (VISIT_ROLES).
+const VISIT_UPLOAD_ROLES = (process.env.VISIT_ROLES || 'AUDITOR CAMPO,EJECUTIVO CAMPO,ADMIN,ADMIN_DTC')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+const canUploadVisitPhoto = requireRole(...VISIT_UPLOAD_ROLES);
+
 const upload = multer({
   dest: 'uploads-temp/',
   limits: {
@@ -60,5 +70,18 @@ router.post('/upload',
   multerErrorHandler,
   c.uploadPhoto,
 );
+
+// POST /api/shelf-photos/visit — Pasos 1-2 de la guía "Fotos de Visita" v1.9: foto de
+// visita real (ya validada por el mobile), amarrada a un Visit_id/enterprise/PDV concretos.
+router.post('/visit',
+  canUploadVisitPhoto,
+  upload.single('photo'),
+  multerErrorHandler,
+  c.uploadVisitPhoto,
+);
+
+// GET /api/shelf-photos/unidentified — sección 8.4: productos no identificados para el
+// dashboard web. Cualquier autenticado (el scoping por enterprise vive en el controller).
+router.get('/unidentified', c.listUnidentified);
 
 module.exports = router;

@@ -81,4 +81,21 @@ const findByHashGlobal = async (hash) => {
   return r.recordset[0] ?? null;
 };
 
-module.exports = { findByHash, findByHashGlobal, insert };
+// Categorías distintas cubiertas por las fotos de una visita (guía "Fotos de Visita" v1.9,
+// sección 1, callout Paso 0: "una visita puede cubrir varias categorías... bajo el mismo
+// Visit_id"). Usado por visitResultsService (Paso 6) para saber contra cuántas categorías
+// hay que calcular los faltantes de surtido (sección 8.2 — la consulta de assortmentRepo
+// es por una sola categoría a la vez).
+const listCategoryIdsByVisit = async (visitId) => {
+  const pool = await getPool();
+  const r = await pool.request()
+    .input('visitId', sql.Int, visitId)
+    .query(`
+      SELECT DISTINCT CATEGORY_ID
+      FROM ${TABLE}
+      WHERE visit_id = @visitId AND CATEGORY_ID IS NOT NULL
+    `);
+  return r.recordset.map(row => row.CATEGORY_ID);
+};
+
+module.exports = { findByHash, findByHashGlobal, insert, listCategoryIdsByVisit };

@@ -163,7 +163,9 @@ Tres menús **web**: `ADMIN_DTC`, `ADMIN`, `GERENCIA`. `EJECUTIVO CAMPO` y `AUDI
 - **SKUs globales** (`ADMIN_DTC`) → `GET /api/skus/global`
 - **Productos** (`ADMIN_DTC`) → `GET /api/products/global` — catálogo global derivado de `RETSC_OP_SKUS` (agrupado por `Product_dsc` + `detection_category_id`), **no** de una tabla `RETSC_OP_PRODUCTS` (eliminada, commit `b775f86`); distinto de "SKUs globales", que lista una fila por EAN sin agrupar. Ver `PRODUCT_GROUP_KEY_EXPR` en `skuRepo.js` para el criterio de agrupación y por qué no hay una FK que lo dicte.
 
-Todo lo demás del menú se resolvió con endpoints que ya existían. Explícitamente **fuera de alcance** (sin tabla/datos en la BD para soportarlo, implementado como "Pronto" en el frontend sin backend): Tiendas activas, Planogramas (no hay tabla de retailers — `RETSC_EX_SHELFPHOTO.Retailer_id` es solo una columna suelta sin catálogo detrás), y todo el bloque operativo de `GERENCIA` (Visitas, KPIs de cumplimiento, Faltantes detectados, Reportes por tienda/producto/ejecutivo, Ejecutivos de campo). No inventar tablas/migraciones/endpoints para esto sin que el equipo lo pida explícitamente.
+Todo lo demás del menú se resolvió con endpoints que ya existían. Explícitamente **fuera de alcance** (sin tabla/datos en la BD para soportarlo, implementado como "Pronto" en el frontend sin backend): Tiendas activas, Planogramas, y el resto del bloque operativo de `GERENCIA` (KPIs de cumplimiento, Reportes por tienda/producto/ejecutivo, Ejecutivos de campo). No inventar tablas/migraciones/endpoints para esto sin que el equipo lo pida explícitamente.
+
+⚠ **Actualización (guía "Fotos de Visita" v1.9, María Royo, julio 2026):** "Visitas" y "Faltantes detectados" — listados arriba como fuera de alcance en la auditoría 2026-07-25 — dejaron de estarlo: la guía es el pedido explícito del equipo que esa nota pedía antes de tocarlos. Ver la sección "Visit-based shelf photo pipeline" más abajo para el flujo completo implementado a partir de esa guía. Esa misma nota decía "no hay tabla de retailers — `RETSC_EX_SHELFPHOTO.Retailer_id` es solo una columna suelta sin catálogo detrás" — la guía v1.9 da por hecho lo contrario (asume `RETSC_OP_RETAILER.Canal` ya resuelto). Esta discrepancia **no se resolvió unilateralmente**: no se creó `RETSC_OP_RETAILER` en la migración 008 — ver su header y `src/repositories/retailerRepo.js` para el porqué y cómo se degrada si la tabla no existe de verdad.
 
 ### Shelf photo annotation & model training pipeline (Issues 3.1.1 follow-on, 8.5, 42)
 
@@ -274,6 +276,10 @@ Each file in `src/repositories/` maps to one SQL table:
 | `jobRepo.js` | `RETSC_LOG_JOBS` |
 | `shelfPhotoRepo.js` | `RETSC_EX_SHELFPHOTO` |
 | `annotationRepo.js` | `RETSC_AI_TRAINING_ANNOTATIONS` |
+| `visitRepo.js` | `RETSC_EX_VISIT` (new, migration 008 — guía v1.9) |
+| `shelfPhotoDetectionRepo.js` | `RETSC_EX_SHELFPHOTO_DETECTION` (new, migration 008) |
+| `assortmentRepo.js` | `RETSC_OP_ASSORTMENT` (new, migration 008) |
+| `retailerRepo.js` | `RETSC_OP_RETAILER` (existence unconfirmed — see visit pipeline section) |
 
 `userEnterpriseRepo.js` gained `findAllGlobal()` (2026-07-25, F4 menu) — a single JOIN across `RETSC_OP_USRSXENTERP` + `RETSC_OP_USERS` + `RETSC_OP_ROLES` + `RETSC_OP_ENTERPRISE`, used by `userService.listAllGlobal()` (`GET /api/users/global`). Deliberately different from `listByEnterprise`'s N+1 pattern (a `findById` for the user and another for the role per relation) — at global/cross-enterprise scale that N+1 gets expensive fast, and the JOIN's fixed shape (user + role + enterprise, no per-row conditional logic) doesn't need the loop. `listByEnterprise` itself was left as-is (out of scope for this change).
 
@@ -338,8 +344,10 @@ Forgot password flow: `POST /api/auth/forgot-password` accepts `{ identifier }` 
 /api/enterprises/me/enterprise-categories    authMiddleware   (enterpriseCommercialCategoryRoutes.js)
 /api/annotations                  authMiddleware  + requireRole(ANNOTATION_VALIDATOR_ROLES) inline on approve/correct/reject AND on the /photos review-queue routes (added 2026-07-25, F4 menu) — GET /photo/:photoId (singular, older route) stays open to any authenticated user
 /api/models                        authMiddleware  + requireRole(MODEL_MANAGER_ROLES) inline on all routes, including the new GET / (F4 menu, 2026-07-25)
-/api/shelf-photos                  authMiddleware  + requireRole(SHELF_UPLOAD_ROLES) inline on upload
+/api/shelf-photos                  authMiddleware  + requireRole(SHELF_UPLOAD_ROLES) inline on /upload, requireRole(VISIT_ROLES) inline on /visit; GET /unidentified open to any authenticated user (scoped by enterprise in the controller)
 /api/training                      authMiddleware  + requireRole(TRAINING_ADMIN_ROLES) inline on all routes
+/api/visits                        authMiddleware  + requireRole(VISIT_ROLES) inline on all routes (guía v1.9)
+/api/sessions                      authMiddleware  — no additional role gate; enterprise scoping enforced in sessionsController.js (both mobile and web/admin roles need to read visit results)
 ```
 
 `enterpriseCommercialCategoryRoutes.js` is distinct from `enterpriseCategoryRoutes.js` — it exposes `GET /api/enterprises/me/enterprise-categories` (commercial categories) and `GET /api/enterprises/me/enterprise-categories/smart` (only `is_smart_dtc=1` categories, used to populate SKU-upload/shelf-photo-upload dropdowns), both handled by `categoryController.js` (no separate controller file).
@@ -414,6 +422,12 @@ Forgot password flow: `POST /api/auth/forgot-password` accepts `{ identifier }` 
 | `POST /api/models/:modelId/reject` | Bearer + `MODEL_MANAGER_ROLES` | Reject a version in `AWAITING_APPROVAL`; previous version stays active |
 | `POST /api/shelf-photos/upload` | Bearer + `SHELF_UPLOAD_ROLES` | 8-stage quality-gated shelf-photo ingestion (see below) |
 | `POST /api/training/models/:categoryId/train` | Bearer + `TRAINING_ADMIN_ROLES` | Dispara entrenamiento en Custom Vision (202, fire-and-forget); requiere `status='IMAGES_UPLOADED'` |
+| `POST /api/visits` | Bearer + `VISIT_ROLES` | Abre una visita (guía v1.9, Paso 0); `Enterprise_id` sale del JWT |
+| `GET /api/visits/:id` | Bearer + `VISIT_ROLES` | Detalle de una visita |
+| `PATCH /api/visits/:id/close` | Bearer + `VISIT_ROLES` | Cierra una visita; solo el usuario dueño (o admin) |
+| `POST /api/shelf-photos/visit` | Bearer + `VISIT_ROLES` | Sube una foto de VISITA real (Pasos 1-2, guía v1.9); dispara detección en background |
+| `GET /api/shelf-photos/unidentified` | Bearer | Productos detectados sin identificar, para el dashboard web (guía v1.9 §8.4); scoped por enterprise |
+| `GET /api/sessions/:id/results` | Bearer | Resultados de una visita (guía v1.9, Paso 6): share de góndola + faltantes + sin_identificar; `:id` = Visit_id |
 
 ### Enterprise registration
 
@@ -474,7 +488,104 @@ Shelf photos ("góndola" photos) are **global** training data for the shelf-dete
 7. **Custom Vision registration (no regions yet)** — looks up the category's `customvision_project_id` via `aiModelRepo`, calls `customVisionService.createImageFromData()` (real upload, implemented 2026-07-19) to get a real `cvImageId`, then inserts an `RETSC_AI_TRAINING_ANNOTATIONS` row with `is_validated=0`, `source='ADMIN_UPLOAD'`, bboxes NULL (filled in later by the annotation-review flow below).
 8. **Threshold check** (non-blocking) — if validated+approved annotation count for that category/canal reaches `SHELF_TRAINING_THRESHOLD`, the model's `status` flips to `IMAGES_UPLOADED`.
 
-`shelfPhotoQualityService.assessPhoto()` (a per-enterprise dedup variant, documented in its own file header as the intended entry point) is **dead code** — only the global-scope `validateQualityMetrics()` path above is actually wired to the controller.
+`shelfPhotoQualityService.assessPhoto()` (a per-enterprise dedup variant, documented in its own file header as the intended entry point) is **dead code** — only the global-scope `validateQualityMetrics()` path above is actually wired to the controller. **This stays dead code even after the visit pipeline below** — that flow deliberately does *not* call `assessPhoto()` either (see its own section for why).
+
+### Visit-based shelf photo pipeline (`/api/visits`, `/api/shelf-photos/visit`, `/api/sessions`, guía "Fotos de Visita" v1.9 — María Royo, julio 2026)
+
+Production flow for the mobile app (auditor/manager in-store), entirely distinct from the training pipeline above: a real field visit, tied to an `Enterprise_id`/PDV/user, producing detections that get matched to actual SKUs and rolled up into a mobile results screen. None of this existed before this guide (confirmed by grepping the whole repo for `visit_id`/`SHELFPHOTO_DETECTION`/`buscarSkuPorTexto` — nothing referenced them) — migration `008_create_visit_photo_pipeline.sql` adds the tables.
+
+```
+POST /api/visits                        (visitService.openVisit)          — Paso 0
+  Opens RETSC_EX_VISIT (User_id from JWT, Enterprise_id from JWT, Retailer_id/lat/lon from
+  body) → returns Visit_id. No category/canal column on purpose — one visit can span several
+  categories; canal is resolved via Retailer_id, never duplicated here (see retailerRepo.js
+  caveat below). 409 if the user already has an OPEN visit (not explicit in the guide, a
+  deliberate guard against orphaned visits from double-taps/reconnects).
+PATCH /api/visits/:id/close             (visitService.closeVisit)         — closes the visit
+GET  /api/visits/:id                                                      — visit detail
+
+POST /api/shelf-photos/visit            (visitPhotoService.uploadVisitPhoto) — Pasos 1-2
+  1. Validate visit is OPEN + category exists
+  2. Upload to AZURE_VISIT_SHELF_CONTAINER (default enterprise-shelf-visits) at
+     {enterprise_id}/{pdv_id}/{session_id}/{category_id}/{filename} — session_id = Visit_id
+  3. Insert RETSC_EX_SHELFPHOTO — reuses the SAME repo/table as the training flow, since
+     visit_id/Retailer_id/CATEGORY_ID/ENTERPRISE_ID were already columns there
+  4. Fires detectionPipelineService.processPhotoDetection() in the background (setImmediate,
+     same fire-and-forget pattern as aiInfrastructureService) — the HTTP response doesn't
+     wait for detection/identification.
+  ⚠ Deliberately skips shelfPhotoQualityService/imageQualityValidator: the guide (§3) is
+  explicit that the mobile already validated blur/light/framing locally — quality_status/
+  blur_score/brightness arrive in the request body and are stored as-is, audit-only, never
+  recomputed. Also skips hash-based dedup rejection (unlike the training flow) — the guide
+  doesn't ask for it in this flow; image_hash is still computed and stored (column already
+  existed), just not used to reject uploads.
+
+detectionPipelineService.processPhotoDetection(photoId, buffer, categoryId) — Paso 3-4
+  1. aiModelRepo.findPublishedByCategoryId() — queries status IN ('PUBLISHED','READY') AND
+     is_active=1. NOTE the naming mismatch: the guide's literal is 'PUBLISHED', the model
+     lifecycle documented above (Issue 8.4) only ever produces 'READY' for the same
+     "active/published" concept — both are queried until the team reconciles which name wins.
+  2. No model found → detection left pending, does NOT fail the visit (guide §5.1 callout).
+  3. visionDetectionService.detectRegions() — calls "the endpoint Joel provides" (guide §5.2);
+     Daniel never calls Custom Vision's Prediction API directly with credentials. STUB: if
+     DETECTION_ENDPOINT_URL isn't set (nobody has delivered it yet), same pending/no-throw
+     behavior as step 2 — logged, not fatal.
+  4. shelfPhotoDetectionRepo.bulkInsert() — one row per detected region in
+     RETSC_EX_SHELFPHOTO_DETECTION (Sku_id/EAN/ocr_text NULL at this point)
+  5. Awaits productIdentificationService.identifyDetections() in-process (Paso 5) so a
+     failure there is logged alongside the rest of this background job, not an orphan promise.
+
+productIdentificationService.identifyDetections() — Paso 5
+  For each detection: imageCropper.cropRegion() (sharp, normalized bbox → pixels) →
+  azureVisionService.readText() (OCR stub, same permissive-stub family as
+  analyzeCaption/isShelf, but returns empty text rather than inventing any — inventing OCR
+  text would be worse than leaving a box unidentified) → collects all texts for the photo →
+  ONE call to skuIdentificationService.buscarSkuPorTexto(texts) (batched, never one-per-box —
+  guide §7.2 requires this) → shelfPhotoDetectionRepo.updateIdentification() per detection
+  (the guide's exact UPDATE: EAN comes from a `RETSC_OP_SKUS` subquery keyed on the found
+  Sku_id, never passed as a separate parameter; ocr_text is always saved, matched or not).
+
+  **`skuIdentificationService.buscarSkuPorTexto()` is a PLACEHOLDER, not a real
+  implementation.** The guide (§7.2) is explicit this is Joel's deliverable, not Daniel's —
+  "no es algo que Daniel y Joel tengan que diseñar juntos". Today it always returns
+  `matched:false` for every text, calling nothing external. See its file header for the
+  documented contract and `docs/TODO-joel-visitas.md` for the rest of what's pending from Joel.
+
+GET /api/sessions/:id/results            (visitResultsService.getResults) — Paso 6, §8.1-8.3
+  `:id` is the Visit_id — the guide calls the same value "session_id" in the blob path (§3.1:
+  "session_id es el Visit_id"); there is no separate "session" table/concept. Combines:
+  - share_de_gondola (§8.1) — JOIN against RETSC_OP_ENTERPRISE_PRODUCT_SEG, filtered by
+    enterprise_id (brand classification can differ per enterprise — guide's own note)
+  - faltantes (§8.2) — RETSC_OP_ASSORTMENT (new table, no equivalent existed before) minus
+    whatever was actually detected in the visit; computed per category the visit touched
+    (a visit can span several — shelfPhotoRepo.listCategoryIdsByVisit()) and merged
+  - sin_identificar — count of detections with Sku_id still NULL
+  Response keys are the literal Spanish ones from the guide (`visit_id`, `share_de_gondola`,
+  `marca`, `conteo`, `share`, `faltantes`, `sku_id`, `producto`, `sin_identificar`) rather
+  than camelCase — a deliberate exception to the "Column naming convention" rule below, since
+  this is an already-agreed mobile contract, not a raw MSSQL row being normalized.
+
+GET /api/shelf-photos/unidentified        (§8.4) — passive web-dashboard view of detected-
+  but-unmatched boxes ("aquí te falta inteligencia, necesitas subir fotos nuevas de este
+  producto"), scoped by enterprise the same way other enterprise-scoped GETs are.
+```
+
+⚠ **`RETSC_OP_RETAILER` — existence unconfirmed.** The guide assumes this table already
+exists with a `Canal` column (§2.2, §3.2: "el canal se resuelve por Retailer_id →
+RETSC_OP_RETAILER.Canal"). This CLAUDE.md's own "Menú por rol" audit (2026-07-25) says the
+opposite — "no hay tabla de retailers". Migration 008 deliberately does **not** create it
+(would be inventing a catalog table without an explicit ask — the guide assumes it exists,
+it doesn't ask to create it). `src/repositories/retailerRepo.js` queries it defensively:
+catches "Invalid object name" and returns `null` instead of throwing, so opening/closing a
+visit and saving photos work either way. **Needs a decision from María/the team**: does this
+table actually exist in prod (this doc may just be stale), or does it need its own migration?
+
+⚠ **Two stubs block the flow from being fully real, both intentionally, both documented in
+their own file headers**: `visionDetectionService.js` (Joel's detection endpoint — §5.2) and
+`skuIdentificationService.js` (Joel's `buscarSkuPorTexto` — §7.2). Neither throws when
+unconfigured; both log and leave data incomplete rather than fail the visit. Swapping either
+for the real thing later should not require touching `detectionPipelineService.js` or
+`productIdentificationService.js`.
 
 ### Annotation review (`/api/annotations`, Issue 7.5)
 

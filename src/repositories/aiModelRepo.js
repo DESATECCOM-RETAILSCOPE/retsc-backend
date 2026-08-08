@@ -42,6 +42,30 @@ const findByCategoryId = async (categoryId) => {
   return r.recordset[0] ?? null;
 };
 
+// Paso 3 de la guía "Fotos de Visita" v1.9 (sección 5.1) — modelo publicado y vigente
+// para una categoría, el único al que se le puede mandar una foto de visita a detectar.
+//
+// NOTA — discrepancia de nombres: la guía usa el status 'PUBLISHED' textualmente. El ciclo
+// de vida real de este repo (ver header de este archivo y CLAUDE.md, Issue 8.4) nunca usó
+// ese literal — el estado equivalente a "activo/publicado" se llama 'READY'. Se consultan
+// AMBOS valores para no depender de que alguien reconcilie la terminología antes de que este
+// endpoint funcione, pero esto es un parche, no la solución: confirmar con el equipo cuál de
+// los dos nombres es el correcto de aquí en adelante y unificar (lo ideal es no tener dos
+// nombres para el mismo estado).
+const findPublishedByCategoryId = async (categoryId) => {
+  const pool = await getPool();
+  const r = await pool.request()
+    .input('categoryId', sql.Int, categoryId)
+    .query(`
+      SELECT TOP 1 customvision_project_id, prediction_resource_id, last_publish_name, detection_model_id
+      FROM ${TABLE}
+      WHERE category_id = @categoryId
+        AND status IN ('PUBLISHED', 'READY')
+        AND is_active = 1
+    `);
+  return r.recordset[0] ?? null;
+};
+
 // Devuelve todos los modelos (activos e inactivos). Usado en aiService para buscar por categoría.
 const listAll = async () => {
   const pool = await getPool();
@@ -235,6 +259,7 @@ const setApproval = async (detectionModelId, adminId) => {
 
 module.exports = {
   findByCategoryId,
+  findPublishedByCategoryId,
   listAll,
   listByCategoryIds,
   insert,
