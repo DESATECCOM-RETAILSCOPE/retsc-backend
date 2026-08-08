@@ -27,6 +27,9 @@
 //   last_publish_name         VARCHAR(100)  NULL
 //   confidence_threshold      DECIMAL(18,x) NOT NULL
 //   is_active                 BIT           NULL
+//   last_training_error       VARCHAR(500)  NULL  (migración 009, 2026-08-08 — motivo del
+//     último rechazo/fallo de Custom Vision al entrenar o publicar; se limpia en el próximo
+//     éxito. Ver markTrainingFailed()/setTrainingError() y modelTrainingService.js)
 //
 // NOTA: el repo anterior usaba nombres Pascal_Case (Category_id, Model_id, Status, etc.)
 // que no coincidían con la tabla real. Este reemplazo usa los nombres reales.
@@ -245,7 +248,52 @@ const markTrained = async (detectionModelId) => {
     .input('id', sql.Int, detectionModelId)
     .query(`
       UPDATE ${TABLE}
-      SET trained_at = GETDATE()
+      SET trained_at = GETDATE(),
+          last_training_error = NULL
+      OUTPUT INSERTED.*
+      WHERE detection_model_id = @id
+    `);
+  return r.recordset[0] ?? null;
+};
+
+// Cableado 2026-08-08 — arregla el fallo silencioso encontrado al investigar por qué
+// category_id=2 quedaba colgado en IMAGES_UPLOADED sin explicación: si Custom Vision rechaza
+// trainProject() (ej. BadRequestDetectionTrainingValidationFailed — confirmado contra CV real,
+// "Not enough images per tag for training"), o si pollTrainingStatus() detecta Failed/timeout/
+// demasiados fallos de red consecutivos, el modelo pasa a TRAINING_FAILED CON el motivo
+// persistido — antes solo quedaba un console.error que se perdía en los logs del proceso.
+// TRAINING_FAILED no está en SKIP_THRESHOLD_STATUSES (annotationSyncService.js), así que el
+// mecanismo de reintento automático (próxima foto sincronizada reevalúa el umbral) sigue
+// funcionando sin cambios adicionales. Requiere migración 009 (last_training_error) — si no
+// está aplicada, esta función lanza "Invalid column name" y el caller debe atraparlo (mismo
+// patrón defensivo que aiModelRepo.saveMetrics()/migración 006).
+const markTrainingFailed = async (detectionModelId, errorMessage) => {
+  const pool = await getPool();
+  const r = await pool.request()
+    .input('id',    sql.Int,         detectionModelId)
+    .input('error', sql.VarChar(500), errorMessage ? String(errorMessage).slice(0, 500) : null)
+    .query(`
+      UPDATE ${TABLE}
+      SET status = 'TRAINING_FAILED',
+          last_training_error = @error
+      OUTPUT INSERTED.*
+      WHERE detection_model_id = @id
+    `);
+  return r.recordset[0] ?? null;
+};
+
+// Variante que NO cambia el status — usada cuando el training SÍ completó pero la publicación
+// automática falla (ver modelTrainingService.publishAndActivate): el modelo debe quedar en
+// TRAINED (entrenado, no publicado), no en TRAINING_FAILED, pero el motivo del rechazo de
+// publishIteration ya no debe perderse en un console.warn únicamente.
+const setTrainingError = async (detectionModelId, errorMessage) => {
+  const pool = await getPool();
+  const r = await pool.request()
+    .input('id',    sql.Int,         detectionModelId)
+    .input('error', sql.VarChar(500), errorMessage ? String(errorMessage).slice(0, 500) : null)
+    .query(`
+      UPDATE ${TABLE}
+      SET last_training_error = @error
       OUTPUT INSERTED.*
       WHERE detection_model_id = @id
     `);
@@ -267,7 +315,8 @@ const markPublished = async (detectionModelId, { modelVersion, lastPublishName }
     .query(`
       UPDATE ${TABLE}
       SET model_version     = @version,
-          last_publish_name = @publishName
+          last_publish_name = @publishName,
+          last_training_error = NULL
       OUTPUT INSERTED.*
       WHERE detection_model_id = @id
     `);
@@ -290,4 +339,7 @@ module.exports = {
   // Cableado 2026-08-03 (flujo automático spec v1.4)
   markTrained,
   markPublished,
+  // Cableado 2026-08-08 (fix del fallo silencioso de training/publicación)
+  markTrainingFailed,
+  setTrainingError,
 };

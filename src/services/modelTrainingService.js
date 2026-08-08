@@ -103,7 +103,22 @@ async function startTraining(categoryId, adminUserId) {
     throw svcError(`El modelo de la categoría ${categoryId} no tiene un proyecto de Custom Vision asociado.`, 409);
   }
 
-  const iteration = await customVisionService.trainProject(model.customvision_project_id);
+  let iteration;
+  try {
+    iteration = await customVisionService.trainProject(model.customvision_project_id);
+  } catch (err) {
+    // Fix 2026-08-08 (fallo silencioso encontrado investigando category_id=2): antes esto se
+    // propagaba directo al .catch() fire-and-forget de checkAndUpdateThreshold, que solo hace
+    // console.error — el modelo quedaba colgado en IMAGES_UPLOADED para siempre sin ningún
+    // rastro en BD del motivo real (ej. "BadRequestDetectionTrainingValidationFailed: Not
+    // enough images per tag for training", confirmado contra CV real). Ahora se persiste antes
+    // de relanzar, para que quien mire la BD vea el motivo sin depender de logs de consola.
+    console.error(`[modelTraining] Custom Vision rechazó el entrenamiento — categoria=${categoryId} model_id=${model.detection_model_id}: ${err.message}`);
+    await aiModelRepo.markTrainingFailed(model.detection_model_id, err.message)
+      .catch(e2 => console.error(`[modelTraining] además, no se pudo persistir el motivo del rechazo (¿falta la migración 009?) — model_id=${model.detection_model_id}:`, e2.message));
+    throw err;
+  }
+
   await aiModelRepo.updateStatus(model.detection_model_id, 'TRAINING');
 
   const trigger = adminUserId ? `adminUserId=${adminUserId}` : 'disparo automático (umbral spec v1.4)';
@@ -135,7 +150,7 @@ async function pollTrainingStatus(modelId, projectId, iterationId) {
       console.warn(`[modelTraining] fallo consultando iteración (intento ${attempt}/${MAX_POLL_ATTEMPTS}, error consecutivo ${consecutiveErrors}/${MAX_CONSECUTIVE_FETCH_ERRORS}, model_id=${modelId}):`, err.message);
       if (consecutiveErrors >= MAX_CONSECUTIVE_FETCH_ERRORS) {
         console.error(`[modelTraining] demasiados fallos consecutivos consultando Custom Vision — marcando TRAINING_FAILED (model_id=${modelId})`);
-        await aiModelRepo.updateStatus(modelId, 'TRAINING_FAILED')
+        await aiModelRepo.markTrainingFailed(modelId, `${MAX_CONSECUTIVE_FETCH_ERRORS} fallos consecutivos consultando la iteración: ${err.message}`)
           .catch(e2 => console.error('[modelTraining] no se pudo marcar TRAINING_FAILED:', e2.message));
         return;
       }
@@ -150,7 +165,7 @@ async function pollTrainingStatus(modelId, projectId, iterationId) {
 
     if (iteration.status === 'Failed') {
       console.error(`[modelTraining] Custom Vision reportó Failed — model_id=${modelId} iterationId=${iterationId}`);
-      await aiModelRepo.updateStatus(modelId, 'TRAINING_FAILED')
+      await aiModelRepo.markTrainingFailed(modelId, 'Custom Vision reportó la iteración como Failed')
         .catch(e2 => console.error('[modelTraining] no se pudo marcar TRAINING_FAILED:', e2.message));
       return;
     }
@@ -159,7 +174,7 @@ async function pollTrainingStatus(modelId, projectId, iterationId) {
   }
 
   console.error(`[modelTraining] timeout de seguridad (${MAX_POLL_ATTEMPTS * POLL_INTERVAL_MS / 60000} min) esperando a Custom Vision — model_id=${modelId} iterationId=${iterationId}`);
-  await aiModelRepo.updateStatus(modelId, 'TRAINING_FAILED')
+  await aiModelRepo.markTrainingFailed(modelId, `Timeout de seguridad (${MAX_POLL_ATTEMPTS * POLL_INTERVAL_MS / 60000} min) esperando a Custom Vision`)
     .catch(e2 => console.error('[modelTraining] no se pudo marcar TRAINING_FAILED tras timeout:', e2.message));
 }
 
@@ -240,6 +255,12 @@ async function publishAndActivate(model, projectId, iterationId) {
     await customVisionService.publishIteration(projectId, iterationId, publishName, predictionResourceId, { overwrite: true });
   } catch (err) {
     console.warn(`[modelTraining] publicación automática PENDIENTE de configuración de Azure — categoria=${categoryId} model_id=${modelId} iterationId=${iterationId}: ${err.message}. El modelo queda en TRAINED (entrenado, no publicado); se reintentará en el próximo ciclo de entrenamiento sin cambios de código una vez el Resource ID de predicción esté configurado correctamente.`);
+    // Fix 2026-08-08 (mismo fallo silencioso que trainProject — ver startTraining()): antes
+    // este motivo solo quedaba en el console.warn de arriba. setTrainingError() NO cambia el
+    // status (el modelo debe seguir en TRAINED, no en TRAINING_FAILED — sí entrenó, solo no se
+    // publicó), pero deja el motivo visible en BD para quien lo consulte.
+    await aiModelRepo.setTrainingError(modelId, err.message)
+      .catch(e2 => console.error(`[modelTraining] además, no se pudo persistir el motivo del rechazo de publicación (¿falta la migración 009?) — model_id=${modelId}:`, e2.message));
     return;
   }
 
