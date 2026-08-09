@@ -251,7 +251,18 @@ async function syncRegionsForPhoto(photo, rows) {
   }
 
   if (!pendingSync.length) {
+    // FIX 2026-08-08: antes esta rama salía sin llamar a markSynced(), así que si
+    // cv_sync_status de la FOTO quedaba en algo distinto de 'SYNCED' (ej. un reset manual,
+    // o cualquier otra causa) mientras sus cajitas YA tenían cv_region_id, no había forma de
+    // autocorregirlo — cada re-sync futuro volvía a caer acá y volvía a salir sin arreglar
+    // nada. checkAndUpdateThreshold cuenta por cv_sync_status='SYNCED' a nivel de foto, así
+    // que esto bloqueaba el disparo automático de entrenamiento con datos que en Custom
+    // Vision ya estaban completos. Encontrado con category_id=2/OMT: 15 fotos con el 100% de
+    // sus cajitas ya sincronizadas (710 anotaciones, todas con cv_region_id) pero
+    // cv_sync_status='PENDING' en la foto. markSynced(photoId, new Map()) no reenvía nada
+    // (mapa vacío → el loop de arriba no itera nada), solo asienta cv_sync_status='SYNCED'.
     console.log(`[annotationSync] photo_id=${photo.photo_id}: todas las anotaciones ya estaban sincronizadas — nada que enviar a Custom Vision`);
+    await markSynced(photo.photo_id, new Map());
     return;
   }
 
