@@ -43,6 +43,7 @@ node scripts/test-annotation-review.js   # Integration tests for annotation appr
 node scripts/test-model-versioning.js    # Integration tests for model retrain/approve/rollback (hits real DB)
 node scripts/test-shelf-photo-quality.js # Integration tests for shelf-photo quality gate + dedup (hits real DB)
 node scripts/check-connectivity.js       # Read-only diagnostic: pings SQL, blob storage, and other external services
+node scripts/dump-schema.js              # Read-only: dumps every real table/column/PK/FK/index from the connected DB into docs/DB-SCHEMA.md
 node scripts/cleanup-for-testing.js      # DESTRUCTIVE — wipes all tables except users/enterprises/roles + global-sku-training blobs
 node scripts/verify-smart-categories-dedup.js <enterpriseId>  # Read-only: checks for duplicate category/parent names in an enterprise's smart-category listing (Issue B4 regression check)
 node scripts/test-user-role-gates.js     # Guard anti-escalada a ADMIN_DTC (userService.assertCanAssignRole); NO toca la BD — stubea repos vía require.cache
@@ -165,6 +166,8 @@ Tres menús **web**: `ADMIN_DTC`, `ADMIN`, `GERENCIA`. `EJECUTIVO CAMPO` y `AUDI
 
 Todo lo demás del menú se resolvió con endpoints que ya existían. Explícitamente **fuera de alcance** (sin tabla/datos en la BD para soportarlo, implementado como "Pronto" en el frontend sin backend): Tiendas activas, Planogramas (no hay tabla de retailers — `RETSC_EX_SHELFPHOTO.Retailer_id` es solo una columna suelta sin catálogo detrás), y todo el bloque operativo de `GERENCIA` (Visitas, KPIs de cumplimiento, Faltantes detectados, Reportes por tienda/producto/ejecutivo, Ejecutivos de campo). No inventar tablas/migraciones/endpoints para esto sin que el equipo lo pida explícitamente.
 
+⚠ **Actualización (2026-07-29, dump completo de schema vs. `sqldb-rscope-qa`)**: la premisa "no hay tabla de retailers" **ya no es cierta contra QA** — ver `docs/DB-SCHEMA.md`. QA sí tiene `RETSC_OP_RETAILER`, `RETSC_OP_SMKTCHAINS`, `RETSC_OP_SMKTFORMATS`, `RETSC_OP_PLANOGRAM`, `RETSC_OP_PLANOGRAMDET`, `RETSC_EX_VISIT`, `RETSC_EX_KPI` y `RETSC_OP_ASSORTMENT`, todas con FKs coherentes pero **0 filas** (schema presente, sin datos ni endpoints todavía). No se sabe si `sqldb-rscope-prod` tiene el mismo schema — las notas de "fuera de alcance" de arriba se verificaron solo contra prod (2026-07-1). Antes de construir sobre estas tablas, confirmar con el equipo si esto fue una adición deliberada a QA y si prod las tiene o las tendrá. No hay decisión de equipo todavía — no empezar endpoints de GERENCIA solo por este hallazgo.
+
 ### Shelf photo annotation & model training pipeline (Issues 3.1.1 follow-on, 8.5, 42)
 
 Distinct from the SKU-level AI infra above, this pipeline trains **object-detection models on shelf/gondola photos** for smart-DTC categories:
@@ -253,6 +256,8 @@ Blob prefix format: `dtc-{slug}` inside `AZURE_GLOBAL_TRAINING_CONTAINER` (defau
 `container_type` (CHK_RETSC_GLOBAL_BLOB_TYPE, solo acepta `'GLOBAL_TRAINING'` o `'GLOBAL_SKU_PHOTOS'`) también estaba hardcodeado mal: `aiInfrastructureService.js` insertaba siempre `'GLOBAL_TRAINING'`, incluso para el container de fotos de SKU. Convención acordada 2026-07-26 (no hay migración/spec previa en este repo que lo defina — es una inferencia por naming, ya que solo existen esos 2 valores para 2 containers): `'GLOBAL_SKU_PHOTOS'` → `global-sku-training`, `'GLOBAL_TRAINING'` → `global-shelf-training`. La fila que ya existía de antes de este fix (SHAMPOO) quedó con el valor viejo (`'GLOBAL_TRAINING'` para el container de SKU) sin corregir — el `UPDATE` de corrección quedó comentado en la migración 007, pendiente de decisión.
 
 ### Database tables
+
+`docs/DB-SCHEMA.md` is the canonical, auto-generated map of every real table in the connected DB (columns, types, PKs, FKs, indexes, row counts) — regenerate with `node scripts/dump-schema.js` whenever the schema might have changed, instead of trusting the prose below for tables not yet wired to a repository. The notes below predate that script and were written by hand as each table got its first repo — kept for the narrative/decision context (why a column is nullable, why a join is deliberately avoided) that a raw schema dump can't capture.
 
 Each file in `src/repositories/` maps to one SQL table:
 
