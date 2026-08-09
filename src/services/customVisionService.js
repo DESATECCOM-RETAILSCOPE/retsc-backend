@@ -300,6 +300,17 @@ async function ensureTag(projectId, tagName) {
   return createTag(projectId, tagName);
 }
 
+// Fix 2026-08-09 (tag vacío tumbando el training — ver modelTrainingService.assertNoEmptyTags):
+// Custom Vision rechaza `trainProject` completo (BadRequestDetectionTrainingValidationFailed:
+// "Not enough images per tag for training") si CUALQUIER tag del proyecto tiene 0 imágenes,
+// aunque los demás tags sí tengan suficientes — un tag huérfano (creado por ensureTag() antes de
+// que createImageRegions() confirmara al menos una región, y nunca completado por un fallo
+// posterior en ese mismo sync) tumba el entrenamiento del proyecto entero, no solo de ese tag.
+async function deleteTag(projectId, tagId) {
+  await cvFetch(`projects/${projectId}/tags/${tagId}`, { method: 'DELETE' });
+  console.log(`[customVision] tag eliminado — proyecto=${projectId} tagId=${tagId}`);
+}
+
 // Issue 8.4 / 4.4 (spec v1.4) — publicación de una iteración entrenada.
 //
 // Formato verificado (mismo spec REST, ver nota de cabecera de esta sección):
@@ -367,5 +378,6 @@ module.exports = {
   listTags,
   createTag,
   ensureTag,
+  deleteTag,
   publishIteration,
 };

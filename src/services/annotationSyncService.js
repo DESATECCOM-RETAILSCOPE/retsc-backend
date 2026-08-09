@@ -274,12 +274,18 @@ async function syncRegionsForPhoto(photo, rows) {
     return;
   }
 
+  // Hoisted fuera del try (no `const` adentro) para que el catch de abajo pueda intentar
+  // limpiarlo si el tag se creó recién en esta llamada y el resto del sync falló después —
+  // ver el catch más abajo (Fix 2026-08-09, mismo incidente que motivó
+  // modelTrainingService.purgeEmptyTags(), acá la mitad "preventiva").
+  let tagId = null;
+
   try {
     // pendingSync ya filtró todo lo que tenía cv_region_id, así que esto es un no-op hoy —
     // se deja por si en el futuro un cv_region_id "huérfano" (sin fila SYNCED) llegara a colarse.
     await deleteOldRegions(projectId, pendingSync);
 
-    const tagId = await resolveTagId(projectId, photo.canal);
+    tagId = await resolveTagId(projectId, photo.canal);
 
     // Auto-registro defensivo (Opción C) si la foto llegó sin cvImageId — ver
     // autoRegisterImage() para el porqué (desconexión con #42).
@@ -329,6 +335,31 @@ async function syncRegionsForPhoto(photo, rows) {
   } catch (err) {
     console.error(`[annotationSync] fallo al sincronizar photo_id=${photo.photo_id} con Custom Vision:`, err.message);
     await markFailed(photo.photo_id, err);
+    await cleanupTagIfOrphaned(projectId, tagId, photo.photo_id);
+  }
+}
+
+// Fix 2026-08-09 — mitad PREVENTIVA del fix de tags vacíos (la mitad defensiva vive en
+// modelTrainingService.purgeEmptyTags(), justo antes de cada intento de training; esta acá
+// intenta arreglarlo en el momento en que se produce, no solo antes del próximo training).
+// Causa real confirmada en category_id=2: resolveTagId()/ensureTag() crea el tag ANTES de que
+// createImageRegions() confirme al menos una región — si algo falla entre esas dos líneas
+// (autoRegisterImage, red, "Duplicate image regions", etc.), el tag queda huérfano con 0
+// imágenes. Re-consulta el tag por id (no confía en el imageCount que trajo ensureTag() al
+// momento de crearlo, que siempre es 0 recién creado) — si sigue en 0, es señal de que esta
+// llamada lo dejó huérfano y es seguro borrarlo; si ya tiene imágenes (otra foto del mismo
+// canal sí llegó a sincronizar antes), NO se toca.
+async function cleanupTagIfOrphaned(projectId, tagId, photoId) {
+  if (!tagId) return;
+  try {
+    const tags = await customVisionService.listTags(projectId);
+    const tag = tags.find(t => t.id === tagId);
+    if (tag && (tag.imageCount ?? 0) === 0) {
+      console.warn(`[annotationSync] tag "${tag.name}" (id=${tagId}) quedó sin imágenes tras el fallo de sync de photo_id=${photoId} — eliminándolo para no tumbar el próximo training`);
+      await customVisionService.deleteTag(projectId, tagId);
+    }
+  } catch (err2) {
+    console.error(`[annotationSync] no se pudo verificar/limpiar el tag ${tagId} tras el fallo de photo_id=${photoId} (queda para que lo limpie purgeEmptyTags antes del próximo training):`, err2.message);
   }
 }
 

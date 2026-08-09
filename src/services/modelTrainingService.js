@@ -86,6 +86,37 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// Fix 2026-08-09 — red de seguridad DEFENSIVA (Opción B) contra el
+// "BadRequestDetectionTrainingValidationFailed: Not enough images per tag for training" que
+// tumba el training del proyecto ENTERO si cualquiera de sus tags tiene 0 imágenes, aunque los
+// demás tags sí cumplan el mínimo. Causa real confirmada en category_id=2: un tag quedó
+// huérfano (creado por customVisionService.ensureTag() en un sync anterior que falló DESPUÉS de
+// crear el tag pero ANTES de que createImageRegions() confirmara al menos una región — ver
+// annotationSyncService.js, resolveTagId()/syncRegionsForPhoto()). Como el disparo automático
+// (checkAndUpdateThreshold) no debe depender de que alguien limpie esto a mano, se revisa y se
+// autocorrige acá, justo antes de cada intento de entrenamiento — no solo la vez que se descubrió
+// el problema. No lanza si la limpieza misma falla (un tag huérfano que no se pudo borrar no
+// debe impedir el intento de training — Custom Vision simplemente lo va a rechazar de nuevo con
+// el mismo mensaje claro, ya persistido por el catch de startTraining).
+async function purgeEmptyTags(projectId) {
+  let tags;
+  try {
+    tags = await customVisionService.listTags(projectId);
+  } catch (err) {
+    console.warn(`[modelTraining] no se pudieron listar tags antes de entrenar (proyecto=${projectId}) — se sigue igual, Custom Vision validará por su cuenta:`, err.message);
+    return;
+  }
+
+  const emptyTags = tags.filter(t => (t.imageCount ?? 0) === 0);
+  if (!emptyTags.length) return;
+
+  console.warn(`[modelTraining] ${emptyTags.length} tag(s) vacío(s) detectado(s) antes de entrenar (proyecto=${projectId}) — Custom Vision rechazaría el training entero por esto; eliminando: ${emptyTags.map(t => t.name).join(', ')}`);
+  for (const tag of emptyTags) {
+    await customVisionService.deleteTag(projectId, tag.id)
+      .catch(err => console.error(`[modelTraining] no se pudo eliminar el tag vacío ${tag.name} (id=${tag.id}, proyecto=${projectId}):`, err.message));
+  }
+}
+
 // Llamado por el endpoint. NO espera a que el entrenamiento termine — dispara trainProject,
 // marca TRAINING, lanza el polling en background (sin await) y devuelve de inmediato.
 async function startTraining(categoryId, adminUserId) {
@@ -102,6 +133,8 @@ async function startTraining(categoryId, adminUserId) {
   if (!model.customvision_project_id) {
     throw svcError(`El modelo de la categoría ${categoryId} no tiene un proyecto de Custom Vision asociado.`, 409);
   }
+
+  await purgeEmptyTags(model.customvision_project_id);
 
   let iteration;
   try {

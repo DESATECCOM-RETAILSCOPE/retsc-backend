@@ -242,17 +242,43 @@ const setActiveVersion = async (categoryId, detectionModelId) => {
 // siempre desde el mismo baseline viejo, re-disparando training en cada foto nueva). Esta
 // función se llama SIEMPRE que un training termina (Completed), tenga o no métricas
 // persistibles.
+// Fix 2026-08-09 — BUG encontrado verificando el flujo automático end-to-end: esta función
+// (y markTrainingFailed/markPublished, más abajo) originalmente ponían `trained_at`/`status`/
+// `model_version` y `last_training_error` en el MISMO UPDATE. Cuando la migración 009
+// (last_training_error) no está aplicada — confirmado que sigue sin aplicarse en esta BD,
+// 2026-08-09 — SQL Server rechaza la query ENTERA por columna inexistente ANTES de ejecutar
+// nada, así que ni siquiera el campo crítico (trained_at/status/model_version) llegaba a
+// escribirse, pese a que el comentario original decía que `markTrained` "SIEMPRE corre,
+// independientemente de la migración 006" — cierto para esa migración, pero la 009 rompía la
+// misma garantía por el mismo motivo. Más grave en `markPublished`: como esa llamada no está
+// envuelta en try/catch en `modelTrainingService.publishAndActivate()`, el fallo se propagaba
+// sin atrapar y `setActiveVersion()` (el swap que realmente marca PUBLISHED) nunca se ejecutaba
+// — Custom Vision publicaba la iteración con éxito, pero el modelo se quedaba en TRAINED para
+// siempre en SQL. Separado en dos UPDATEs: el campo crítico va solo (siempre corre), y el touch
+// de `last_training_error` es un segundo UPDATE best-effort — si la migración 009 no está
+// aplicada, falla en silencio (logueado) sin afectar el campo crítico.
+const clearTrainingErrorBestEffort = async (detectionModelId) => {
+  try {
+    const pool = await getPool();
+    await pool.request()
+      .input('id', sql.Int, detectionModelId)
+      .query(`UPDATE ${TABLE} SET last_training_error = NULL WHERE detection_model_id = @id`);
+  } catch (err) {
+    console.error(`[aiModelRepo] no se pudo limpiar last_training_error (¿falta la migración 009?) — detection_model_id=${detectionModelId}:`, err.message);
+  }
+};
+
 const markTrained = async (detectionModelId) => {
   const pool = await getPool();
   const r = await pool.request()
     .input('id', sql.Int, detectionModelId)
     .query(`
       UPDATE ${TABLE}
-      SET trained_at = GETDATE(),
-          last_training_error = NULL
+      SET trained_at = GETDATE()
       OUTPUT INSERTED.*
       WHERE detection_model_id = @id
     `);
+  await clearTrainingErrorBestEffort(detectionModelId);
   return r.recordset[0] ?? null;
 };
 
@@ -270,16 +296,31 @@ const markTrained = async (detectionModelId) => {
 const markTrainingFailed = async (detectionModelId, errorMessage) => {
   const pool = await getPool();
   const r = await pool.request()
-    .input('id',    sql.Int,         detectionModelId)
-    .input('error', sql.VarChar(500), errorMessage ? String(errorMessage).slice(0, 500) : null)
+    .input('id', sql.Int, detectionModelId)
     .query(`
       UPDATE ${TABLE}
-      SET status = 'TRAINING_FAILED',
-          last_training_error = @error
+      SET status = 'TRAINING_FAILED'
       OUTPUT INSERTED.*
       WHERE detection_model_id = @id
     `);
+  await setTrainingErrorBestEffort(detectionModelId, errorMessage);
   return r.recordset[0] ?? null;
+};
+
+// Extraído para reusar entre markTrainingFailed y setTrainingError — ver la NOTA de
+// clearTrainingErrorBestEffort arriba sobre por qué esto va en un UPDATE separado del campo
+// crítico (status, en este caso). Best-effort: si la migración 009 no está aplicada, falla en
+// silencio (logueado) — el campo crítico (status) ya se escribió antes de llamar a esto.
+const setTrainingErrorBestEffort = async (detectionModelId, errorMessage) => {
+  try {
+    const pool = await getPool();
+    await pool.request()
+      .input('id',    sql.Int,         detectionModelId)
+      .input('error', sql.VarChar(500), errorMessage ? String(errorMessage).slice(0, 500) : null)
+      .query(`UPDATE ${TABLE} SET last_training_error = @error WHERE detection_model_id = @id`);
+  } catch (err) {
+    console.error(`[aiModelRepo] no se pudo persistir last_training_error (¿falta la migración 009?) — detection_model_id=${detectionModelId}:`, err.message);
+  }
 };
 
 // Variante que NO cambia el status — usada cuando el training SÍ completó pero la publicación
@@ -315,11 +356,16 @@ const markPublished = async (detectionModelId, { modelVersion, lastPublishName }
     .query(`
       UPDATE ${TABLE}
       SET model_version     = @version,
-          last_publish_name = @publishName,
-          last_training_error = NULL
+          last_publish_name = @publishName
       OUTPUT INSERTED.*
       WHERE detection_model_id = @id
     `);
+  // Ver NOTA en markTrained (arriba) — separado del UPDATE crítico para que un fallo por
+  // migración 009 faltante nunca bloquee esto: acá es más grave que en markTrained, porque el
+  // caller (modelTrainingService.publishAndActivate) NO envuelve esta llamada en try/catch —
+  // si el UPDATE original tiraba por columna inexistente, setActiveVersion() (el swap que
+  // realmente marca PUBLISHED) nunca llegaba a ejecutarse.
+  await clearTrainingErrorBestEffort(detectionModelId);
   return r.recordset[0] ?? null;
 };
 
