@@ -248,7 +248,12 @@ async function uploadShelfPhoto({ buffer, dtcCategoryId, canal, uploadedBy, ente
   // de siempre (blob + hash + cvImageId), ahora en la fila de FOTO en vez de en una
   // anotación placeholder.
 
-  const photoNotes = `blob:${blobPath} | sha256:${hash} | cvImageId:${cvImageId}`;
+  // Cada dato en SU columna (Issue #3 de QA). Antes esto era un solo string
+  // concatenado en photo_notes — "blob:... | sha256:... | cvImageId:..." — que
+  // obligaba a parsear con regex para leerlo y dejaba a photo_notes sin poder
+  // usarse para lo suyo. `blob_path`, `image_hash` y `cv_image_id` ya tienen
+  // columna propia, así que photo_notes queda LIBRE para el motivo/comentario
+  // real de la revisión.
   const trainingPhoto = await trainingPhotoRepo.insert({
     uploaded_by_user_id: uploadedBy,
     // De qué contribuyente vino la foto. Es lo que habilita el aislamiento por
@@ -258,7 +263,9 @@ async function uploadShelfPhoto({ buffer, dtcCategoryId, canal, uploadedBy, ente
     category_id:         dtcId,
     canal,
     blob_path:            blobPath,
-    photo_notes:          photoNotes,
+    image_hash:           hash,
+    cv_image_id:          cvImageId,
+    photo_notes:          null,
     photo_status:         'EN_PROGRESO',
   });
 

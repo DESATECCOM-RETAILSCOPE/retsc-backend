@@ -177,8 +177,9 @@ async function autoRegisterImage(photo, projectId, tagId) {
   const hash = await hashBuffer(buffer);
   const { cvImageId } = await customVisionService.createImageFromData(projectId, buffer, tagId);
 
-  const photoNotes = `blob:${photo.blob_path} | sha256:${hash} | cvImageId:${cvImageId}`;
-  await trainingPhotoRepo.updatePhotoNotes(photo.photo_id, photoNotes);
+  // Se guarda en las COLUMNAS propias (Issue #3), no concatenado en photo_notes:
+  // esa columna quedó reservada para el motivo/comentario de la revisión.
+  await trainingPhotoRepo.updateCvImageId(photo.photo_id, cvImageId, hash);
 
   console.warn(
     `[annotationSync] photo_id=${photo.photo_id} entró SIN cvImageId (no pasó por ` +
@@ -317,7 +318,7 @@ async function syncRegionsForPhoto(photo, rows) {
 
     // Auto-registro defensivo (Opción C) si la foto llegó sin cvImageId — ver
     // autoRegisterImage() para el porqué (desconexión con #42).
-    let cvImageId = extractCvImageId(photo.photo_notes);
+    let cvImageId = photo.cv_image_id ?? extractCvImageId(photo.photo_notes);
     if (!cvImageId) {
       cvImageId = await autoRegisterImage(photo, projectId, tagId);
     }
@@ -435,7 +436,7 @@ async function removeRegionsForPhoto(photo, rows) {
   try {
     await deleteOldRegions(projectId, rows);
 
-    const cvImageId = extractCvImageId(photo.photo_notes);
+    const cvImageId = photo.cv_image_id ?? extractCvImageId(photo.photo_notes);
     if (cvImageId) {
       await customVisionService.deleteImages(projectId, [cvImageId]);
     }
