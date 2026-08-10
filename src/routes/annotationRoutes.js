@@ -36,6 +36,17 @@ router.get('/photos',                        canValidate, c.listPhotos);
 router.get('/photos/:photoId',               canValidate, c.getPhotoDetail);
 router.patch('/photos/:photoId/approve',     canValidate, c.approvePhoto);
 
+// Modo ANNOTATE / REVIEW de la guía de María v1.4.
+// Bytes de la foto (proxy del blob privado) — ver getPhotoImage para por qué es
+// un proxy y no una URL firmada.
+router.get('/photos/:photoId/image',         canValidate, c.getPhotoImage);
+// Crear una cajita (2.3). Contraparte del DELETE /:id que ya existía.
+router.post('/photos/:photoId/regions',      canValidate, c.createRegion);
+// "Completado" (2.4): quien anota declara que terminó. No aprueba.
+router.patch('/photos/:photoId/complete',    canValidate, c.completePhoto);
+// Rechazar con motivo (3.2). El motivo se agrega a photo_notes.
+router.patch('/photos/:photoId/reject',      canValidate, c.rejectPhotoCtrl);
+
 // Acciones de validación (solo roles autorizados)
 router.patch('/:id/approve', canValidate, c.approve);  // APROBAR
 router.patch('/:id',         canValidate, c.correct);  // CORREGIR

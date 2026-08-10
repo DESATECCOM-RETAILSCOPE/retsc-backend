@@ -7,6 +7,7 @@ const roleRepo           = require('../repositories/roleRepo');
 const enterpriseRepo     = require('../repositories/enterpriseRepo');
 const { isValidEmail }   = require('../utils/validators');
 const { sendMail }       = require('../utils/mailer');
+const { ROLES, normalizeRole } = require('../config/roles');
 
 // ────────────── Helpers ──────────────
 
@@ -14,6 +15,33 @@ function serviceError(msg, statusCode) {
   const err = new Error(msg);
   err.statusCode = statusCode;
   return err;
+}
+
+// FIX 2026-07-26 (B2): antes esto elegía "la relación más antigua" comparando `r.Id`,
+// pero RETSC_OP_USRSXENTERP no tiene ninguna columna Id (verificado con
+// INFORMATION_SCHEMA) — la comparación era siempre `undefined < undefined` (false), así
+// que en la práctica login/refresh devolvían la primera fila en el orden arbitrario que
+// diera SQL Server para cualquier usuario con más de una empresa activa.
+//
+// Además de corregir eso (ver el ORDER BY nuevo en
+// userEnterpriseRepo.findActiveByUserId), esta versión prioriza ADMIN_DTC: un
+// superusuario de toda la plataforma NUNCA debe quedar sub-privilegiado solo porque su
+// relación con una empresa en particular se creó después de otra relación suya con un
+// rol menor — el caso reportado (ADMIN_DTC viendo "Sin acceso" en las pantallas
+// globales) apuntaba a este patrón, aunque en ese caso puntual la cuenta solo tenía una
+// relación activa (la causa real ahí fue un token de sesión desactualizado, no esto).
+// Si ninguna relación es ADMIN_DTC, se usa la primera del array — ya viene ordenada por
+// Fecha_activacion ASC desde el repo, así que sigue siendo "la más antigua" como antes.
+async function pickBestRelation(relations) {
+  if (relations.length === 1) {
+    const role = await roleRepo.findById(relations[0].Role_id);
+    return { relation: relations[0], role };
+  }
+
+  const roles = await Promise.all(relations.map((r) => roleRepo.findById(r.Role_id)));
+  const dtcIndex = roles.findIndex((role) => normalizeRole(role?.Role_name) === ROLES.ADMIN_DTC);
+  const index = dtcIndex !== -1 ? dtcIndex : 0;
+  return { relation: relations[index], role: roles[index] };
 }
 
 function signAccessToken(payload) {
@@ -117,10 +145,7 @@ const resolveLoginData = async (email, password) => {
     );
   }
 
-  // Tomar la relación más antigua (menor Id) — comportamiento original
-  const relation = relations.reduce((min, r) => r.Id < min.Id ? r : min, relations[0]);
-
-  const role = await roleRepo.findById(relation.Role_id);
+  const { relation, role } = await pickBestRelation(relations);
   if (!role) {
     throw serviceError('Rol del usuario no encontrado. Contacte al administrador.', 500);
   }
@@ -173,9 +198,7 @@ if (user.Status !== 1 && user.Status !== true) {
     );
   }
 
-  const relation = relations.reduce((min, r) => r.Id < min.Id ? r : min, relations[0]);
-
-  const role = await roleRepo.findById(relation.Role_id);
+  const { relation, role } = await pickBestRelation(relations);
   if (!role) {
     throw serviceError('Rol del usuario no encontrado. Contacte al administrador.', 500);
   }

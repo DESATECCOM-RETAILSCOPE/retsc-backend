@@ -49,20 +49,24 @@ function getShelfContainer() {
   return process.env.AZURE_GLOBAL_SHELF_CONTAINER || 'global-shelf-training';
 }
 
-// BUG (encontrado en prueba E2E, 2026-07-19): RETSC_AI_DETECTION_MODELS.prediction_resource_id
-// es VARCHAR(100), pero un Azure Resource ID completo (/subscriptions/.../resourceGroups/.../
-// providers/Microsoft.CognitiveServices/accounts/{nombre}) fácilmente supera esa longitud —
-// en este ambiente mide 122 caracteres. Enviarlo tal cual rompe el protocolo TDS del UPDATE
-// ("Data type 0xA7 has an invalid data length or metadata length"), y como updateCustomVisionRefs
-// se llama DESPUÉS de crear el proyecto real en Custom Vision, el resultado es un proyecto CV
-// huérfano: existe en Azure pero customvision_project_id nunca queda guardado en la fila.
-// No se trunca el valor (quedaría un Resource ID inválido y parecería válido) — se guarda null
-// y se loguea la advertencia. Ampliar la columna es una migración de estructura, fuera de
-// alcance acá; hacerlo si en el futuro se necesita el valor completo persistido.
+// BUG (encontrado en prueba E2E, 2026-07-19; columna ampliada a VARCHAR(200) 2026-08-04 por
+// jefatura, ver docs/DIAGNOSTICO-spec-v1.4-vs-codigo.md): RETSC_AI_DETECTION_MODELS.
+// prediction_resource_id era VARCHAR(100), pero un Azure Resource ID completo
+// (/subscriptions/.../resourceGroups/.../providers/Microsoft.CognitiveServices/accounts/{nombre})
+// fácilmente supera esa longitud — en este ambiente mide 157 caracteres. Enviarlo tal cual con
+// la columna vieja rompía el protocolo TDS del UPDATE ("Data type 0xA7 has an invalid data
+// length or metadata length"), y como updateCustomVisionRefs se llama DESPUÉS de crear el
+// proyecto real en Custom Vision, el resultado era un proyecto CV huérfano: existía en Azure
+// pero customvision_project_id nunca quedaba guardado en la fila. Ahora que la columna es
+// VARCHAR(200), un id de 157 caracteres entra sin problema — el guard se mantiene (no se quita
+// la protección) pero con el límite real de la columna en vez del viejo 100. Si algún día un
+// Resource ID excede los 200 (formato de Azure cambia, u otro tipo de recurso con nombre más
+// largo), sigue sin truncarse — se guarda null y se loguea, mismo criterio de siempre.
+const PREDICTION_RESOURCE_ID_MAX_LENGTH = 200; // debe coincidir con RETSC_AI_DETECTION_MODELS.prediction_resource_id
 function getSafePredictionResourceId() {
   const raw = process.env.CUSTOM_VISION_PREDICTION_RESOURCE_ID || null;
-  if (raw && raw.length > 100) {
-    console.warn(`[aiInfra] CUSTOM_VISION_PREDICTION_RESOURCE_ID mide ${raw.length} caracteres, excede prediction_resource_id VARCHAR(100) — se guarda NULL en vez de truncar.`);
+  if (raw && raw.length > PREDICTION_RESOURCE_ID_MAX_LENGTH) {
+    console.warn(`[aiInfra] CUSTOM_VISION_PREDICTION_RESOURCE_ID mide ${raw.length} caracteres, excede prediction_resource_id VARCHAR(${PREDICTION_RESOURCE_ID_MAX_LENGTH}) — se guarda NULL en vez de truncar.`);
     return null;
   }
   return raw;

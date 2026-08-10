@@ -200,4 +200,26 @@ async function uploadToContainer({ containerName, blobPath, buffer, contentType 
   return { url: relUrl, mode: 'mock' };
 }
 
-module.exports = { uploadImage, uploadImagesBatch, createMarker, prefixExists, ensureContainerExists, uploadToContainer };
+// Descarga un blob de cualquier container a un Buffer en memoria.
+// Usado por scripts/run-ocr-embedding-validation.js para bajar fotos de entrenamiento y
+// recortarlas — primer consumidor de un `download` en este archivo (antes solo había upload).
+//
+// En mock: lee el archivo de data/blob-mock/{containerName}/{blobPath}.
+async function downloadFromContainer({ containerName, blobPath }) {
+  const mode = getMode();
+
+  if (mode === 'azure') {
+    return withRetry(async () => {
+      const container = getAzureContainerByName(containerName);
+      const blobClient = container.getBlockBlobClient(blobPath);
+      const downloadResponse = await blobClient.downloadToBuffer();
+      return downloadResponse;
+    }, blobPath);
+  }
+
+  // mock
+  const fullPath = path.join(getMockBasePath(), containerName, blobPath);
+  return fs.readFile(fullPath);
+}
+
+module.exports = { uploadImage, uploadImagesBatch, createMarker, prefixExists, ensureContainerExists, uploadToContainer, downloadFromContainer };

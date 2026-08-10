@@ -14,6 +14,9 @@ const TABLE = 'RETSC_LOG_JOBS';
 function toDTO(row) {
   return {
     ...row,
+    // loadNumber solo viene poblado en filas de listByUser (ROW_NUMBER() calculado ahí,
+    // Issue B5) — null en cualquier otra query de este repo que no lo seleccione.
+    loadNumber: row.load_number ?? null,
     errorSummary: row.error_summary ? (() => {
       try { return JSON.parse(row.error_summary); } catch { return row.error_summary; }
     })() : null,
@@ -129,6 +132,20 @@ const findById = async (jobId) => {
 };
 
 // Lista jobs de un usuario ordenados del más reciente al más viejo.
+//
+// load_number (Issue B5, F5 frontend "Carga #N"): antes el frontend mostraba
+// "Carga #{job_id}", la PK global de RETSC_LOG_JOBS — salta de números entre empresas y
+// no arranca en 1 para cada una. Se calcula con ROW_NUMBER() PARTITION BY enterprise_id
+// ORDER BY created_at ASC (subquery aparte para no interferir con el ORDER BY DESC +
+// paginación de afuera, que sigue siendo "más reciente primero" — el número asignado a
+// cada job no cambia entre páginas ni se recalcula al pedir la siguiente).
+//
+// NOTA — gap conocido, no cerrado en este fix: esta query ya filtra por user_id (este
+// endpoint es "MIS cargas", no "cargas de mi empresa"), así que el PARTITION BY
+// enterprise_id en la práctica numera solo los jobs DE ESTE usuario — si dos usuarios
+// distintos de la MISMA empresa suben cargas, cada uno vería su propio contador arrancar
+// en 1 en vez de compartir una sola secuencia por empresa. Hoy no existe un endpoint que
+// liste jobs por empresa (solo por usuario) para probar/cerrar ese caso correctamente.
 const listByUser = async (userId, { limit = 20, offset = 0 } = {}) => {
   const pool = await getPool();
   const r = await pool.request()
@@ -136,8 +153,11 @@ const listByUser = async (userId, { limit = 20, offset = 0 } = {}) => {
     .input('limit',  sql.Int, limit)
     .input('offset', sql.Int, offset)
     .query(`
-      SELECT * FROM ${TABLE}
-      WHERE user_id = @userId
+      SELECT * FROM (
+        SELECT *, CAST(ROW_NUMBER() OVER (PARTITION BY enterprise_id ORDER BY created_at ASC) AS INT) AS load_number
+        FROM ${TABLE}
+        WHERE user_id = @userId
+      ) numbered
       ORDER BY created_at DESC
       OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY
     `);

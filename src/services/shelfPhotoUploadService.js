@@ -6,10 +6,21 @@
 //   2b. Caption confidence — Azure AI Vision (stub permisivo hasta que haya credenciales)
 //   3.  Validación de contenido ("¿es una góndola?") — Azure AI Vision (stub permisivo)
 //   4.  Deduplicación por hash SHA-256 (scope global: ENTERPRISE_ID IS NULL)
-//   5.  Upload a Blob Storage + insert en RETSC_EX_SHELFPHOTO
+//   5.  Upload a Blob Storage SIEMPRE (un archivo por canal, FIX 2026-08-05) + insert en
+//       RETSC_EX_SHELFPHOTO solo si el hash es nuevo (evita violar su índice único)
 //   6.  Registro en Custom Vision SIN regiones → cvImageId
-//   7.  Insert en RETSC_AI_TRAINING_ANNOTATIONS
+//   7.  Insert en RETSC_AI_TRAINING_PHOTOS (FIX 2026-07-26 — ver nota más abajo)
 //   8.  Verificación de umbral por canal (no bloquea la subida)
+//
+// FIX 2026-07-26 (migración de esquema del equipo DBA): la Etapa 7 insertaba una fila
+// "placeholder" en RETSC_AI_TRAINING_ANNOTATIONS con photo_notes/canal/dtc_category_id —
+// esas columnas se movieron a la tabla nueva RETSC_AI_TRAINING_PHOTOS (una fila por foto;
+// RETSC_AI_TRAINING_ANNOTATIONS ahora es solo cajitas, FK'd a esta por photo_id). La Etapa 7
+// ahora inserta en RETSC_AI_TRAINING_PHOTOS y YA NO crea ninguna anotación — no hay cajitas
+// que crear al momento de subir la foto (eso lo hace el equipo de anotación, Issue #42,
+// externo a este repo). El photo_id que importa para el pipeline de review/anotación es el
+// de RETSC_AI_TRAINING_PHOTOS, DISTINTO del Photo_id de RETSC_EX_SHELFPHOTO (Etapa 5) — no
+// hay FK entre esas dos tablas, son namespaces de ID separados.
 //
 // La foto es GLOBAL: no pertenece a ningún enterprise. Alimenta el modelo de
 // DETECCIÓN (dónde hay producto en góndola), no el de identificación de GTIN.
@@ -32,7 +43,7 @@ const { generateFilename }        = require('../utils/shelfPhotoFilenameGenerato
 const { normalizeName }           = require('../utils/categoryNameNormalizer');
 const categoryRepo                = require('../repositories/categoryRepo');
 const shelfPhotoRepo              = require('../repositories/shelfPhotoRepo');
-const annotationRepo              = require('../repositories/annotationRepo');
+const trainingPhotoRepo           = require('../repositories/trainingPhotoRepo');
 const aiModelRepo                 = require('../repositories/aiModelRepo');
 
 const CANALES_VALIDOS = ['OMT', 'DTT', 'CONVENIENCE'];
@@ -70,7 +81,7 @@ function resolveTagId(canal) {
 // @param {string} canal           - 'OMT' | 'DTT' | 'CONVENIENCE'
 // @param {number} uploadedBy      - req.user.userId (auditoría)
 // @returns {object}               - Datos de la subida para la respuesta HTTP
-async function uploadShelfPhoto({ buffer, dtcCategoryId, canal, uploadedBy }) {
+async function uploadShelfPhoto({ buffer, dtcCategoryId, canal, uploadedBy, enterpriseId = null }) {
 
   // ── Etapa 1: Validaciones de entrada ────────────────────────────────────────
 
@@ -134,51 +145,91 @@ async function uploadShelfPhoto({ buffer, dtcCategoryId, canal, uploadedBy }) {
     );
   }
 
-  // ── Etapa 4: Deduplicación por hash SHA-256 ──────────────────────────────────
+  // ── Etapa 4: Deduplicación por hash SHA-256, CONSCIENTE DE CANAL (fix Issue B4) ──
   // NOTA: el issue dice "MD5" como referencia informal, pero el repo y la columna
   // image_hash VarChar(64) usan SHA-256. Se reutiliza SHA-256 por consistencia.
-
+  //
+  // FIX 2026-07-26: antes se rechazaba CUALQUIER imagen con un hash ya visto, sin
+  // importar el canal — así que la misma foto subida para OMT y después para DTT se
+  // rechazaba como duplicada en el segundo canal, y ese canal nunca se guardaba. La
+  // regla correcta es "una vez por canal", no "una vez globalmente".
+  //
+  // RETSC_EX_SHELFPHOTO no tiene columna `canal` (el dedup original era global a
+  // propósito, antes de que existiera el concepto de canal en este flujo) y
+  // RETSC_AI_TRAINING_PHOTOS no tiene columna `image_hash` propia (el hash sigue
+  // viajando en photo_notes, mismo TEMPORAL de siempre) — ninguna de las dos tablas
+  // tiene por sí sola (hash, canal) juntos. Se resuelve cruzando ambas sin migrar nada:
+  //   1. ¿Existe ALGUNA fila en RETSC_EX_SHELFPHOTO con este hash? (bytes ya vistos)
+  //   2. Si existe, ¿ya hay una fila en RETSC_AI_TRAINING_PHOTOS con este hash PARA
+  //      ESTE canal? → 409 duplicado real (mismo canal, misma imagen).
+  //   3. Si existe el hash pero NO para este canal → se sube igual un blob nuevo bajo la
+  //      carpeta de ESTE canal (FIX 2026-08-05, ver Etapa 5) — solo se evita el segundo
+  //      INSERT en RETSC_EX_SHELFPHOTO, que violaría su índice único por (hash, NULL).
   const hash = quality.hash; // ya calculado por validateQualityMetrics
 
-  const existing = await shelfPhotoRepo.findByHashGlobal(hash);
-  if (existing) {
-    throw Object.assign(
-      new Error(`Imagen duplicada. Ya existe con Photo_id=${existing.Photo_id}.`),
-      { statusCode: 409, errorCode: 'ERR_DUPLICATE_IMAGE', existingPhotoId: existing.Photo_id }
-    );
+  const existingHash = await shelfPhotoRepo.findByHashGlobal(hash);
+
+  if (existingHash) {
+    const alreadyInThisChannel = await trainingPhotoRepo.findByHashAndCanal(hash, canal);
+    if (alreadyInThisChannel) {
+      throw Object.assign(
+        new Error(`Esta foto ya fue subida antes para el canal ${canal}. Si es una foto distinta, verificá que no sea exactamente el mismo archivo (mismo contenido de imagen).`),
+        { statusCode: 409, errorCode: 'ERR_DUPLICATE_IMAGE', existingPhotoId: alreadyInThisChannel.photo_id }
+      );
+    }
+    console.log(`[shelfPhoto] hash ya visto (Photo_id=${existingHash.Photo_id}) pero no para canal=${canal} — se sube igual un blob nuevo para este canal (Etapa 5)`);
   }
 
-  // ── Etapa 5: Upload a Blob Storage + insert en RETSC_EX_SHELFPHOTO ──────────
-
+  // ── Etapa 5: Upload a Blob Storage (SIEMPRE) + insert en RETSC_EX_SHELFPHOTO (condicional) ──
+  // FIX 2026-08-05 (decisión de producto, María): el blob se sube SIEMPRE a la carpeta del
+  // canal ACTUAL, exista o no el hash en otro canal (un archivo por canal). Antes, si el hash
+  // ya existía, se saltaba el upload y se copiaba el blob_path del canal viejo → dos bugs:
+  // (a) fila en BD sin blob, y (b) canal=OMT con blob_path bajo /dtt/. Ahora solo el registro
+  // de dedup por hash en RETSC_EX_SHELFPHOTO es condicional: su índice único filtrado
+  // (ENTERPRISE_ID, image_hash) trata dos NULL como iguales, así que un segundo INSERT con el
+  // mismo hash violaría la constraint. Subir el mismo buffer a un blob_path DISTINTO (otra
+  // carpeta de canal) no viola nada. Efecto deseado: aunque RETSC_EX_SHELFPHOTO tenga hashes
+  // viejos de pruebas, la carga vuelve a llegar al contenedor sin limpiar esa tabla a mano.
   const categoriaSlug = normalizeName(category.Category_dsc);
   const filename      = generateFilename({ categoriaSlug, canal });
   const blobPath      = `dtc-${categoriaSlug}/${canal.toLowerCase()}/${filename}`;
 
-  const { url: blobUrl } = await uploadToContainer({
+  const uploadResult = await uploadToContainer({
     containerName: SHELF_CONTAINER(),
     blobPath,
     buffer,
     contentType: 'image/jpeg',
   });
+  const blobUrl = uploadResult.url;
+  console.log(`[shelfPhoto] blob subido — path=${blobPath} (mode=${uploadResult.mode})`);
 
-  console.log(`[shelfPhoto] blob subido — path=${blobPath}`);
+  if (uploadResult.mode !== 'azure') {
+    console.warn(
+      `[shelfPhoto] ⚠ uploadToContainer corrió en mode='${uploadResult.mode}', NO 'azure'. ` +
+      `El blob NO llegó al contenedor de Azure. Revisar BLOB_STORAGE_MODE / connection string en Railway.`
+    );
+  }
 
-  const photo = await shelfPhotoRepo.insert({
-    enterprise_id:      null,            // foto global, sin enterprise
-    category_id:        dtcId,
-    url_blob:           blobUrl,
-    photo_date:         new Date(),
-    image_hash:         hash,
-    quality_status:     'PASSED',
-    quality_error_code: null,
-    width:              quality.metrics.width,
-    height:             quality.metrics.height,
-    blur_score:         quality.metrics.sharpness,
-    brightness:         quality.metrics.brightness,
-  });
-
-  const photoId = photo.Photo_id;
-  console.log(`[shelfPhoto] foto registrada — Photo_id=${photoId}`);
+  if (!existingHash) {
+    await shelfPhotoRepo.insert({
+      enterprise_id:      null,            // foto global, sin enterprise
+      category_id:        dtcId,
+      url_blob:           blobUrl,
+      photo_date:         new Date(),
+      image_hash:         hash,
+      quality_status:     'PASSED',
+      quality_error_code: null,
+      width:              quality.metrics.width,
+      height:             quality.metrics.height,
+      blur_score:         quality.metrics.sharpness,
+      brightness:         quality.metrics.brightness,
+    });
+  } else {
+    console.log(
+      `[shelfPhoto] hash ya visto (Photo_id=${existingHash.Photo_id}) — no se re-inserta en ` +
+      `RETSC_EX_SHELFPHOTO (dedup por hash), pero el blob del canal ${canal} sí quedó subido en ${blobPath}`
+    );
+  }
 
   // ── Etapa 6: Registro en Custom Vision SIN regiones ──────────────────────────
   // projectId puede ser null si la categoría aún no tiene modelo en Custom Vision (PENDING).
@@ -191,27 +242,34 @@ async function uploadShelfPhoto({ buffer, dtcCategoryId, canal, uploadedBy }) {
   const { cvImageId } = await customVisionService.createImageFromData(projectId, buffer, tagId);
   console.log(`[shelfPhoto] Custom Vision — cvImageId=${cvImageId}`);
 
-  // ── Etapa 7: Insert en RETSC_AI_TRAINING_ANNOTATIONS ─────────────────────────
-  // Las bboxes y cv_region_id se completan en Issue #42 (anotación equipo DTC).
+  // ── Etapa 7: Insert en RETSC_AI_TRAINING_PHOTOS ──────────────────────────────
+  // Sin cajitas todavía (status inicial EN_PROGRESO) — las crea el equipo de anotación
+  // (Issue #42, externo). photo_notes sigue llevando el mismo resumen de trazabilidad
+  // de siempre (blob + hash + cvImageId), ahora en la fila de FOTO en vez de en una
+  // anotación placeholder.
 
   const photoNotes = `blob:${blobPath} | sha256:${hash} | cvImageId:${cvImageId}`;
-  const annotation = await annotationRepo.insert({
-    photo_id:       photoId,
-    dtc_category_id: dtcId,
+  const trainingPhoto = await trainingPhotoRepo.insert({
+    uploaded_by_user_id: uploadedBy,
+    // De qué contribuyente vino la foto. Es lo que habilita el aislamiento por
+    // empresa del modo REVIEW (guía 3.1): que cada admin revise sólo las suyas.
+    // Sin esto la columna queda en NULL y ese filtro no puede funcionar.
+    uploaded_by_enterprise_id: enterpriseId ?? null,
+    category_id:         dtcId,
     canal,
-    source:         'ADMIN_UPLOAD',
-    is_validated:   0,
-    photo_notes:    photoNotes,
+    blob_path:            blobPath,
+    photo_notes:          photoNotes,
+    photo_status:         'EN_PROGRESO',
   });
 
-  const annotationId = annotation.annotation_id;
-  console.log(`[shelfPhoto] anotación creada — annotation_id=${annotationId}`);
+  const trainingPhotoId = trainingPhoto.photo_id;
+  console.log(`[shelfPhoto] foto de entrenamiento registrada — photo_id=${trainingPhotoId}`);
 
   // ── Etapa 8: Verificar umbral por canal (no bloquea la subida) ───────────────
   // NOTA: 'IMAGES_UPLOADED' es un status nuevo para el modelo; la columna status
   // es varchar(20) y lo soporta. Indica que hay imágenes suficientes para entrenar.
 
-  const channelCount = await annotationRepo.countValidatedApprovedByCategoryChannel(dtcId, canal);
+  const channelCount = await trainingPhotoRepo.countValidatedApprovedByCategoryChannel(dtcId, canal);
   const threshold    = TRAINING_THRESHOLD();
   const thresholdReached = channelCount >= threshold;
 
@@ -222,11 +280,11 @@ async function uploadShelfPhoto({ buffer, dtcCategoryId, canal, uploadedBy }) {
   }
 
   return {
-    photoId,
+    photoId: trainingPhotoId,
     blobPath,
     blobUrl,
+    blobMode: uploadResult.mode,
     cvImageId,
-    annotationId,
     canal,
     dtcCategoryId: dtcId,
     channelCount,

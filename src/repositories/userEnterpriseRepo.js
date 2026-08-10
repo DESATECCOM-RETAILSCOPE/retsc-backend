@@ -2,6 +2,13 @@ const { getPool, sql } = require('../config/db');
 
 const TABLE = 'RETSC_OP_USRSXENTERP';
 
+// ORDER BY Fecha_activacion ASC: authService.js necesita poder tomar "la relación más
+// antigua" de forma determinística cuando un usuario tiene más de una empresa activa.
+// RETSC_OP_USRSXENTERP no tiene columna Id/PK propia (verificado con INFORMATION_SCHEMA:
+// User_id, Enterprise_id, Role_id, Status, Fecha_activacion, Fecha_inactivacion, Phone) —
+// sin este ORDER BY, el orden de las filas es el que decida devolver SQL Server, no
+// necesariamente el de creación. Enterprise_id ASC como desempate estable si dos
+// relaciones comparten Fecha_activacion.
 const findActiveByUserId = async (userId, currentDate) => {
   const now = currentDate ? new Date(currentDate) : new Date();
   const pool = await getPool();
@@ -14,6 +21,7 @@ const findActiveByUserId = async (userId, currentDate) => {
         AND Status = 1
         AND Fecha_activacion <= @now
         AND (Fecha_inactivacion IS NULL OR Fecha_inactivacion > @now)
+      ORDER BY Fecha_activacion ASC, Enterprise_id ASC
     `);
   return r.recordset;
 };

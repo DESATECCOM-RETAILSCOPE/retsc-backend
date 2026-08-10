@@ -17,9 +17,13 @@ function generatePassword() {
   return pwd;
 }
 
-function serviceError(msg, statusCode) {
+// extra (Issue B6): { field, errorCode } opcional — permite que el controller devuelva
+// qué campo específico causó el error (sobre todo duplicados 409) sin que el frontend
+// tenga que parsear el mensaje en español para saber qué input marcar.
+function serviceError(msg, statusCode, extra) {
   const err = new Error(msg);
   err.statusCode = statusCode;
+  if (extra) Object.assign(err, extra);
   return err;
 }
 
@@ -105,6 +109,7 @@ const registerEnterprise = async (payload) => {
     throw serviceError(
       "Ya existe una empresa registrada con ese fiscalId",
       409,
+      { field: 'fiscalId', errorCode: 'ERR_DUP_FISCAL_ID' },
     );
   }
 
@@ -123,6 +128,7 @@ const registerEnterprise = async (payload) => {
       throw serviceError(
         "El administrador con esa cédula ya tiene una empresa activa asignada. Debe ser desactivado en su empresa anterior antes de registrarlo en una nueva.",
         409,
+        { field: 'adminCedula', errorCode: 'ERR_CEDULA_ACTIVE_ELSEWHERE' },
       );
     }
   }
@@ -133,7 +139,11 @@ const registerEnterprise = async (payload) => {
     userByEmail &&
     (!userByCedula || userByEmail.User_id !== userByCedula.User_id)
   ) {
-    throw serviceError("Ya existe un usuario con ese email en el sistema", 409);
+    throw serviceError(
+      "Ya existe un usuario con ese email en el sistema",
+      409,
+      { field: 'adminEmail', errorCode: 'ERR_DUP_EMAIL' },
+    );
   }
 
   // ───── Fail-fast: rol Admin debe existir antes de tocar nada ─────
@@ -336,6 +346,7 @@ const createEnterprise = async (payload) => {
     throw serviceError(
       "Ya existe una empresa registrada con ese fiscalId",
       409,
+      { field: 'fiscalId', errorCode: 'ERR_DUP_FISCAL_ID' },
     );
   }
 
