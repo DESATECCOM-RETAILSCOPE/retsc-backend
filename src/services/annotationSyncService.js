@@ -59,11 +59,24 @@ const aiModelRepo         = require('../repositories/aiModelRepo');
 const customVisionService = require('./customVisionService');
 const modelTrainingService = require('./modelTrainingService');
 const blobStorageService  = require('./blobStorageService');
+const configService        = require('./configService');
 const { hashBuffer }       = require('../utils/imageHasher');
 
 const CANALES = ['OMT', 'DTT', 'CONVENIENCE'];
 
-const THRESHOLD = () => parseInt(process.env.SHELF_TRAINING_THRESHOLD || '15', 10);
+// Umbral del PRIMER entrenamiento de una categoría — fijo, es el mínimo real que exige Azure
+// Custom Vision para entrenar detección (confirmado empíricamente, ver CLAUDE.md, hallazgo
+// 2026-08-08/2026-08-09). NO sale de RETSC_CONFIG a propósito: no es un parámetro de negocio
+// ajustable, es un piso técnico de la API — cambiarlo rompería el primer entrenamiento.
+const FIRST_TRAIN_THRESHOLD = () => parseInt(process.env.SHELF_TRAINING_THRESHOLD || '15', 10);
+
+// Umbral de los RE-entrenamientos siguientes (pedido de jefatura, 2026-08-10) — a diferencia
+// del primero, SÍ es un parámetro de negocio ajustable sin deploy: RETSC_CONFIG.clave=
+// 'RETRAIN_BATCH_SIZE'. Mismo patrón defensivo que SKU_MATCH_THRESHOLD (skuSearchService.js) —
+// cache/fallback/parseo seguro vía configService.getNumberConfig(), nunca un CAST crudo que
+// reviente si el valor tiene formato raro (coma decimal, texto, fila borrada, etc.).
+const RETRAIN_BATCH_SIZE_KEY      = 'RETRAIN_BATCH_SIZE';
+const RETRAIN_BATCH_SIZE_FALLBACK = 10;
 
 // Mismo container que usa shelfPhotoUploadService.js — necesario acá para el auto-registro
 // defensivo (Opción C, ver autoRegisterImage()).
@@ -487,11 +500,21 @@ async function checkAndUpdateThreshold(categoryId) {
     return;
   }
 
-  const threshold = THRESHOLD();
+  // Dos umbrales distintos (pedido de jefatura, 2026-08-10): el conteo "desde trained_at" por
+  // categoría+canal (countSyncedSinceByCategoryChannel) ya existía y ya funciona igual para
+  // ambos casos — lo que cambia es contra qué número se compara. Sin esta distinción, comparar
+  // el conteo YA ACOTADO "desde trained_at" contra el mismo 15 de siempre habría hecho que un
+  // reentrenamiento necesitara 15 fotos nuevas en vez de las 10 de RETRAIN_BATCH_SIZE.
+  const isFirstTraining = model.trained_at == null;
+  const threshold = isFirstTraining
+    ? FIRST_TRAIN_THRESHOLD()
+    : await configService.getNumberConfig(RETRAIN_BATCH_SIZE_KEY, RETRAIN_BATCH_SIZE_FALLBACK, { min: 1 });
+
   for (const canal of CANALES) {
     const count = await trainingPhotoRepo.countSyncedSinceByCategoryChannel(categoryId, canal, model.trained_at);
     if (count >= threshold) {
-      console.log(`[annotationSync] umbral alcanzado — categoria=${categoryId} canal=${canal} (${count}/${threshold} SYNCED desde trained_at=${model.trained_at ?? 'nunca'}) → disparando entrenamiento automático`);
+      const motivo = isFirstTraining ? 'primer entrenamiento, umbral fijo' : 'reentrenamiento, RETSC_CONFIG.RETRAIN_BATCH_SIZE';
+      console.log(`[annotationSync] umbral alcanzado — categoria=${categoryId} canal=${canal} (${count}/${threshold} SYNCED desde trained_at=${model.trained_at ?? 'nunca'}, ${motivo}) → disparando entrenamiento automático`);
       await aiModelRepo.updateStatus(model.detection_model_id, 'IMAGES_UPLOADED');
 
       // Fire-and-forget — no se espera a que termine el training, el sync que llamó a esta
