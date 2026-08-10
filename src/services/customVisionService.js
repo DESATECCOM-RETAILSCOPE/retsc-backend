@@ -146,12 +146,25 @@ async function createImageFromData(projectId, buffer, tagId) {
 
 // Crea regiones (bounding boxes) para imágenes que ya existen en el proyecto.
 // regions: [{ imageId, tagId, left, top, width, height }] — coordenadas normalizadas 0..1.
-// Trocea automáticamente en lotes de 64 (límite de la API).
+// Trocea automáticamente en lotes de 64 (límite de la API) — son llamadas HTTP INDEPENDIENTES,
+// no hay ninguna garantía de atomicidad del lado de Custom Vision entre lotes.
 // Devuelve el array combinado de regiones creadas (con su regionId).
 // CONFIRMADO contra un proyecto CV real: el orden de `created[]` NO coincide con el orden de
 // envío — el llamador debe correlacionar por coordenadas (left/top/width/height), no por índice.
 // Ver annotationSyncService.coordsMatch() para el patrón ya usado en este repo.
-async function createImageRegions(projectId, regions) {
+//
+// opts.onBatchCreated(chunkCreated) — FIX 2026-08-09 (F1.1/Fase 2, agujero de fallo parcial de
+// batch): si una foto tiene más de 64 cajitas y el SEGUNDO (o siguiente) lote falla, las
+// regiones del lote ANTERIOR ya están confirmadas de verdad en Custom Vision — no hay rollback
+// del lado de CV para deshacerlas. Antes, el `created` acumulado se perdía por completo al
+// propagarse la excepción (nunca llegaba al llamador), así que esas cajitas quedaban sin
+// cv_region_id en SQL; el próximo reintento las volvía a enviar y CV respondía "Duplicate image
+// regions", dejando la foto en ERROR permanente. `onBatchCreated`, si se pasa, se llama
+// (awaited) INMEDIATAMENTE después de que cada lote se confirma — antes de intentar el
+// siguiente — para que el llamador pueda persistir esas regiones ya reales sin esperar a que
+// termine el batch completo. Además, por las dudas de que el llamador no lo use, el error que
+// se propaga en un fallo también lleva `err.partialCreated` con lo confirmado hasta ese punto.
+async function createImageRegions(projectId, regions, { onBatchCreated } = {}) {
   if (!regions || regions.length === 0) return [];
 
   const BATCH_SIZE = 64;
@@ -170,12 +183,19 @@ async function createImageRegions(projectId, regions) {
       })),
     };
 
-    const result = await cvFetch(`projects/${projectId}/images/regions`, {
-      method: 'POST',
-      body: JSON.stringify(body),
-    });
+    let result;
+    try {
+      result = await cvFetch(`projects/${projectId}/images/regions`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      });
+    } catch (err) {
+      throw Object.assign(err, { partialCreated: created });
+    }
 
-    created.push(...(result?.created ?? []));
+    const chunkCreated = result?.created ?? [];
+    created.push(...chunkCreated);
+    if (onBatchCreated) await onBatchCreated(chunkCreated);
   }
 
   return created;

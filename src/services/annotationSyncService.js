@@ -189,13 +189,38 @@ async function autoRegisterImage(photo, projectId, tagId) {
   return cvImageId;
 }
 
-// Marca sincronizadas las cajitas dadas (cv_region_id por cajita) y el estado de sync a
-// nivel de foto (SYNCED). Dos tablas distintas — ver nota de cabecera.
-async function markSynced(photoId, cvRegionIdsByAnnotation) {
+// Persiste cv_region_id por cajita, SIN tocar el estado de sync de la foto — extraído de
+// markSynced() (Fix 2026-08-09, F1.1/Fase 2) para poder usarlo también en un sync PARCIAL
+// (algunas cajitas confirmadas, otras no): esas cajitas confirmadas nunca deben perderse ni
+// reenviarse de nuevo, aunque la foto en su conjunto no pueda marcarse SYNCED todavía.
+// updateCvRegionId es un UPDATE idempotente — llamarlo dos veces con el mismo valor es inocuo.
+async function persistRegionIds(cvRegionIdsByAnnotation) {
   for (const [annotationId, regionId] of cvRegionIdsByAnnotation.entries()) {
     await annotationRepo.updateCvRegionId(annotationId, regionId);
   }
+}
+
+// Marca sincronizadas las cajitas dadas (cv_region_id por cajita) y el estado de sync a
+// nivel de foto (SYNCED). Dos tablas distintas — ver nota de cabecera.
+async function markSynced(photoId, cvRegionIdsByAnnotation) {
+  await persistRegionIds(cvRegionIdsByAnnotation);
   await trainingPhotoRepo.updateCvSync(photoId, { syncStatus: 'SYNCED', syncError: null });
+}
+
+// Correlaciona la lista de regiones devuelta por Custom Vision (createImageRegions) contra
+// las anotaciones que se enviaron a crear, por coordenadas (ver coordsMatch — CV no preserva
+// el orden ni da un ID de correlación propio). Se usa tanto lote por lote (onBatchCreated,
+// éxito parcial o total) como sobre err.partialCreated (fallo a mitad de un lote).
+function correlateCreatedRegions(regionsToCreate, createdList) {
+  const pending = regionsToCreate.map(r => ({ ...r }));
+  const cvRegionIdsByAnnotation = new Map();
+  for (const cvRegion of createdList) {
+    const idx = pending.findIndex(r => coordsMatch(r, cvRegion));
+    if (idx === -1) continue;
+    cvRegionIdsByAnnotation.set(pending[idx].annotation_id, cvRegion.regionId);
+    pending.splice(idx, 1);
+  }
+  return { cvRegionIdsByAnnotation, unmatched: pending };
 }
 
 async function markFailed(photoId, error) {
@@ -279,6 +304,9 @@ async function syncRegionsForPhoto(photo, rows) {
   // ver el catch más abajo (Fix 2026-08-09, mismo incidente que motivó
   // modelTrainingService.purgeEmptyTags(), acá la mitad "preventiva").
   let tagId = null;
+  // Hoisted igual que tagId — el catch necesita correlacionar err.partialCreated contra la
+  // misma lista que se mandó a crear (Fix 2026-08-09, F1.1/Fase 2).
+  let regionsToCreate = [];
 
   try {
     // pendingSync ya filtró todo lo que tenía cv_region_id, así que esto es un no-op hoy —
@@ -294,11 +322,23 @@ async function syncRegionsForPhoto(photo, rows) {
       cvImageId = await autoRegisterImage(photo, projectId, tagId);
     }
 
-    const regionsToCreate = pendingSync.filter(r =>
+    regionsToCreate = pendingSync.filter(r =>
       r.bbox_left != null && r.bbox_top != null && r.bbox_width != null && r.bbox_height != null
     );
 
-    const created = await customVisionService.createImageRegions(
+    // FIX 2026-08-09 (F1.1/Fase 2 — fallo parcial de batch): createImageRegions trocea en
+    // lotes de 64 vía llamadas HTTP INDEPENDIENTES, sin atomicidad del lado de Custom Vision
+    // entre lotes (confirmado en Tarea 0). Antes, si una foto tenía más de 64 cajitas y el
+    // SEGUNDO lote fallaba, las regiones del PRIMER lote — ya reales y confirmadas en CV — se
+    // perdían por completo (el `created` acumulado nunca llegaba hasta acá), dejando la foto
+    // sin ese cv_region_id; el próximo reintento las volvía a enviar y CV respondía "Duplicate
+    // image regions", atascando la foto en ERROR para siempre. `onBatchCreated` persiste cada
+    // lote confirmado INMEDIATAMENTE, antes de intentar el siguiente — así un fallo a mitad de
+    // camino nunca pierde lo que ya es real en Custom Vision, y además reduce (no elimina del
+    // todo) la ventana de "se creó en CV pero el proceso murió antes de guardar en SQL" a la
+    // duración de un solo lote en vez de la sincronización completa.
+    const confirmedByAnnotation = new Map();
+    await customVisionService.createImageRegions(
       projectId,
       regionsToCreate.map(r => ({
         imageId: cvImageId,
@@ -307,33 +347,49 @@ async function syncRegionsForPhoto(photo, rows) {
         top:     r.bbox_top,
         width:   r.bbox_width,
         height:  r.bbox_height,
-      }))
+      })),
+      {
+        onBatchCreated: async (chunkCreated) => {
+          const { cvRegionIdsByAnnotation, unmatched } = correlateCreatedRegions(regionsToCreate, chunkCreated);
+          if (unmatched.length) {
+            console.warn(`[annotationSync] ${unmatched.length} región(es) de un lote de photo_id=${photo.photo_id} no matchearon por coordenadas con ninguna anotación pendiente`);
+          }
+          await persistRegionIds(cvRegionIdsByAnnotation);
+          for (const [annotationId, regionId] of cvRegionIdsByAnnotation.entries()) {
+            confirmedByAnnotation.set(annotationId, regionId);
+          }
+        },
+      }
     );
 
-    // CONFIRMADO (prueba real contra un proyecto CV descartable): Custom Vision NO preserva
-    // el orden de envío en created[] — se correlaciona cada región devuelta con la anotación
-    // que la originó comparando left/top/width/height (la API no da un ID de correlación propio).
-    // Cada región devuelta se consume de a una para evitar reusar la misma anotación dos veces
-    // si dos cajitas tuvieran coordenadas idénticas.
-    const pending = regionsToCreate.map(r => ({ ...r }));
-    const cvRegionIdsByAnnotation = new Map();
-    for (const cvRegion of created) {
-      const idx = pending.findIndex(r => coordsMatch(r, cvRegion));
-      if (idx === -1) {
-        console.warn(`[annotationSync] no se encontró match de coordenadas para region_id=${cvRegion.regionId} devuelta por CV (photo_id=${photo.photo_id})`);
-        continue;
-      }
-      cvRegionIdsByAnnotation.set(pending[idx].annotation_id, cvRegion.regionId);
-      pending.splice(idx, 1);
-    }
-    if (pending.length) {
-      console.warn(`[annotationSync] ${pending.length} anotación(es) de photo_id=${photo.photo_id} quedaron sin region_id tras el match por coordenadas`);
+    // Segundo agujero de F1.1: CV puede confirmar MENOS regiones que las enviadas SIN lanzar
+    // ningún error. Antes esto solo logueaba un warning y de todas formas marcaba la foto
+    // entera SYNCED — esas cajitas quedaban sin cv_region_id para siempre, porque una foto
+    // SYNCED no se vuelve a sincronizar sola. Ahora: lo confirmado ya quedó persistido arriba
+    // (nunca se pierde ni se reenvía), pero la foto se marca ERROR, no SYNCED, para que un
+    // reintento futuro complete lo que falta.
+    if (confirmedByAnnotation.size < regionsToCreate.length) {
+      const missing = regionsToCreate.length - confirmedByAnnotation.size;
+      console.warn(`[annotationSync] photo_id=${photo.photo_id}: sync incompleto (${confirmedByAnnotation.size}/${regionsToCreate.length} confirmadas) — foto marcada ERROR, no SYNCED`);
+      await markFailed(photo.photo_id, new Error(
+        `Custom Vision confirmó ${confirmedByAnnotation.size}/${regionsToCreate.length} regiones — ${missing} sin match de coordenadas.`
+      ));
+      return;
     }
 
-    await markSynced(photo.photo_id, cvRegionIdsByAnnotation);
-    console.log(`[annotationSync] photo_id=${photo.photo_id}: ${created.length} regiones sincronizadas a Custom Vision (proyecto=${projectId})`);
+    await trainingPhotoRepo.updateCvSync(photo.photo_id, { syncStatus: 'SYNCED', syncError: null });
+    console.log(`[annotationSync] photo_id=${photo.photo_id}: ${confirmedByAnnotation.size} regiones sincronizadas a Custom Vision (proyecto=${projectId})`);
   } catch (err) {
     console.error(`[annotationSync] fallo al sincronizar photo_id=${photo.photo_id} con Custom Vision:`, err.message);
+
+    // Defensa en profundidad: si un lote lanzó (ver createImageRegions), lo confirmado en
+    // lotes ANTERIORES a ese ya se persistió vía onBatchCreated — esto solo cubre el caso de
+    // que err.partialCreated traiga algo que por lo que fuera no llegó a pasar por ahí.
+    if (err.partialCreated?.length) {
+      const { cvRegionIdsByAnnotation } = correlateCreatedRegions(regionsToCreate, err.partialCreated);
+      if (cvRegionIdsByAnnotation.size) await persistRegionIds(cvRegionIdsByAnnotation);
+    }
+
     await markFailed(photo.photo_id, err);
     await cleanupTagIfOrphaned(projectId, tagId, photo.photo_id);
   }

@@ -29,15 +29,18 @@ function resetCalls() {
   calls = { updateCvSync: [], updateCvRegionId: [], createImageRegions: [], updateStatus: [] };
 }
 
+// bbox_left único por id (en vez de un valor fijo compartido) para que coordsMatch() pueda
+// correlacionar de forma NO ambigua cuál anotación corresponde a cuál región devuelta —
+// necesario para el test de fallo parcial, que verifica CUÁLES ids específicos se confirmaron.
 function makeAnnotation(id, hasCvRegion) {
   return {
     annotation_id: id,
-    bbox_left: 0.1, bbox_top: 0.1, bbox_width: 0.2, bbox_height: 0.2,
+    bbox_left: id / 100, bbox_top: 0.1, bbox_width: 0.05, bbox_height: 0.05,
     cv_region_id: hasCvRegion ? `region-${id}` : null,
   };
 }
 
-function installStubs({ annotations, model = null }) {
+function installStubs({ annotations, model = null, createImageRegionsBehavior = 'normal' }) {
   const stub = (relPath, exports) => { const id = abs(relPath); require.cache[id] = { id, filename: id, loaded: true, exports }; };
 
   stub('../repositories/annotationRepo', {
@@ -60,11 +63,29 @@ function installStubs({ annotations, model = null }) {
   stub('./customVisionService', {
     isConfigured: () => true,
     ensureTag: async (_projectId, canal) => ({ id: `tag-${canal}` }),
-    createImageRegions: async (_projectId, regions) => {
+    listTags: async () => [],
+    deleteTag: async () => {},
+    createImageRegions: async (_projectId, regions, opts) => {
       calls.createImageRegions.push(regions);
+
+      if (createImageRegionsBehavior === 'throwWithPartial') {
+        // Simula un fallo de lote 2 en el que el llamador NO llega a usar onBatchCreated
+        // (para probar la defensa-en-profundidad del catch en syncRegionsForPhoto, no el
+        // camino feliz de onBatchCreated — ese ya tiene su propio test en
+        // customVisionRegions.regression.test.mjs). Confirma las primeras 2 regiones antes
+        // de "fallar" con las que falten.
+        const confirmed = regions.slice(0, 2).map((r, i) => ({ regionId: `region-${i}`, left: r.left, top: r.top, width: r.width, height: r.height }));
+        const err = new Error('Custom Vision 400: fallo simulado en el segundo lote');
+        err.partialCreated = confirmed;
+        throw err;
+      }
+
       // Devuelve una región creada por cada pedida, con las mismas coords (para que
-      // coordsMatch() las correlacione de vuelta a su anotación de origen).
-      return regions.map((r, i) => ({ regionId: `new-region-${i}`, left: r.left, top: r.top, width: r.width, height: r.height }));
+      // coordsMatch() las correlacione de vuelta a su anotación de origen) — y notifica
+      // onBatchCreated como hace la implementación real, un solo lote acá (<=64 regiones).
+      const created = regions.map((r, i) => ({ regionId: `new-region-${i}`, left: r.left, top: r.top, width: r.width, height: r.height }));
+      if (opts?.onBatchCreated) await opts.onBatchCreated(created);
+      return created;
     },
     deleteImageRegion: async () => {},
     createImageFromData: async () => ({ cvImageId: 'cv-auto-registered' }),
@@ -114,4 +135,26 @@ test('sync normal (cajitas SIN cv_region_id todavía) sigue funcionando como ant
   assert.equal(calls.updateCvRegionId.length, 2, 'cada anotación nueva debe guardar su cv_region_id');
   assert.equal(calls.updateCvSync.length, 1);
   assert.equal(calls.updateCvSync[0].syncStatus, 'SYNCED');
+});
+
+test('fallo de lote parcial (F1.1/Fase 2): lo confirmado ANTES del fallo se persiste igual, la foto queda ERROR no SYNCED', async () => {
+  resetCalls();
+  const annotations = [makeAnnotation(20, false), makeAnnotation(21, false), makeAnnotation(22, false)];
+  installStubs({
+    annotations,
+    model: { detection_model_id: 1, customvision_project_id: 'proj-123', status: 'PROJECT_CREATED', trained_at: null },
+    createImageRegionsBehavior: 'throwWithPartial',
+  });
+  const { syncApprovedPhoto } = loadServiceFresh();
+
+  const result = await syncApprovedPhoto(99, {});
+
+  const persistedIds = calls.updateCvRegionId.map(c => c.annotationId);
+  assert.equal(persistedIds.length, 2, 'las 2 regiones confirmadas antes del fallo deben persistirse');
+  assert.ok(persistedIds.includes(20) && persistedIds.includes(21), 'antes de este fix, estas 2 regiones reales en CV se perdían por completo');
+  assert.ok(!persistedIds.includes(22), 'la tercera nunca se confirmó — no debe tener region_id inventado');
+
+  assert.equal(calls.updateCvSync.length, 1);
+  assert.equal(calls.updateCvSync[0].syncStatus, 'ERROR', 'la foto no puede quedar SYNCED si una cajita real quedó sin confirmar');
+  assert.equal(result.synced, true); // syncApprovedPhoto no lanza — el fallo se registra en cv_sync_status, no como excepción
 });
