@@ -1,19 +1,34 @@
 // Servicio orquestador para la carga de fotos de góndola globales (Issue 7.2).
 //
-// Implementa el flujo de 8 etapas definido en el issue:
+// Flujo actual (la Etapa 6 original —registro en Custom Vision— se ELIMINÓ, ver FIX
+// 2026-08-12 más abajo):
 //   1. Validaciones de entrada (canal, dtcCategoryId, archivo)
 //   2a. Calidad de píxeles (resolución/nitidez/brillo) — local con sharp
 //   2b. Caption confidence — Azure AI Vision (stub permisivo hasta que haya credenciales)
 //   3.  Validación de contenido ("¿es una góndola?") — Azure AI Vision (stub permisivo)
 //   4.  Deduplicación por hash SHA-256 (scope global: ENTERPRISE_ID IS NULL)
 //   5.  Upload a Blob Storage SIEMPRE, un archivo por canal (FIX 2026-08-05)
-//   6.  Registro en Custom Vision SIN regiones → cvImageId
-//   7.  Insert en RETSC_AI_TRAINING_PHOTOS (FIX 2026-07-26 — ver nota más abajo)
+//   7.  Insert en RETSC_AI_TRAINING_PHOTOS, con cv_image_id=null (FIX 2026-07-26 / 2026-08-12)
 //   8.  Verificación de umbral por canal (no bloquea la subida)
 //
-// FIX 2026-08-12: este flujo NO toca RETSC_EX_SHELFPHOTO — esa tabla es de EJECUCIÓN de otro
-// equipo (Carlos), no de entrenamiento; se usaba antes como "libro de hashes" para el dedup y
-// nunca debió tocarse (ver Etapa 4 más abajo para el detalle del incidente que esto arregló).
+// FIX 2026-08-12: esta subida ya NO registra la imagen en Custom Vision (Etapa 6 eliminada).
+// Antes, createImageFromData() se llamaba acá mismo con la categoría recién validada — pero si
+// el modelo todavía estaba en PENDING/PROJECT_CREATED (sin proyecto CV real), esa función
+// devolvía un id FALSO (`stub-<uuid>`) que se persistía como si fuera un cvImageId real. Al
+// aprobar la anotación, el sync confiaba en ese id y Custom Vision lo rechazaba con
+// "BadRequestInvalidIds". Ahora la foto queda SOLO en Blob Storage + BD con
+// `cv_image_id=null`; el registro real en Custom Vision lo hace
+// annotationSyncService.autoRegisterImage() en el momento de sincronizar la anotación
+// aprobada — ahí el proyecto ya existe con certeza (si no existiera, no habría nada para
+// anotar) y el tag se resuelve con customVisionService.ensureTag(), la misma fuente de verdad
+// que usa el resto del pipeline de sync (antes esta subida usaba su propio resolveTagId() vía
+// env vars CV_TAG_OMT/DTT/CONVENIENCE, vacías siempre — dos fuentes de verdad distintas para lo
+// mismo; ahora solo queda la de ensureTag()).
+//
+// FIX 2026-08-12 (separado): este flujo NO toca RETSC_EX_SHELFPHOTO — esa tabla es de EJECUCIÓN
+// de otro equipo (Carlos), no de entrenamiento; se usaba antes como "libro de hashes" para el
+// dedup y nunca debió tocarse (ver Etapa 4 más abajo para el detalle del incidente que esto
+// arregló).
 //
 // FIX 2026-07-26 (migración de esquema del equipo DBA): la Etapa 7 insertaba una fila
 // "placeholder" en RETSC_AI_TRAINING_ANNOTATIONS con photo_notes/canal/dtc_category_id —
@@ -28,16 +43,12 @@
 //
 // Dependencias externas pendientes:
 //   - AZURE_VISION_ENDPOINT / AZURE_VISION_KEY (Image Analysis stub activo)
-//   - CUSTOM_VISION_TRAINING_KEY / CUSTOM_VISION_ENDPOINT (stub activo)
-//   - CV_TAG_OMT / CV_TAG_DTT / CV_TAG_CONVENIENCE (Issue #35 — tagId por canal)
 //
 // TODOs:
-//   - Conectar tagId de Custom Vision por canal cuando llegue Issue #35
 //   - Activar analyzeCaption() e isShelf() cuando Azure Vision tenga credenciales
 
 const { validateQualityMetrics } = require('./shelfPhotoQualityService');
 const azureVisionService          = require('./azureVisionService');
-const customVisionService         = require('./customVisionService');
 const { uploadToContainer }       = require('./blobStorageService');
 const { hashBuffer }              = require('../utils/imageHasher');
 const { generateFilename }        = require('../utils/shelfPhotoFilenameGenerator');
@@ -59,18 +70,6 @@ const TRAINING_THRESHOLD = () =>
 
 function svcError(message, statusCode, errorCode) {
   return Object.assign(new Error(message), { statusCode, errorCode });
-}
-
-// Resuelve el tagId de Custom Vision para un canal dado.
-// Por ahora viene de env opcionales; si no están configurados, devuelve null.
-// TODO: reemplazar por lookup a tabla de tags de Custom Vision cuando llegue Issue #35.
-function resolveTagId(canal) {
-  const map = {
-    OMT:         process.env.CV_TAG_OMT,
-    DTT:         process.env.CV_TAG_DTT,
-    CONVENIENCE: process.env.CV_TAG_CONVENIENCE,
-  };
-  return map[canal] || null;
 }
 
 // Orquesta las 8 etapas de la carga. Recibe el buffer ya leído del archivo multer.
@@ -199,16 +198,14 @@ async function uploadShelfPhoto({ buffer, dtcCategoryId, canal, uploadedBy, ente
   // FIX 2026-08-12: ya NO se inserta en RETSC_EX_SHELFPHOTO (tabla de ejecución de otro equipo).
   // El registro de la foto de entrenamiento vive únicamente en RETSC_AI_TRAINING_PHOTOS (Etapa 7).
 
-  // ── Etapa 6: Registro en Custom Vision SIN regiones ──────────────────────────
-  // projectId puede ser null si la categoría aún no tiene modelo en Custom Vision (PENDING).
-  // En ese caso createImageFromData devuelve stub con ID simulado.
-
-  const model     = await aiModelRepo.findByCategoryId(dtcId);
-  const projectId = model?.customvision_project_id ?? null;
-  const tagId     = resolveTagId(canal);
-
-  const { cvImageId } = await customVisionService.createImageFromData(projectId, buffer, tagId);
-  console.log(`[shelfPhoto] Custom Vision — cvImageId=${cvImageId}`);
+  // ── Etapa 6: (eliminada) Registro en Custom Vision ───────────────────────────
+  // FIX 2026-08-12: la subida ya NO registra la imagen en Custom Vision. Antes, si la
+  // categoría no tenía proyecto todavía (modelo PENDING/PROJECT_CREATED), createImageFromData
+  // devolvía un id FALSO (`stub-<uuid>`) que se persistía en cv_image_id; al aprobar, el sync
+  // lo tomaba como válido y Custom Vision respondía BadRequestInvalidIds. Ahora la foto va
+  // SOLO al Blob Storage (Etapa 5) + BD (Etapa 7), y el registro en Custom Vision lo hace
+  // annotationSyncService.autoRegisterImage() al sincronizar, descargando el blob — momento en
+  // el que el proyecto ya existe con certeza y el tag se resuelve con ensureTag().
 
   // ── Etapa 7: Insert en RETSC_AI_TRAINING_PHOTOS ──────────────────────────────
   // Sin cajitas todavía (status inicial EN_PROGRESO) — las crea el equipo de anotación
@@ -230,7 +227,7 @@ async function uploadShelfPhoto({ buffer, dtcCategoryId, canal, uploadedBy, ente
     canal,
     blob_path:            blobPath,
     image_hash:           hash,
-    cv_image_id:          cvImageId,
+    cv_image_id:          null,   // lo completa annotationSyncService al sincronizar
     photo_notes:          null,
     photo_status:         'EN_PROGRESO',
   });
@@ -241,7 +238,10 @@ async function uploadShelfPhoto({ buffer, dtcCategoryId, canal, uploadedBy, ente
   // ── Etapa 8: Verificar umbral por canal (no bloquea la subida) ───────────────
   // NOTA: 'IMAGES_UPLOADED' es un status nuevo para el modelo; la columna status
   // es varchar(20) y lo soporta. Indica que hay imágenes suficientes para entrenar.
+  // `model` se resuelve acá (ya no en la Etapa 6, que se eliminó) — es lo único que
+  // todavía necesita aiModelRepo en este flujo.
 
+  const model = await aiModelRepo.findByCategoryId(dtcId);
   const channelCount = await trainingPhotoRepo.countValidatedApprovedByCategoryChannel(dtcId, canal);
   const threshold    = TRAINING_THRESHOLD();
   const thresholdReached = channelCount >= threshold;
@@ -257,7 +257,7 @@ async function uploadShelfPhoto({ buffer, dtcCategoryId, canal, uploadedBy, ente
     blobPath,
     blobUrl,
     blobMode: uploadResult.mode,
-    cvImageId,
+    cvImageId: null,   // se registra en Custom Vision al aprobar la anotación, no al subir
     canal,
     dtcCategoryId: dtcId,
     channelCount,

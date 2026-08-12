@@ -4,22 +4,28 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 
 // Regresión del flujo de carga de fotos de góndola.
-// FIX 2026-08-12: el flujo NO debe tocar RETSC_EX_SHELFPHOTO (tabla de EJECUCIÓN de otro
-// equipo). El dedup se hace 100% contra RETSC_AI_TRAINING_PHOTOS (hash embebido en
-// photo_notes vía findByHashAndCanal). Estos tests blindan ese comportamiento: si alguien
-// vuelve a llamar shelfPhotoRepo, el stub tira y el test falla.
+// FIX 2026-08-12 (dos fixes de la misma tanda):
+//   1. El flujo NO debe tocar RETSC_EX_SHELFPHOTO (tabla de EJECUCIÓN de otro equipo). El
+//      dedup se hace 100% contra RETSC_AI_TRAINING_PHOTOS (columna image_hash propia vía
+//      findByHashAndCanal).
+//   2. La subida ya NO registra la imagen en Custom Vision (Etapa 6 eliminada) — eso pasa al
+//      sincronizar la anotación aprobada (ver shelfPhotoUploadNoCv.regression.test.mjs para el
+//      test dedicado a esto). Acá solo se ajustó el stub de customVisionService para que tire
+//      si el flujo lo llama, como defensa adicional.
+// Estos tests blindan ambos: si alguien vuelve a llamar shelfPhotoRepo o customVisionService,
+// el stub tira y el test falla.
 const require = createRequire(import.meta.url);
 const SVC_DIR = path.join(process.cwd(), 'src', 'services');
 const abs = (p) => require.resolve(path.join(SVC_DIR, p));
 
 let calls;
-function resetCalls() { calls = { uploadToContainer: [], trainingInsert: [], shelfPhotoRepoCalled: false }; }
+function resetCalls() { calls = { uploadToContainer: [], trainingInsert: [], shelfPhotoRepoCalled: false, cvCalled: false }; }
 
 function installStubs({ hashInThisChannel = null } = {}) {
   const stub = (relPath, exports) => { const id = abs(relPath); require.cache[id] = { id, filename: id, loaded: true, exports }; };
   stub('./shelfPhotoQualityService', { validateQualityMetrics: async () => ({ accepted: true, hash: 'a'.repeat(64), metrics: { width: 1200, height: 900, sharpness: 0.9, brightness: 0.5 } }) });
   stub('./azureVisionService', { analyzeCaption: async () => ({ stub: true, confidence: 1 }), isShelf: async () => ({ stub: true, isShelf: true }) });
-  stub('./customVisionService', { createImageFromData: async () => ({ cvImageId: 'cv-stub-123' }) });
+  stub('./customVisionService', { createImageFromData: async () => { calls.cvCalled = true; throw new Error('La subida NO debe registrar en Custom Vision (Etapa 6 eliminada)'); } });
   stub('./blobStorageService', { uploadToContainer: async (args) => { calls.uploadToContainer.push(args); return { url: `https://x.blob.core.windows.net/global-shelf-training/${args.blobPath}`, mode: 'azure' }; } });
   stub('../utils/imageHasher', { hashBuffer: () => 'a'.repeat(64) });
   stub('../utils/shelfPhotoFilenameGenerator', { generateFilename: ({ categoriaSlug, canal }) => `${categoriaSlug}-${canal}-fixedname.jpg` });
@@ -41,7 +47,9 @@ test('imagen nueva → sube el blob a /omt/, graba en TRAINING_PHOTOS y NO toca 
   assert.match(res.blobPath, /\/omt\//);
   assert.equal(calls.trainingInsert.length, 1);
   assert.match(calls.trainingInsert[0].blob_path, /\/omt\//);
+  assert.equal(calls.trainingInsert[0].cv_image_id, null, 'cv_image_id lo completa el sync, no la subida');
   assert.equal(calls.shelfPhotoRepoCalled, false, 'no debe tocar RETSC_EX_SHELFPHOTO');
+  assert.equal(calls.cvCalled, false, 'no debe registrar en Custom Vision al subir');
 });
 
 test('misma imagen ya en OTRO canal (DTT) → se sube igual a /omt/ sin tocar RETSC_EX_SHELFPHOTO', async () => {
