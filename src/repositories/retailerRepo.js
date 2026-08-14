@@ -23,6 +23,20 @@ const { getPool, sql } = require('../config/db');
 
 const TABLE = 'RETSC_OP_RETAILER';
 
+// Catálogo completo de PDVs para el mapa de selección del mobile (Paso 0, previo a abrir
+// visita). Sin scoping por enterprise — RETSC_OP_RETAILER no tiene columna enterprise_id,
+// es catálogo global de tiendas, igual que RETSC_OP_CATEGORIES.
+const list = async () => {
+  const pool = await getPool();
+  const r = await pool.request().query(`
+    SELECT Retailer_id, Retailer_dsc, Supermarketchain_id, Formato, latitud, longitud,
+           Ejecutivo_asignado, Zona, Prioridad, Canal, pais_dsc
+    FROM ${TABLE}
+    ORDER BY Retailer_dsc
+  `);
+  return r.recordset;
+};
+
 // Devuelve el canal (OMT | DTT | CONVENIENCE) de un retailer, o null si la tabla no existe
 // todavía, si el retailer no tiene canal asignado, o si el retailer no existe.
 const resolveCanalByRetailer = async (retailerId) => {
@@ -40,4 +54,4 @@ const resolveCanalByRetailer = async (retailerId) => {
   }
 };
 
-module.exports = { resolveCanalByRetailer };
+module.exports = { list, resolveCanalByRetailer };

@@ -2,6 +2,15 @@
 // el mobile (blur/luz/encuadre OK) en Blob Storage y la registra en RETSC_EX_SHELFPHOTO,
 // amarrada al Visit_id abierto en el Paso 0. Dispara el Paso 3+ (detección) en background.
 //
+// ⚠ Reformulación del DBA (confirmada en vivo, 2026-08-07): RETSC_EX_SHELFPHOTO ahora tiene
+// User_id NOT NULL (columna nueva) y una FK compuesta (Visit_id, User_id, Enterprise_id,
+// Retailer_id) → RETSC_EX_VISIT (mismas 4 columnas) — las 4 deben coincidir exactamente con
+// la fila de la visita, no solo con valores "razonables". Shelfunit_id también pasó a ser
+// NOT NULL (antes opcional). Por eso acá abajo: (a) shelfunitId ya no es opcional — 400 si
+// falta, igual que categoryId; (b) se valida que uploadedBy sea el dueño de la visita ANTES
+// de insertar, para dar un 403 legible en vez de que la FK compuesta lo rechace con un error
+// de SQL crudo si algún día uploadedBy != visit.User_id.
+//
 // Distinto de shelfPhotoUploadService.js (fotos GLOBALES de entrenamiento, sin enterprise,
 // sin visita, con su propio gate de calidad de 8 etapas — Issues 7.1/7.2): este es el flujo
 // de PRODUCCIÓN, una foto por enterprise/PDV/visita real. La guía es explícita (sección 3):
@@ -41,11 +50,12 @@ function parseIntOrThrow(value, label, errorCode) {
 // @param buffer         - contenido de la imagen (ya leído del archivo multer)
 // @param visitId        - Visit_id devuelto al abrir la visita (Paso 0)
 // @param categoryId     - categoría seleccionada en el mobile para ESTA foto
-// @param shelfunitId     - opcional
+// @param shelfunitId    - REQUERIDO (RETSC_EX_SHELFPHOTO.Shelfunit_id es NOT NULL en la BD)
 // @param qualityStatus, blurScore, brightness - ya calculados por el mobile (Paso 3, guía)
 async function uploadVisitPhoto({ buffer, visitId, categoryId, shelfunitId, qualityStatus, blurScore, brightness, uploadedBy }) {
-  const visitIdInt    = parseIntOrThrow(visitId, 'visitId', 'ERR_VISIT_ID_REQUERIDO');
-  const categoryIdInt = parseIntOrThrow(categoryId, 'categoryId', 'ERR_CATEGORIA_REQUERIDA');
+  const visitIdInt     = parseIntOrThrow(visitId, 'visitId', 'ERR_VISIT_ID_REQUERIDO');
+  const categoryIdInt  = parseIntOrThrow(categoryId, 'categoryId', 'ERR_CATEGORIA_REQUERIDA');
+  const shelfunitIdInt = parseIntOrThrow(shelfunitId, 'shelfunitId', 'ERR_SHELFUNIT_REQUERIDO');
 
   const visit = await visitRepo.findById(visitIdInt);
   if (!visit) {
@@ -53,6 +63,12 @@ async function uploadVisitPhoto({ buffer, visitId, categoryId, shelfunitId, qual
   }
   if (visit.Status !== 'OPEN') {
     throw svcError(`La visita ${visitIdInt} ya está ${visit.Status} — no se pueden agregar más fotos.`, 409, 'ERR_VISITA_CERRADA');
+  }
+  if (visit.User_id !== uploadedBy) {
+    // La FK compuesta (Visit_id, User_id, Enterprise_id, Retailer_id) → RETSC_EX_VISIT lo
+    // rechazaría igual a nivel de BD, pero con un error de SQL crudo — este chequeo da un
+    // 403 legible antes de llegar ahí.
+    throw svcError('No puedes agregar fotos a la visita de otro usuario.', 403, 'ERR_VISITA_AJENA');
   }
 
   const category = await categoryRepo.findById(categoryIdInt);
@@ -81,7 +97,8 @@ async function uploadVisitPhoto({ buffer, visitId, categoryId, shelfunitId, qual
 
   const photo = await shelfPhotoRepo.insert({
     retailer_id:        visit.Retailer_id,
-    shelfunit_id:        shelfunitId ? parseInt(shelfunitId, 10) : null,
+    user_id:            uploadedBy,
+    shelfunit_id:        shelfunitIdInt,
     photo_date:         new Date(),
     url_blob:           blobUrl,
     enterprise_id:      visit.Enterprise_id,

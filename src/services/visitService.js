@@ -86,4 +86,13 @@ async function getVisit(visitId) {
   return toDTO(row);
 }
 
-module.exports = { openVisit, closeVisit, getVisit };
+// Devuelve la visita OPEN del usuario si tiene una, o null. Pensado para que el mobile
+// pueda ofrecer "cerrar mi visita abierta" sin tener que conocer su Visit_id de antemano
+// (ej. después de recibir el 409 ERR_VISITA_YA_ABIERTA de openVisit, o proactivamente en
+// el mapa antes de intentar abrir una nueva).
+async function getOpenForUser(userId) {
+  const openVisits = await visitRepo.findOpenByUser(userId);
+  return openVisits.length > 0 ? toDTO(openVisits[0]) : null;
+}
+
+module.exports = { openVisit, closeVisit, getVisit, getOpenForUser };

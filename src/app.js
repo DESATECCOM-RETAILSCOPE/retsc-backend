@@ -16,6 +16,7 @@ const annotationRoutes                  = require('./routes/annotationRoutes');
 const modelRoutes                       = require('./routes/modelRoutes');
 const shelfPhotoRoutes                  = require('./routes/shelfPhotoRoutes');
 const visitRoutes                       = require('./routes/visitRoutes');
+const retailerRoutes                    = require('./routes/retailerRoutes');
 const sessionsRoutes                    = require('./routes/sessionsRoutes');
 const dashboardRoutes                   = require('./routes/dashboardRoutes');
 const authMiddleware                    = require('./middlewares/authMiddleware');
@@ -47,6 +48,7 @@ app.use('/api/annotations',                authMiddleware, annotationRoutes);
 app.use('/api/models',                     authMiddleware, modelRoutes);
 app.use('/api/shelf-photos',               authMiddleware, shelfPhotoRoutes);
 app.use('/api/visits',                     authMiddleware, visitRoutes);
+app.use('/api/retailers',                  authMiddleware, retailerRoutes);
 app.use('/api/sessions',                   authMiddleware, sessionsRoutes);
 app.use('/api/dashboard',                  authMiddleware, dashboardRoutes);
 

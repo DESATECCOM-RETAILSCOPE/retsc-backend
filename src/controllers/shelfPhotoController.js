@@ -67,7 +67,8 @@ const uploadPhoto = async (req, res) => {
 };
 
 // POST /api/shelf-photos/visit
-// Multipart: campo de archivo "photo" + campos visitId, categoryId, shelfunitId?,
+// Multipart: campo de archivo "photo" + campos visitId, categoryId, shelfunitId (REQUERIDO
+// desde la reformulación del DBA 2026-08-07 — RETSC_EX_SHELFPHOTO.Shelfunit_id es NOT NULL),
 // qualityStatus, blurScore, brightness (estos 3 últimos YA calculados por el mobile — ver
 // guía sección 3, "aquí no se vuelve a validar eso, solo se guarda").
 // Roles móviles + admin (ver VISIT_ROLES/requireRole en la ruta) — es el flujo de

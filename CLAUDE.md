@@ -380,6 +380,14 @@ Each file in `src/repositories/` maps to one SQL table:
 
 `RETSC_EX_SHELFPHOTO` base columns: `Photo_id` (PK), `Retailer_id`, `Shelfunit_id`, `photo_date`, `URL_blob`, `ENTERPRISE_ID`, `CATEGORY_ID`, `visit_id`. Migration `005_add_quality_fields_to_shelfphoto.sql` adds `image_hash`, `quality_status` (`PASSED`/`REJECTED`), `quality_error_code`, `width`, `height`, `blur_score`, `brightness`, plus a filtered unique index `UX_RETSC_EX_SHELFPHOTO_enterprise_hash` on `(ENTERPRISE_ID, image_hash) WHERE image_hash IS NOT NULL` for per-enterprise dedup. This migration must be applied manually via SSMS, not from Node.
 
+⚠ **Reformulación del DBA — aplicada en vivo contra `sqldb-rscope-prod`, confirmada por `INFORMATION_SCHEMA`/`sys.foreign_keys` el 2026-08-07 (sin migración de este repo — el DBA la aplicó directo, probablemente vía el diseñador de diagramas de SSMS: las 4 tablas involucradas aparecían marcadas con `*` en su captura, que en SSMS significa "cambios sin guardar en el diagrama" en el momento de la foto, ya guardados para cuando se verificó contra la BD real).** Cambios reales verificados:
+- **`RETSC_EX_SHELFPHOTO` ganó la columna `User_id` (NOT NULL)** — no existía antes.
+- **`Visit_id`, `User_id`, `Enterprise_id`, `Retailer_id` pasaron de nullable a NOT NULL.**
+- **`Shelfunit_id` pasó de nullable a NOT NULL.**
+- **FK compuesta nueva**: `(Visit_id, User_id, Enterprise_id, Retailer_id)` en `RETSC_EX_SHELFPHOTO` → las mismas 4 columnas en `RETSC_EX_VISIT`. Las 4 deben coincidir exactamente con la fila de la visita — ya no es solo una convención de la app, la BD lo exige.
+- **`RETSC_EX_VISIT` ganó dos FKs que antes no tenía**: `(User_id, Enterprise_id)` → `RETSC_OP_USRSXENTERP` (compuesta) y `Retailer_id` → `RETSC_OP_RETAILER`. Esto cierra el hueco de integridad que existía antes (ver historial de este archivo) — pero como consecuencia, **`POST /api/visits` ya no puede abrir ninguna visita mientras `RETSC_OP_RETAILER` siga con 0 filas** (confirmado: sigue vacía en prod) — antes de este cambio la FK no existía y un `Retailer_id` inventado se guardaba sin problema; ahora la BD lo rechaza.
+- `visitPhotoService.js`/`shelfPhotoRepo.js` ya se actualizaron para esto (`user_id` se manda siempre, `shelfunitId` pasó a requerido con 400 propio). **TEMPORAL (decisión de Carlos, 2026-08-07)**: el mobile (`RetscApp`) todavía no tiene catálogo/UI de "unidades de anaquel", así que manda un `shelfunitId` fijo en `1` (`TEMPORAL_SHELFUNIT_ID` en `VisitCaptureScreen.js`) para no romper cada subida — no confiar en `Shelfunit_id` de filas reales hasta que el equipo defina la UI real y se reemplace ese placeholder. **`shelfPhotoUploadService.js` (flujo de entrenamiento global, Etapa 5) NO se tocó y hoy está roto por este cambio** — su `shelfPhotoRepo.insert()` nunca mandó `retailer_id`/`user_id`/`visit_id`/`shelfunit_id` (a propósito, es una foto global sin visita) y las 5 columnas ahora son NOT NULL. Pendiente de decisión de equipo: ¿esas fotos globales dejan de insertar en `RETSC_EX_SHELFPHOTO` del todo (ya escriben en `RETSC_AI_TRAINING_PHOTOS` de todas formas, ver arriba) y el hash-dedup se mueve a otro lado, o el DBA agrega una fila "sistema" para poder seguir insertando ahí? No resuelto todavía — no inventar una solución sin que el equipo lo decida, dado que toca una tabla que usan dos flujos distintos.
+
 `RETSC_AI_TRAINING_ANNOTATIONS` columns (post 2026-07-26 schema split — see Shelf photo pipeline section above for the full story and for `RETSC_AI_TRAINING_PHOTOS`): `annotation_id` (PK), `photo_id` (FK → `RETSC_AI_TRAINING_PHOTOS.photo_id`), `bbox_left`, `bbox_top`, `bbox_width`, `bbox_height` (floats normalized to `[0,1]`), `source`, `is_validated` (bit), `created_at`, `cv_region_id`. No `dtc_category_id`/`canal`/`photo_approved`/`photo_notes`/`photo_reviewer_id`/`photo_reviewed_at`/`cv_sync_*` here anymore — those moved to `RETSC_AI_TRAINING_PHOTOS`.
 
 `RETSC_AI_DETECTION_MODELS` (extended by migration `006_add_metrics_to_detection_models.sql`) adds versioning columns: `precision_score`, `recall_score`, `mean_ap` (primary comparison metric — named `*_score`/`mean_ap` instead of `precision`/`recall` because `PRECISION` is a T-SQL reserved word), `metrics_json` (raw Custom Vision iteration payload), `approved_by`, `approved_at`, plus index `IX_RETSC_AI_DETECTION_MODELS_category_version (category_id, model_version DESC)`. ⚠ Esta migración fue verificada como **NO aplicada** contra la BD real de este proyecto (`INFORMATION_SCHEMA`, 2026-07-12) — ver nota en la sección de entrenamiento más abajo; no asumir que corrió solo porque el código la referencia. `status` ahora abarca el ciclo completo: `PENDING → PROJECT_CREATED (8.1) → IMAGES_UPLOADED (8.2) → TRAINING → TRAINED | TRAINING_FAILED (8.3) → READY` (activo/publicado, 8.4), más `AWAITING_APPROVAL | REJECTED` (re-entrenamiento, 8.5) y `ERROR` (fallo de provisioning inicial, no de training). `TRAINED != READY`: un modelo puede terminar de entrenar sin estar publicado/activo todavía.
@@ -439,6 +447,7 @@ Forgot password flow: `POST /api/auth/forgot-password` accepts `{ identifier }` 
 /api/visits                        authMiddleware  + requireRole(VISIT_ROLES) inline on all routes (guía v1.9)
 /api/sessions                      authMiddleware  — no additional role gate; enterprise scoping enforced in sessionsController.js (both mobile and web/admin roles need to read visit results)
 /api/dashboard                     authMiddleware (global) — any authenticated role; scope (own enterprise vs. global) resolved by role inside dashboardService.js, not by middleware
+/api/retailers                     authMiddleware (global) — no additional role gate; global PDV catalog, same criteria as /api/categories (added 2026-08-07, mobile map screen — Paso 0 needs a real Retailer_id/lat/lng before opening a visit)
 ```
 
 `enterpriseCommercialCategoryRoutes.js` is distinct from `enterpriseCategoryRoutes.js` — it exposes `GET /api/enterprises/me/enterprise-categories` (commercial categories) and `GET /api/enterprises/me/enterprise-categories/smart` (only `is_smart_dtc=1` categories, used to populate SKU-upload/shelf-photo-upload dropdowns), both handled by `categoryController.js` (no separate controller file).
@@ -513,6 +522,7 @@ Forgot password flow: `POST /api/auth/forgot-password` accepts `{ identifier }` 
 | `POST /api/shelf-photos/visit` | Bearer + `VISIT_ROLES` | Sube una foto de VISITA real (Pasos 1-2, guía v1.9); dispara detección en background |
 | `GET /api/shelf-photos/unidentified` | Bearer | Productos detectados sin identificar, para el dashboard web (guía v1.9 §8.4); scoped por enterprise |
 | `GET /api/sessions/:id/results` | Bearer | Resultados de una visita (guía v1.9, Paso 6): share de góndola + faltantes + sin_identificar; `:id` = Visit_id |
+| `GET /api/retailers` | Bearer | Catálogo completo de PDVs (`retailerRepo.list()`, added 2026-08-07) — el mobile lo usa para poblar el mapa de selección de tienda antes de `POST /api/visits`; sin paginar ni scoping (tabla global, hoy 0 filas en prod) |
 
 ⚠ **Retirados 2026-08-03 (decisión de jefatura, ver "Model versioning" y "Entrenamiento de modelos" arriba)**: `GET /api/models/category/:categoryId/can-retrain`, `POST /api/models/category/:categoryId/retrain`, `POST /api/models/category/:categoryId/rollback/:version`, `POST /api/models/:modelId/complete`, `POST /api/models/:modelId/approve`, `POST /api/models/:modelId/reject`, y `POST /api/training/models/:categoryId/train` (con el `/api/training` mount completo) ya no existen — no quedó ningún camino manual de re-entrenamiento/aprobación/publicación. El flujo automático de la spec v1.4 que los reemplaza ya está cableado (ver esas mismas secciones).
 
@@ -613,11 +623,13 @@ PATCH /api/visits/:id/close             (visitService.closeVisit)         — cl
 GET  /api/visits/:id                                                      — visit detail
 
 POST /api/shelf-photos/visit            (visitPhotoService.uploadVisitPhoto) — Pasos 1-2
-  1. Validate visit is OPEN + category exists
+  1. Validate visit is OPEN, belongs to uploadedBy, category exists, shelfunitId present
+     (REQUIRED since the DBA reformulation 2026-08-07 — Shelfunit_id is NOT NULL now)
   2. Upload to AZURE_VISIT_SHELF_CONTAINER (default enterprise-shelf-visits) at
      {enterprise_id}/{pdv_id}/{session_id}/{category_id}/{filename} — session_id = Visit_id
   3. Insert RETSC_EX_SHELFPHOTO — reuses the SAME repo/table as the training flow, since
-     visit_id/Retailer_id/CATEGORY_ID/ENTERPRISE_ID were already columns there
+     visit_id/Retailer_id/CATEGORY_ID/ENTERPRISE_ID were already columns there; now also
+     sends User_id (uploadedBy) — NOT NULL column added by the same reformulation
   4. Fires detectionPipelineService.processPhotoDetection() in the background (setImmediate,
      same fire-and-forget pattern as aiInfrastructureService) — the HTTP response doesn't
      wait for detection/identification.
@@ -687,8 +699,20 @@ equipo DBA la provisionó el 2026-07-26 (junto con `RETSC_OP_PLANOGRAM`, `RETSC_
 Migración `010_create_visit_photo_pipeline.sql` deliberadamente no la crea porque ya existía.
 `src/repositories/retailerRepo.js` conserva su fallback defensivo (catches "Invalid object
 name" y devuelve `null` en vez de lanzar), lo cual ya no hace falta para la existencia de la
-tabla pero no estorba — abrir/cerrar una visita y guardar fotos funciona igual con la tabla
-vacía o con datos.
+tabla pero no estorba.
+
+⚠ **ESTO YA NO ES CIERTO desde la reformulación del DBA (2026-08-07, ver sección "Database
+tables" → `RETSC_EX_SHELFPHOTO`)**: `RETSC_EX_VISIT.Retailer_id` ahora tiene una FK real hacia
+`RETSC_OP_RETAILER.Retailer_id` — con la tabla en 0 filas, **`POST /api/visits` no puede abrir
+ninguna visita** (la BD rechaza la FK). Antes de este cambio sí era cierto que "funciona igual
+vacía o con datos" porque no había FK; ya no. Bloqueante real hasta que haya datos reales en
+`RETSC_OP_RETAILER` (o el equipo decida cargar al menos una fila de prueba).
+
+`retailerRepo.js` gained `list()` (2026-08-07) — catálogo completo sin paginar, expuesto en
+`GET /api/retailers` para que el mobile pueble el mapa de selección de tienda (Paso 0, previo
+a `POST /api/visits`). No usa el fallback defensivo de `resolveCanalByRetailer` porque para
+este momento la existencia de la tabla ya está confirmada (ver arriba); un fallo real de query
+aquí sí debe propagarse. Confirmado contra `sqldb-rscope-prod` real (no solo QA): 0 filas.
 
 ⚠ **Two stubs block the flow from being fully real, both intentionally, both documented in
 their own file headers**: `visionDetectionService.js` (Joel's detection endpoint — §5.2) and

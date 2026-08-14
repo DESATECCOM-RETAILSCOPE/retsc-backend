@@ -34,6 +34,7 @@ const canOperate = requireRole(...VISIT_ROLES);
  *         description: El usuario ya tiene una visita abierta
  */
 router.post('/',              canOperate, c.open);
+router.get('/me/open',         canOperate, c.getMyOpen);
 router.get('/:id',             canOperate, c.getOne);
 router.patch('/:id/close',     canOperate, c.close);
 

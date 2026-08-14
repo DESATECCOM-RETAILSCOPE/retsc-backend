@@ -65,4 +65,16 @@ const getOne = async (req, res) => {
   }
 };
 
-module.exports = { open, close, getOne };
+// GET /api/visits/me/open — la visita OPEN del usuario actual, o { visit: null } si no
+// tiene ninguna. Le permite al mobile ofrecer "cerrar mi visita abierta" sin conocer de
+// antemano el Visit_id (ver el 409 ERR_VISITA_YA_ABIERTA de openVisit).
+const getMyOpen = async (req, res) => {
+  try {
+    const visit = await visitService.getOpenForUser(req.user.userId);
+    return res.json({ success: true, visit });
+  } catch (err) {
+    return handleError(res, err);
+  }
+};
+
+module.exports = { open, close, getOne, getMyOpen };
