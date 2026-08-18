@@ -86,6 +86,16 @@ router.get('/categories',                 authMiddleware,                control
  *           `categoryId=38` (el categoryId numérico real de esos mismos productos) → 0 resultados.
  *         example: "DESODORANTES CORPORALES"
  *       - in: query
+ *         name: officialCategoryId
+ *         schema: { type: integer }
+ *         description: >
+ *           Filtro agregado (Issue B3) — este SÍ es el `Category_id` numérico del árbol
+ *           oficial RETSC_OP_CATEGORIES, aplicado sobre `detection_category_id` del SKU
+ *           (el único campo de RETSC_OP_SKUS que mapea directo a esa tabla;
+ *           `selected_category_id` NO sirve para esto, ver nota de `categoryId` arriba).
+ *           Parámetro separado a propósito para no repetir el mismo footgun de nombre.
+ *         example: 38
+ *       - in: query
  *         name: search
  *         schema: { type: string }
  *         description: Búsqueda libre contra EAN o descripción del producto (LIKE).
@@ -134,6 +144,15 @@ router.get('/categories',                 authMiddleware,                control
  *         schema: { type: string }
  *         description: Busca por Product_dsc (LIKE). No hay búsqueda por EAN a este nivel
  *           agrupado — puede haber más de un EAN detrás del mismo producto.
+ *       - in: query
+ *         name: categoryId
+ *         schema: { type: integer }
+ *         description: >
+ *           Filtro agregado (Issue B3) — FK numérica oficial (`detection_category_id`),
+ *           igual al campo `categoryId` que ya devuelve cada fila de esta vista. Sin
+ *           ambigüedad con texto libre acá (a diferencia de GET /api/products): esta vista
+ *           global no tiene ningún concepto de categoría de cliente.
+ *         example: 38
  *       - in: query
  *         name: page
  *         schema: { type: integer, default: 1 }

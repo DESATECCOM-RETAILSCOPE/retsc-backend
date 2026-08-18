@@ -8,6 +8,14 @@
 //   image_hash, quality_status, quality_error_code, width, height,
 //   blur_score, brightness
 //
+// ⚠ Reformulación del DBA (confirmada en vivo contra sqldb-rscope-prod, 2026-08-07): agregó
+// User_id (NOT NULL, nueva) y una FK compuesta (Visit_id, User_id, Enterprise_id, Retailer_id)
+// → RETSC_EX_VISIT (mismas 4 columnas) — o sea, esas 4 columnas de una foto deben coincidir
+// EXACTAMENTE con las de su propia visita, ya no es solo convención de la app, lo exige la BD.
+// También volvió Shelfunit_id NOT NULL (antes era nullable). insert() ya no puede mandar
+// user_id/shelfunit_id como null — ver la validación en visitPhotoService.js, que es quien
+// decide el 400 legible en vez de dejar que el INSERT tire una violación de constraint cruda.
+//
 // NOTA: se asume que Photo_id es IDENTITY (autoincremental), por eso insert() no lo
 // envía. Si en la BD no fuera IDENTITY, habría que pasar Photo_id explícito.
 //
@@ -35,16 +43,22 @@ const findByHash = async (hash, enterpriseId) => {
 };
 
 // Inserta una foto de góndola con su veredicto de calidad. Devuelve la fila creada.
+//
+// user_id/retailer_id/shelfunit_id/enterprise_id/visit_id ya son NOT NULL en la BD real
+// (reformulación del DBA, 2026-08-07) — este repo no los valida (eso es responsabilidad del
+// service que llama, ver visitPhotoService.js), pero ya no los manda `?? null`: si faltan,
+// que la BD los rechace con su propio error en vez de que el repo finja que null es válido.
 const insert = async (photo) => {
   const pool = await getPool();
   const r = await pool.request()
-    .input('retailerId',   sql.Int,           photo.retailer_id ?? null)
-    .input('shelfunitId',  sql.Int,           photo.shelfunit_id ?? null)
+    .input('retailerId',   sql.Int,           photo.retailer_id)
+    .input('userId',       sql.Int,           photo.user_id)
+    .input('shelfunitId',  sql.Int,           photo.shelfunit_id)
     .input('photoDate',    sql.Date,          photo.photo_date ?? null)
     .input('urlBlob',      sql.NVarChar(250), photo.url_blob ?? null)
-    .input('enterpriseId', sql.Int,           photo.enterprise_id ?? null)
+    .input('enterpriseId', sql.Int,           photo.enterprise_id)
     .input('categoryId',   sql.Int,           photo.category_id ?? null)
-    .input('visitId',      sql.Int,           photo.visit_id ?? null)
+    .input('visitId',      sql.Int,           photo.visit_id)
     .input('imageHash',    sql.VarChar(64),   photo.image_hash ?? null)
     .input('qualityStatus',sql.VarChar(20),   photo.quality_status ?? null)
     .input('qualityError', sql.VarChar(30),   photo.quality_error_code ?? null)
@@ -54,12 +68,12 @@ const insert = async (photo) => {
     .input('brightness',   sql.Float,         photo.brightness ?? null)
     .query(`
       INSERT INTO ${TABLE}
-        (Retailer_id, Shelfunit_id, photo_date, URL_blob, ENTERPRISE_ID, CATEGORY_ID,
+        (Retailer_id, User_id, Shelfunit_id, photo_date, URL_blob, ENTERPRISE_ID, CATEGORY_ID,
          visit_id, image_hash, quality_status, quality_error_code, width, height,
          blur_score, brightness)
       OUTPUT INSERTED.*
       VALUES
-        (@retailerId, @shelfunitId, @photoDate, @urlBlob, @enterpriseId, @categoryId,
+        (@retailerId, @userId, @shelfunitId, @photoDate, @urlBlob, @enterpriseId, @categoryId,
          @visitId, @imageHash, @qualityStatus, @qualityError, @width, @height,
          @blurScore, @brightness)
     `);
@@ -81,4 +95,21 @@ const findByHashGlobal = async (hash) => {
   return r.recordset[0] ?? null;
 };
 
-module.exports = { findByHash, findByHashGlobal, insert };
+// Categorías distintas cubiertas por las fotos de una visita (guía "Fotos de Visita" v1.9,
+// sección 1, callout Paso 0: "una visita puede cubrir varias categorías... bajo el mismo
+// Visit_id"). Usado por visitResultsService (Paso 6) para saber contra cuántas categorías
+// hay que calcular los faltantes de surtido (sección 8.2 — la consulta de assortmentRepo
+// es por una sola categoría a la vez).
+const listCategoryIdsByVisit = async (visitId) => {
+  const pool = await getPool();
+  const r = await pool.request()
+    .input('visitId', sql.Int, visitId)
+    .query(`
+      SELECT DISTINCT CATEGORY_ID
+      FROM ${TABLE}
+      WHERE visit_id = @visitId AND CATEGORY_ID IS NOT NULL
+    `);
+  return r.recordset.map(row => row.CATEGORY_ID);
+};
+
+module.exports = { findByHash, findByHashGlobal, insert, listCategoryIdsByVisit };

@@ -19,6 +19,20 @@ function buildFilters(req, enterpriseId, filters) {
     whereExtra += ' AND seg.client_category = @categoryId';
   }
 
+  // officialCategoryId (Issue B3): filtra por el árbol oficial RETSC_OP_CATEGORIES vía
+  // sk.detection_category_id — el ÚNICO campo de RETSC_OP_SKUS que mapea directo a
+  // RETSC_OP_CATEGORIES.Category_id. sk.selected_category_id NO sirve para esto: apunta a
+  // RETSC_OP_ENTERPRISE_CATEGORIES.enterprise_category_id (ver header del archivo/CLAUDE.md),
+  // así que compararlo contra un Category_id oficial daría resultados incorrectos casi
+  // siempre. Nombre de parámetro deliberadamente DISTINTO de `categoryId` (texto libre
+  // sobre client_category, arriba) para no overload-ear un mismo nombre con dos
+  // significados — el footgun de `categoryId` como texto libre ya está documentado en el
+  // swagger de este endpoint.
+  if (filters.officialCategoryId != null && filters.officialCategoryId !== '') {
+    req.input('officialCategoryId', sql.Int, filters.officialCategoryId);
+    whereExtra += ' AND sk.detection_category_id = @officialCategoryId';
+  }
+
   if (filters.search) {
     req.input('search', sql.NVarChar(200), `%${filters.search}%`);
     whereExtra += ' AND (sk.EAN LIKE @search OR sk.Product_dsc LIKE @search)';

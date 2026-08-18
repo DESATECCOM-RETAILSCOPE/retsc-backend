@@ -279,6 +279,15 @@ function buildGlobalProductFilters(req, filters) {
     whereExtra += ' AND Product_dsc LIKE @search';
   }
 
+  // categoryId (Issue B3) — filtra por detection_category_id, el mismo campo que ya
+  // devuelve toGlobalProductDTO como `categoryId`. Sin ambigüedad con texto libre acá
+  // (a diferencia de productRepo.buildFilters) porque esta vista global no tiene ningún
+  // concepto de client_category.
+  if (filters.categoryId != null && filters.categoryId !== '') {
+    req.input('categoryId', sql.Int, filters.categoryId);
+    whereExtra += ' AND detection_category_id = @categoryId';
+  }
+
   return whereExtra;
 }
 

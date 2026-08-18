@@ -1,5 +1,11 @@
-// Rutas de gestión de versiones de modelos (Issue 8.5).
+// Rutas de listado de modelos de detección (Issue 8.5 — reducido 2026-08-03).
 // Prefijo en app.js: /api/models  (montado con authMiddleware)
+//
+// RETIRADO por decisión de jefatura: /category/:categoryId/can-retrain, POST /category/:id/
+// retrain, POST /:modelId/complete, POST /:modelId/approve, POST /:modelId/reject,
+// POST /category/:id/rollback/:version — todo el ciclo de re-entrenamiento/aprobación manual.
+// Ver modelController.js y modelVersioningService.js para el detalle de qué se eliminó y
+// qué se preservó para el cableado del flujo automático (spec v1.4).
 //
 // Gestión restringida por rol. Roles permitidos configurables por env
 // MODEL_MANAGER_ROLES (CSV); default: 'Admin'.
@@ -43,17 +49,7 @@ const canManage = requireRole(...MANAGER_ROLES);
  *       403:
  *         description: Autenticado pero sin rol MODEL_MANAGER_ROLES (default ADMIN,ADMIN_DTC)
  */
-router.get('/',                                 canManage, c.listAll);
-
-// Lectura
-router.get('/category/:categoryId',             canManage, c.listVersions);
-router.get('/category/:categoryId/can-retrain', canManage, c.canRetrain);
-
-// Ciclo de vida
-router.post('/category/:categoryId/retrain',              canManage, c.retrain);
-router.post('/category/:categoryId/rollback/:version',    canManage, c.rollback);
-router.post('/:modelId/complete', canManage, c.complete);
-router.post('/:modelId/approve',  canManage, c.approve);
-router.post('/:modelId/reject',   canManage, c.reject);
+router.get('/',                     canManage, c.listAll);
+router.get('/category/:categoryId', canManage, c.listVersions);
 
 module.exports = router;

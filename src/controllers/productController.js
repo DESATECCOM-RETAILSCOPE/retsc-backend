@@ -176,11 +176,14 @@ const getStatus = async (req, res) => {
 };
 
 // ── 10.5 GET /api/products ───────────────────────────────────────────────────
+// officialCategoryId (Issue B3): FK numérica al árbol oficial RETSC_OP_CATEGORIES —
+// distinto de categoryId (texto libre sobre client_category, ver footgun documentado
+// en el swagger de esta ruta). Ambos pueden venir juntos; se aplican con AND.
 const listProducts = async (req, res) => {
   try {
-    const { categoryId, search, page, limit } = req.query;
+    const { categoryId, officialCategoryId, search, page, limit } = req.query;
     const result = await productService.listByEnterprise(req.user.enterpriseId, {
-      categoryId, search,
+      categoryId, officialCategoryId, search,
       page:  page  ? Number(page)  : 1,
       limit: limit ? Number(limit) : 50,
     });
@@ -192,10 +195,12 @@ const listProducts = async (req, res) => {
 // Catálogo global derivado de RETSC_OP_SKUS (RETSC_OP_PRODUCTS ya no existe —
 // commit b775f86). Exclusivo ADMIN_DTC (gate en productRoutes.js). Distinto de
 // GET /api/skus/global: acá se agrupa por producto, no una fila por EAN.
+// categoryId (Issue B3) es la FK numérica oficial (detection_category_id) — sin
+// ambigüedad con texto libre en esta vista, a diferencia de GET /api/products.
 const listGlobalProducts = async (req, res) => {
   try {
-    const { search, page, limit } = req.query;
-    const result = await productService.listGlobal({ search, page, limit });
+    const { search, categoryId, page, limit } = req.query;
+    const result = await productService.listGlobal({ search, categoryId, page, limit });
     return res.json({ success: true, ...result });
   } catch (err) { return handleError(res, err); }
 };

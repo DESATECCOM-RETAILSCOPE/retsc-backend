@@ -8,7 +8,13 @@
 // Estado del modelo tras createProject exitoso: PROJECT_CREATED (no READY — sin imágenes aún).
 //
 // TODO (8.2/8.3): triggerTraining(projectId), getPublishedIterations(projectId)
-// TODO (8.4): publishIteration(projectId, iterationId)
+//
+// Issue #35 / 4.4 (spec v1.4) — createTag()/ensureTag() y publishIteration() implementados
+// (2026-08-03) y probados contra Custom Vision real. Construidos de forma AISLADA: nada del
+// flujo real (annotationSyncService, modelTrainingService) los llama todavía — el cableado
+// (reemplazar CV_TAG_OMT/DTT/CONVENIENCE por ensureTag() por categoría+proyecto, y disparar
+// publishIteration() al completar el training) es una pasada aparte, pendiente de decisiones
+// de negocio con María (ver docs/DIAGNOSTICO-spec-v1.4-vs-codigo.md).
 
 const crypto = require('crypto');
 
@@ -140,12 +146,25 @@ async function createImageFromData(projectId, buffer, tagId) {
 
 // Crea regiones (bounding boxes) para imágenes que ya existen en el proyecto.
 // regions: [{ imageId, tagId, left, top, width, height }] — coordenadas normalizadas 0..1.
-// Trocea automáticamente en lotes de 64 (límite de la API).
+// Trocea automáticamente en lotes de 64 (límite de la API) — son llamadas HTTP INDEPENDIENTES,
+// no hay ninguna garantía de atomicidad del lado de Custom Vision entre lotes.
 // Devuelve el array combinado de regiones creadas (con su regionId).
 // CONFIRMADO contra un proyecto CV real: el orden de `created[]` NO coincide con el orden de
 // envío — el llamador debe correlacionar por coordenadas (left/top/width/height), no por índice.
 // Ver annotationSyncService.coordsMatch() para el patrón ya usado en este repo.
-async function createImageRegions(projectId, regions) {
+//
+// opts.onBatchCreated(chunkCreated) — FIX 2026-08-09 (F1.1/Fase 2, agujero de fallo parcial de
+// batch): si una foto tiene más de 64 cajitas y el SEGUNDO (o siguiente) lote falla, las
+// regiones del lote ANTERIOR ya están confirmadas de verdad en Custom Vision — no hay rollback
+// del lado de CV para deshacerlas. Antes, el `created` acumulado se perdía por completo al
+// propagarse la excepción (nunca llegaba al llamador), así que esas cajitas quedaban sin
+// cv_region_id en SQL; el próximo reintento las volvía a enviar y CV respondía "Duplicate image
+// regions", dejando la foto en ERROR permanente. `onBatchCreated`, si se pasa, se llama
+// (awaited) INMEDIATAMENTE después de que cada lote se confirma — antes de intentar el
+// siguiente — para que el llamador pueda persistir esas regiones ya reales sin esperar a que
+// termine el batch completo. Además, por las dudas de que el llamador no lo use, el error que
+// se propaga en un fallo también lleva `err.partialCreated` con lo confirmado hasta ese punto.
+async function createImageRegions(projectId, regions, { onBatchCreated } = {}) {
   if (!regions || regions.length === 0) return [];
 
   const BATCH_SIZE = 64;
@@ -164,12 +183,19 @@ async function createImageRegions(projectId, regions) {
       })),
     };
 
-    const result = await cvFetch(`projects/${projectId}/images/regions`, {
-      method: 'POST',
-      body: JSON.stringify(body),
-    });
+    let result;
+    try {
+      result = await cvFetch(`projects/${projectId}/images/regions`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      });
+    } catch (err) {
+      throw Object.assign(err, { partialCreated: created });
+    }
 
-    created.push(...(result?.created ?? []));
+    const chunkCreated = result?.created ?? [];
+    created.push(...chunkCreated);
+    if (onBatchCreated) await onBatchCreated(chunkCreated);
   }
 
   return created;
@@ -234,6 +260,130 @@ async function getIterationPerformance(projectId, iterationId) {
   return cvFetch(`projects/${projectId}/iterations/${iterationId}/performance`);
 }
 
+// Issue #35 — tags on-demand por proyecto (resuelve el mapeo estático CV_TAG_OMT/DTT/
+// CONVENIENCE, que usa el MISMO tag id para todas las categorías de un canal — incorrecto en
+// cuanto hay más de un proyecto CV activo, porque cada proyecto tiene sus propios tag GUIDs).
+//
+// Formato verificado contra el spec REST oficial de Custom Vision Training (v3.4-preview —
+// v3.3 ya no está publicado en el repo de specs de Azure, pero el path/params de tags y
+// publish no cambiaron entre versiones; se confirmó igual que el resto de este archivo, sin
+// SDK, por consistencia de la API):
+//
+//   GET {endpoint}/customvision/v3.3/training/projects/{projectId}/tags?iterationId={id}
+//     iterationId es opcional (default: tags del workspace del proyecto, no de una iteración
+//     puntual — es lo que se necesita acá, así que se omite).
+//     Devuelve un array de Tag: [{ id, name, description, type, imageCount }, ...].
+//
+//   POST {endpoint}/customvision/v3.3/training/projects/{projectId}/tags?name={name}&description={desc}&type={type}
+//     name es el único parámetro requerido además de projectId. type es opcional
+//     ('Regular' | 'Negative' | 'GeneralProduct'; default del lado de CV es 'Regular').
+//     Devuelve el Tag creado: { id, name, description, type, imageCount }.
+//     NOTA: Custom Vision NO valida nombres duplicados — llamar createTag() dos veces con el
+//     mismo name crea DOS tags distintos con el mismo nombre y distinto id. Por eso ensureTag()
+//     existe como el punto de entrada real; createTag() se deja exportado por si algún llamador
+//     ya sabe con certeza que el tag no existe (p. ej. un script de backfill).
+
+// Lista los tags existentes en el workspace de un proyecto (no de una iteración puntual).
+async function listTags(projectId) {
+  return cvFetch(`projects/${projectId}/tags`);
+}
+
+// Crea un tag nuevo sin verificar si ya existe uno con el mismo nombre — ver NOTA de arriba.
+// Devuelve el Tag creado: { id, name, description, type, imageCount }.
+async function createTag(projectId, tagName) {
+  const params = new URLSearchParams({ name: tagName });
+  const tag = await cvFetch(`projects/${projectId}/tags?${params}`, { method: 'POST' });
+  console.log(`[customVision] tag creado — proyecto=${projectId} name=${tag.name} id=${tag.id}`);
+  return tag;
+}
+
+// Resuelve el tag por nombre dentro de un proyecto: lo reusa si ya existe, lo crea si no.
+// Este es el punto de entrada que reemplaza (al cablear, pasada aparte) el mapeo estático
+// CV_TAG_OMT/DTT/CONVENIENCE — cada categoría tiene su propio proyecto CV, y este resolver
+// se llama con projectId = customvision_project_id de esa categoría.
+//
+// Comparación de nombre EXACTA (case-sensitive) — Custom Vision trata "OMT" y "omt" como
+// nombres distintos; si el llamador no normaliza el nombre de canal antes de pasarlo acá,
+// dos llamadas con distinto casing crean dos tags para lo que debería ser el mismo canal.
+//
+// Convención de nombre del tag: la spec v1.4 usa el canal como nombre de tag (OMT/DTT/
+// CONVENIENCE) porque el tag ya vive DENTRO del proyecto de una categoría — no hace falta
+// componer categoría+canal en el nombre, el proyecto ya es la categoría. Se deja el nombre
+// como parámetro libre (no se fuerza a un CANALES fijo acá) para no tomar la decisión de
+// negocio por el llamador — pero la recomendación, dado que 1 proyecto = 1 categoría, es
+// pasar el canal solo (p. ej. "OMT"), no el compuesto "CATEGORIA OMT" que se ve hoy en el
+// pool de Custom Vision (ese naming es de un flujo/convención anterior a esta función).
+async function ensureTag(projectId, tagName) {
+  const tags = await listTags(projectId);
+  const existing = tags.find(t => t.name === tagName);
+  if (existing) return existing;
+  return createTag(projectId, tagName);
+}
+
+// Fix 2026-08-09 (tag vacío tumbando el training — ver modelTrainingService.assertNoEmptyTags):
+// Custom Vision rechaza `trainProject` completo (BadRequestDetectionTrainingValidationFailed:
+// "Not enough images per tag for training") si CUALQUIER tag del proyecto tiene 0 imágenes,
+// aunque los demás tags sí tengan suficientes — un tag huérfano (creado por ensureTag() antes de
+// que createImageRegions() confirmara al menos una región, y nunca completado por un fallo
+// posterior en ese mismo sync) tumba el entrenamiento del proyecto entero, no solo de ese tag.
+async function deleteTag(projectId, tagId) {
+  await cvFetch(`projects/${projectId}/tags/${tagId}`, { method: 'DELETE' });
+  console.log(`[customVision] tag eliminado — proyecto=${projectId} tagId=${tagId}`);
+}
+
+// Issue 8.4 / 4.4 (spec v1.4) — publicación de una iteración entrenada.
+//
+// Formato verificado (mismo spec REST, ver nota de cabecera de esta sección):
+//
+//   POST {endpoint}/customvision/v3.3/training/projects/{projectId}/iterations/{iterationId}/publish
+//        ?publishName={name}&predictionId={predictionResourceId}&overwrite={bool}
+//     publishName y predictionId son AMBOS requeridos. predictionId es el Resource ID de ARM
+//     completo del recurso de predicción (NO la prediction key) — mismo valor que
+//     CUSTOM_VISION_PREDICTION_RESOURCE_ID en .env, formato
+//     /subscriptions/.../resourceGroups/.../providers/Microsoft.CognitiveServices/accounts/{nombre}.
+//     overwrite (opcional, default false) republica sobre un publishName ya usado sin
+//     necesidad de un unpublish explícito antes — cubre el caso "reentrenar y republicar la
+//     misma categoría" sin tener que borrar la iteración publicada previa. Existe también
+//     DELETE .../iterations/{iterationId}/publish (unpublish) en la API, pero no se implementa
+//     acá: si la spec decide versionar publishName con fecha/versión (evita colisión de
+//     nombre), overwrite ni siquiera hace falta; si en cambio reusa siempre el mismo
+//     publishName, overwrite=true ya resuelve el caso sin necesitar un unpublish aparte.
+//     Devuelve `true` (boolean crudo, no un objeto) si la publicación fue exitosa.
+//
+// DEUDA RESUELTA 2026-08-04 (ver aiInfrastructureService.js): RETSC_AI_DETECTION_MODELS.
+// prediction_resource_id era VARCHAR(100) — un Resource ID de ARM real mide ~157 caracteres
+// en este ambiente, así que la fila quedaba con prediction_resource_id = NULL en vez de
+// truncado. Jefatura amplió la columna a VARCHAR(200) y se re-pobló manualmente; confirmado
+// contra Custom Vision real que publishIteration() acepta el id completo (ya no da
+// BadRequestInvalidPublishTarget). Esta función NO lee la BD (recibe predictionResourceId
+// como parámetro, lo resuelve quien la llama) — igual corta ANTES de llamar a Custom Vision
+// si el valor viene vacío/null (ej. una categoría que todavía no se re-poblió, o una fila
+// nueva creada antes de que el provisioning corra), lanzando un error explícito en vez de un
+// 400 genérico de la API.
+async function publishIteration(projectId, iterationId, publishName, predictionResourceId, { overwrite = false } = {}) {
+  if (!predictionResourceId) {
+    throw new Error(
+      `No se puede publicar la iteración ${iterationId} del proyecto ${projectId}: falta ` +
+      `predictionResourceId (probablemente RETSC_AI_DETECTION_MODELS.prediction_resource_id ` +
+      `está NULL — ver deuda VARCHAR(100) documentada en aiInfrastructureService.js).`
+    );
+  }
+
+  const params = new URLSearchParams({
+    publishName,
+    predictionId: predictionResourceId,
+    overwrite: String(overwrite),
+  });
+
+  const published = await cvFetch(
+    `projects/${projectId}/iterations/${iterationId}/publish?${params}`,
+    { method: 'POST' }
+  );
+
+  console.log(`[customVision] iteración publicada — proyecto=${projectId} iterationId=${iterationId} publishName=${publishName} overwrite=${overwrite}`);
+  return published; // boolean crudo devuelto por la API
+}
+
 module.exports = {
   isConfigured,
   createProject,
@@ -244,4 +394,10 @@ module.exports = {
   trainProject,
   getIteration,
   getIterationPerformance,
+  // Issue #35 / 4.4 — aisladas, aún sin cablear al flujo (ver nota de cabecera del archivo)
+  listTags,
+  createTag,
+  ensureTag,
+  deleteTag,
+  publishIteration,
 };
