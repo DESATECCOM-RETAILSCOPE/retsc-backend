@@ -1,9 +1,18 @@
 # Interfaz Joel → Daniel — Flujo de fotos de visita (guía v1.9)
 
-> Documento de traspaso. Generado 2026-08-09 leyendo el código real de `retsc-backend`
-> (rama `developo-Joe`, commit `bde9de1`). Cada contrato descrito abajo fue verificado contra
-> el código o la base de datos real — donde algo no existe todavía, se marca explícitamente
-> como **PENDIENTE/PROPUESTO**, nunca como si ya funcionara.
+> Documento de traspaso. Generado 2026-08-09, **actualizado 2026-08-10** leyendo el código y la
+> base de datos real (`sqldb-rscope-prod`) de `retsc-backend` (rama `developo-Joe`, commit
+> `21220a3`). Cada contrato descrito abajo fue re-verificado contra el código o la BD real en
+> esta actualización — donde algo no existe todavía, se marca explícitamente como
+> **PENDIENTE/PROPUESTO**, nunca como si ya funcionara.
+>
+> **Qué cambió desde la versión del 2026-08-09** (leer si ya conocías la versión anterior de
+> este documento): ya existe un modelo `PUBLISHED` real (sección 1 y 5) — pero con métricas de
+> calidad prácticamente nulas (⚠ leer la advertencia de la sección 1 antes que nada); el
+> diagnóstico anterior de "hacen falta 30+ fotos por tag" resultó estar mal — la causa real era
+> un tag vacío en el proyecto de Custom Vision, ya corregido, y 15 fotos sí entrenan (sección 5,
+> punto C3); y `image_hash`/`cv_image_id` dejaron de viajar concatenados en `photo_notes` — ahora
+> son columnas propias (sección 6).
 
 ---
 
@@ -36,24 +45,42 @@ existe como código**:
 | **① Detección de cajitas** | Paso 3 | ❌ **No existe** | Propuesto abajo — no hay ruta, no hay función |
 | **② `buscarSkuPorTexto`** | Paso 5 / sección 7.2 | ✅ Existe y probado | Función interna (`require`), **no** HTTP |
 
-**Lo más importante que Daniel necesita saber ahora mismo**: hoy (2026-08-09) hay **0 modelos
-con `status='PUBLISHED'`** en la base de producción — ni siquiera hay uno entrenado. La Pieza ①
-no tiene, hoy, ningún modelo real al que llamar aunque el endpoint existiera. Ver sección 5.
+**Lo más importante que Daniel necesita saber ahora mismo (actualizado 2026-08-10)**: ya hay **1
+modelo `PUBLISHED`/`is_active=1`** en producción (`category_id=2`, canal OMT, `model_version=2`).
+Pero: ⚠ **sus métricas reales son `precision=0`, `recall=0`, `mAP≈23.7%`** (verificado en vivo
+contra `sqldb-rscope-prod`, 2026-08-10) — se entrenó con solo 15 fotos, el mínimo técnico, no un
+volumen real. **Si Daniel llega a construir/probar el Paso 3 contra este modelo y ve que "casi
+no detecta cajitas" o detecta con confianza muy baja, es el comportamiento esperado del modelo
+actual, no un bug de su integración.** No tratar este modelo como un detector confiable todavía
+— sirve para validar que el pipeline de punta a punta funciona, no la calidad de detección. Ver
+sección 5 para el detalle completo y sección 2 para cómo esto cambia (parcialmente) el estado
+del Paso 3.
 
 ---
 
 ## 2. Pieza 1 — Detección de cajitas (Paso 3) — ❌ PENDIENTE DE CONSTRUIR
 
 **No existe ningún endpoint ni función en este repo que reciba una imagen y devuelva cajitas
-detectadas.** Verificado exhaustivamente:
+detectadas.** Re-verificado exhaustivamente el 2026-08-10, sin cambios respecto al 2026-08-09:
 
 - `src/services/customVisionService.js` (el único módulo que habla con Custom Vision) solo
   expone funciones de **entrenamiento** (`createProject`, `createImageFromData`,
   `createImageRegions`, `trainProject`, `publishIteration`, etc. — API `customvision/v3.3/training`).
   No hay ninguna función que llame a la **API de predicción** (`customvision/v3.0/Prediction/...`).
-- `CUSTOM_VISION_PREDICTION_KEY` y `CUSTOM_VISION_PREDICTION_RESOURCE_ID` existen en
-  `.env.example`, pero **ningún archivo de `src/` los lee** — están reservados, sin código detrás.
+- `CUSTOM_VISION_PREDICTION_KEY` existe en `.env.example`, pero **ningún archivo de `src/` lo
+  lee** — sigue reservado, sin código detrás. `CUSTOM_VISION_PREDICTION_RESOURCE_ID` sí se lee
+  hoy (`aiInfrastructureService.js`), pero solo para **publicar** iteraciones de entrenamiento
+  (`prediction_resource_id` en `RETSC_AI_DETECTION_MODELS`), no para llamar a la API de
+  predicción — sigue sin existir ese consumo.
 - No hay ninguna ruta en `src/routes/` con forma de "detectar"/"predecir"/"inferir".
+
+**Lo que sí cambió desde el 2026-08-09**: antes no tenía sentido construir esto porque no había
+ningún modelo publicado contra el cual probarlo end-to-end. Hoy **sí hay un modelo publicado**
+(`category_id=2`, ver sección 5) — el bloqueante de "no hay nada real contra qué probar" ya no
+aplica. Lo que persiste como advertencia real es la calidad: ese modelo tiene métricas de
+`precision=0`/`recall=0` (sección 1), así que aunque el endpoint se construya y funcione
+perfecto, las detecciones que devuelva hoy no van a ser útiles todavía — eso es una limitación
+de datos de entrenamiento, no del contrato propuesto abajo.
 
 ### Contrato PROPUESTO (no implementado — para discutir antes de construir)
 
@@ -90,16 +117,18 @@ Respuesta propuesta (200):
 - `boundingBox` normalizado `[0,1]` (mismo formato que ya usa `RETSC_AI_TRAINING_ANNOTATIONS.bbox_*`
   en este repo — ver sección 6), **no píxeles**. Es el formato nativo que devuelve la API de
   Predicción de Custom Vision, así que no habría que transformar nada del lado de Joel.
-- Caso "no hay modelo publicado para esa categoría" (el caso real hoy, ver sección 5) →
-  propuesto `409` con `{ success:false, code:'NO_PUBLISHED_MODEL', categoryId }`, para que
-  Daniel lo distinga de un error real y pueda mostrar "detección no disponible aún" sin romper
-  el flujo de la visita.
+- Caso "no hay modelo publicado para esa categoría" (sigue siendo el caso real para cualquier
+  categoría que no sea `category_id=2` — ver sección 5) → propuesto `409` con
+  `{ success:false, code:'NO_PUBLISHED_MODEL', categoryId }`, para que Daniel lo distinga de un
+  error real y pueda mostrar "detección no disponible aún" sin romper el flujo de la visita.
 - Quién resuelve qué modelo/iteración llamar: el backend, vía la consulta de la sección 5 —
   Daniel nunca ve `customvision_project_id` ni ninguna credencial de Custom Vision.
 
-**Antes de construir esto**, confirmar con el equipo: (a) si Daniel necesita esto ya o puede
-esperar a que haya al menos un modelo publicado (hoy no hay ninguno, así que construirlo ahora
-no sería comprobable end-to-end), y (b) si el contrato propuesto de arriba es el que realmente
+**Antes de construir esto**, confirmar con el equipo: (a) si Daniel necesita esto ya — ahora sí
+se puede probar end-to-end contra `category_id=2` (aunque con detecciones de mala calidad, ver
+sección 1), lo que antes no era posible; (b) si conviene esperar a que el modelo mejore antes de
+integrarlo en un flujo real de visita, para no acostumbrar al equipo de campo a resultados que
+todavía no son representativos; y (c) si el contrato propuesto de arriba es el que realmente
 necesita el flujo mobile (tamaño máximo de imagen, si Daniel prefiere mandar la imagen ya como
 blob URL en vez de multipart, etc.).
 
@@ -258,16 +287,20 @@ solo pierde ese paralelismo sin ganar nada.
 
 | Pieza | ¿Lista para integrar? | Detalle |
 |---|---|---|
-| `buscarSkuPorTexto` | ✅ **Sí, hoy mismo** | Función probada contra Azure OpenAI/Azure AI Search reales (2026-08-04). Si Daniel puede importar este repo, ya puede llamarla. |
-| Endpoint de detección (Paso 3) | ❌ **No existe** | Ni siquiera hay un modelo entrenado para probar contra — ver fila siguiente. |
-| Modelos `PUBLISHED` en prod | ❌ **0 modelos** | Verificado en vivo contra `sqldb-rscope-prod` el 2026-08-09: **1 sola fila** en `RETSC_AI_DETECTION_MODELS` (`category_id=2`), en estado `PROJECT_CREATED` (proyecto de Custom Vision creado, sin imágenes/entrenamiento todavía). Ninguna categoría tiene un modelo `TRAINED` ni `PUBLISHED`. |
-| Publicación automática (spec v1.4) | ✅ Código listo, sin datos para disparar | El mecanismo que entrena y publica automáticamente al llegar a 15 fotos sincronizadas por canal ya está cableado (`annotationSyncService.checkAndUpdateThreshold`) — lo que falta es volumen real de fotos anotadas y sincronizadas, no código. Ver `CLAUDE.md` sección "Entrenamiento de modelos" para el detalle completo, incluido un hallazgo reciente: Custom Vision rechaza el training con exactamente 15 imágenes/tag pese a ser el mínimo documentado por Microsoft — en la práctica hacen falta más (Microsoft recomienda 30+). |
+| `buscarSkuPorTexto` | ✅ **Sí, hoy mismo** | Función probada contra Azure OpenAI/Azure AI Search reales (2026-08-04). Si Daniel puede importar este repo, ya puede llamarla. Sin cambios desde el 2026-08-09. |
+| Endpoint de detección (Paso 3) | ❌ **No existe** | Ver sección 2 — el código no cambió, pero ya hay un modelo real contra el cual construirlo y probarlo (fila siguiente). |
+| Modelos `PUBLISHED` en prod | ✅ **1 modelo** (antes 0) | Verificado en vivo contra `sqldb-rscope-prod` el 2026-08-10: `RETSC_AI_DETECTION_MODELS` tiene **1 sola fila**, `category_id=2`, `status='PUBLISHED'`, `is_active=1`, `model_version=2`, `last_publish_name='Iteration2'`. ⚠ Pero `precision_score=0`, `recall_score=0`, `mean_ap=0.2373` — ver la advertencia de la sección 1, es la misma fila. Ninguna otra categoría tiene modelo `TRAINED` ni `PUBLISHED` todavía. |
+| Publicación automática (spec v1.4) | ✅ Código funcionando end-to-end | El mecanismo que entrena y publica automáticamente ya corrió una vez de punta a punta para `category_id=2` (con 15 fotos `APROBADA`/`SYNCED` reales en canal OMT, confirmado por consulta directa a la BD). El diagnóstico anterior de que "15 no alcanzan, Microsoft pide 30+" **era incorrecto** — la causa real del primer rechazo de Custom Vision era un tag vacío/residual dentro del proyecto CV de esa categoría (`imageCount=1` en un tag `DTT` que en realidad era la misma imagen de otro tag, residuo de pruebas), no un problema de volumen. Una vez limpiado ese tag, 15 fotos sí entrenaron y publicaron sin pedir más volumen. Ver `CLAUDE.md`, sección "de `TRAINED` a `PUBLISHED` (2026-08-10)" para el detalle completo, incluidos dos gaps de reconciliación manual que aparecieron en el camino (no bloquean a Daniel, son operativos). |
 
-**Conclusión honesta**: hoy Daniel puede empezar a integrar y probar `buscarSkuPorTexto` de
-forma aislada (mandándole textos OCR de prueba, no necesariamente de una detección real). El
-Paso 3 completo del flujo (foto real → cajitas reales) no se puede probar end-to-end todavía
-porque (a) no existe el endpoint y (b) aunque existiera, no hay ningún modelo publicado contra
-el cual predecir. Ambos bloqueantes son independientes — resolver (a) no resuelve (b).
+**Conclusión honesta (actualizada 2026-08-10)**: Daniel puede seguir integrando y probando
+`buscarSkuPorTexto` de forma aislada, sin cambios respecto al 2026-08-09. Sobre el Paso 3: ya
+**no** es cierto que "aunque el endpoint existiera, no habría modelo contra el cual probar" —
+ese bloqueante se resolvió, hay un modelo publicado real. Lo que sigue bloqueado es (a) el
+endpoint en sí, que no existe, y lo que es nuevo como advertencia es (b) que el único modelo
+disponible hoy tiene métricas de calidad prácticamente nulas — así que "ya se puede probar
+end-to-end" no es lo mismo que "ya se puede confiar en el resultado". Si se construye el
+endpoint ahora, tratarlo como una prueba de plomería (¿la llamada llega, la respuesta tiene el
+formato correcto?), no como una validación de que la detección funciona bien.
 
 ---
 
@@ -298,8 +331,11 @@ WHERE category_id = @categoryId AND status = 'PUBLISHED' AND is_active = 1
 ⚠ **Bug conocido sin resolver** (`docs/BUG-is_active-no-unico.md`): nada en la BD impide más
 de una fila con `is_active=1` para la misma categoría. Si esa consulta llegara a devolver más
 de una fila algún día, no hay garantía de cuál es "la correcta" — tomar la primera no es
-seguro. No es un problema hoy (0 modelos publicados), pero vale que Daniel lo sepa si construye
-sobre esta consulta antes de que se resuelva.
+seguro. **Esto ya deja de ser una advertencia teórica**: hoy hay 1 modelo publicado/activo real
+(`category_id=2`, verificado — la consulta de arriba devuelve exactamente 1 fila para esa
+categoría hoy), así que el bug estructural ya tiene un caso real donde importaría si alguna vez
+se disparara. No se resolvió en esta pasada — vale que Daniel lo tenga presente si construye
+sobre esta consulta.
 
 **`RETSC_CONFIG`** (config editable sin deploy): `clave` (varchar), `valor` (varchar — todo se
 guarda como texto), `data_type`. La fila que le importa a Daniel: `SKU_MATCH_THRESHOLD`.
@@ -329,8 +365,12 @@ Joel se va del proyecto — esto es lo que Daniel necesita saber para no depende
   Este documento (`INTERFAZ-para-Daniel.md`) es un recorte enfocado solo en lo que Daniel
   consume; `CLAUDE.md` tiene el resto (autenticación, roles, pipeline de SKUs, etc.).
 - **`docs/DIAGNOSTICO-spec-v1.4-vs-codigo.md`** tiene el diagnóstico completo de qué le faltaba
-  al flujo automático de entrenamiento/publicación antes de cablearse (2026-08-03), útil si
-  Daniel necesita entender por qué el modelo de `category_id=2` está atascado.
+  al flujo automático de entrenamiento/publicación antes de cablearse (2026-08-03). El modelo de
+  `category_id=2` ya no está atascado (entrenó y publicó, ver secciones 1 y 5) — este documento
+  sirve más como contexto histórico de por qué costó tanto llegar ahí, incluidos dos gaps de
+  reconciliación manual documentados en `CLAUDE.md` (2026-08-10) que Daniel no necesita resolver,
+  pero que explican por qué "el equipo subió las fotos" no siempre se traduce en "el modelo se
+  publicó solo, sin intervención manual" todavía.
 - **`docs/DB-SCHEMA.md`** (si existe en la rama que Daniel use) es un dump automático y
   actualizable (`node scripts/dump-schema.js`) de todo el schema real de la BD — más confiable
   que cualquier prosa si hay dudas sobre columnas/tipos.
@@ -346,18 +386,24 @@ Joel se va del proyecto — esto es lo que Daniel necesita saber para no depende
 
 ## Inconsistencias encontradas entre la guía v1.9 y el código real (para reconciliar antes de pasarle esto a Daniel)
 
-1. **La guía asume que el Paso 3 (detección) es una pieza lista para consumir — no lo es.**
-   No hay ni endpoint ni función. Habría que decidir con el equipo si esto se construye ahora
-   (sin poder probarlo end-to-end por falta de modelos publicados) o se posterga hasta tener
-   al menos un modelo `PUBLISHED` real.
-2. **La guía asume que para probar el flujo completo alcanza con las "15 fotos por canal"
-   documentadas como umbral de negocio** — en la práctica, Custom Vision rechaza el
-   entrenamiento con exactamente 15 imágenes por tag (ver `CLAUDE.md`, hallazgo 2026-08-08).
-   Este documento no repite ese diagnóstico completo, pero Daniel debería saber que "el equipo
-   ya subió 15 fotos" no implica "ya hay un modelo entrenado" — hoy en prod, con 1 sola
-   categoría en `PROJECT_CREATED`, ni siquiera se llegó a ese punto.
+1. **La guía asume que el Paso 3 (detección) es una pieza lista para consumir — sigue sin
+   serlo.** No hay ni endpoint ni función (re-verificado 2026-08-10, sin cambios de código en
+   esta parte). Lo que sí cambió es que ya no falta un modelo publicado para probarlo — hay que
+   decidir con el equipo si conviene construirlo ya (con un modelo de calidad todavía baja, ver
+   punto 2) o esperar a que haya más volumen real de fotos.
+2. **La guía asume que con "15 fotos por canal" alcanza para tener un modelo entrenado — esto
+   resultó ser cierto, pero no fue obvio en el camino.** Un diagnóstico anterior de este mismo
+   proyecto (2026-08-08) concluyó erróneamente que Custom Vision necesitaba 30+ imágenes por
+   tag; la causa real del rechazo era un tag vacío/residual en el proyecto de Custom Vision
+   (no un problema de volumen) — una vez limpiado, `category_id=2` entrenó y publicó con
+   exactamente 15 fotos reales del canal OMT (verificado en la BD, 2026-08-10: `mean_ap=0.237`).
+   **Advertencia que sí sigue vigente**: "hay un modelo entrenado y publicado" no es lo mismo
+   que "hay un modelo útil" — con solo 15 fotos, `precision` y `recall` salieron en `0` (ver
+   secciones 1 y 5). Si el equipo sube más fotos y el modelo se re-entrena, esas métricas
+   deberían mejorar; hoy no lo hacen.
 3. **La sección 7.2 de la guía describe `buscarSkuPorTexto` como parte de un flujo con datos
    enriquecidos (EAN/Producto/Categoría ya conocidos)** — en la práctica, en el punto del flujo
    donde Daniel la llama, esos datos todavía no existen (es lo que se está buscando). Esto no
    es un defecto de implementación, es una asimetría inherente al orden del flujo — documentada
    en la sección 3 de este documento y en el propio código (`skuSearchService.js`, cabecera).
+   Sin cambios desde el 2026-08-09.

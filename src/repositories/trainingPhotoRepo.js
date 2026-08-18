@@ -72,11 +72,11 @@ const findById = async (photoId) => {
 const findByHashAndCanal = async (hash, canal) => {
   const pool = await getPool();
   const r = await pool.request()
-    .input('canal',   sql.VarChar(20),  canal)
-    .input('pattern', sql.VarChar(100), `%sha256:${hash}%`)
+    .input('canal', sql.VarChar(20),  canal)
+    .input('hash',  sql.VarChar(64),  hash)
     .query(`
       SELECT TOP 1 * FROM ${TABLE}
-      WHERE canal = @canal AND photo_notes LIKE @pattern
+      WHERE canal = @canal AND image_hash = @hash
     `);
   return r.recordset[0] ?? null;
 };
@@ -91,6 +91,8 @@ const insert = async ({
   blob_path,
   photo_notes = null,
   photo_status = 'EN_PROGRESO',
+  image_hash = null,
+  cv_image_id = null,
 }) => {
   const pool = await getPool();
   const r = await pool.request()
@@ -101,14 +103,18 @@ const insert = async ({
     .input('blobPath',        sql.VarChar(300), blob_path)
     .input('photoNotes',      sql.VarChar(250), photo_notes)
     .input('photoStatus',     sql.VarChar(30),  photo_status)
+    .input('imageHash',       sql.VarChar(64),  image_hash)
+    .input('cvImageId',       sql.VarChar(100), cv_image_id)
     .query(`
       INSERT INTO ${TABLE}
         (uploaded_by_user_id, uploaded_by_enterprise_id, category_id, canal, blob_path,
-         photo_notes, photo_status, cv_sync_status, cv_sync_attempts, created_at)
+         photo_notes, photo_status, image_hash, cv_image_id,
+         cv_sync_status, cv_sync_attempts, created_at)
       OUTPUT INSERTED.*
       VALUES
         (@uploadedBy, @enterpriseId, @categoryId, @canal, @blobPath,
-         @photoNotes, @photoStatus, 'PENDING', 0, GETDATE())
+         @photoNotes, @photoStatus, @imageHash, @cvImageId,
+         'PENDING', 0, GETDATE())
     `);
   return r.recordset[0];
 };
@@ -191,6 +197,9 @@ const getPhotoWithRegions = async (photoId) => {
     // rechazo a quien la retoma (guía 3.3).
     photo_status:    photo.photo_status,
     photo_notes:     photo.photo_notes,
+    image_hash:      photo.image_hash,
+    cv_image_id:     photo.cv_image_id,
+    reviewed_at:     photo.reviewed_at,
     uploaded_by_enterprise_id: photo.uploaded_by_enterprise_id,
     regions: r.recordset.map(row => ({
       annotation_id: row.annotation_id,
@@ -320,33 +329,31 @@ const markComplete = async (photoId) => {
   return r.recordset[0] ?? null;
 };
 
-// RECHAZAR con motivo (sección 3.2).
+// RECHAZAR con motivo (sección 3.2 de la guía).
 //
-// El motivo se AGREGA al final de photo_notes, nunca la sobrescribe: esa columna
-// lleva embebido el "sha256:<hash>" que usa findByHashAndCanal para deduplicar
-// por canal. Pisarla rompería el dedup en silencio — la misma foto se podría
-// volver a subir. Como el dedup busca con LIKE '%sha256:<hash>%', agregar texto
-// al final no lo afecta.
+// El estado final es EN_PROGRESO, NO 'RECHAZADA' — arregla el Issue #2 de QA.
+// Motivo: ninguna pantalla del sistema busca fotos en estado RECHAZADA, así que
+// dejarla ahí la volvía invisible para todo el equipo aunque la fila siguiera en
+// la base. La guía ya lo pedía en 3.3: "se recomienda regresar el estado a
+// EN_PROGRESO (no dejarla en RECHAZADA de forma permanente)".
 //
-// La columna es varchar(250) y el texto que ya escribe el uploader ocupa ~210
-// caracteres, así que el motivo se recorta a lo que quede libre.
+// El rastro del rechazo no se pierde: queda el motivo en photo_notes más el
+// reviewer_id y el reviewed_at, que es lo que permite distinguir una foto
+// rechazada y devuelta de una que nunca se revisó.
+//
+// El motivo se GUARDA SOLO en photo_notes, sin la metadata técnica: el hash y el
+// cvImageId ya viven en sus columnas propias (image_hash, cv_image_id), agregadas
+// para el Issue #3. Antes había que concatenar y recortar a 250 caracteres.
 const reject = async (photoId, reviewerId, motivo) => {
-  const actual = await findById(photoId);
-  if (!actual) return null;
-
-  const previo = actual.photo_notes ?? '';
-  const sufijo = ` | rechazo: ${String(motivo ?? '').trim()}`;
-  const notas  = (previo + sufijo).slice(0, 250);
-
   const pool = await getPool();
   const r = await pool.request()
     .input('photoId',  sql.Int,          photoId)
     .input('reviewer', sql.Int,          reviewerId ?? null)
-    .input('notas',    sql.VarChar(250), notas)
+    .input('motivo',   sql.VarChar(250), String(motivo ?? '').trim().slice(0, 250))
     .query(`
       UPDATE ${TABLE}
-      SET    photo_status = 'RECHAZADA',
-             photo_notes  = @notas,
+      SET    photo_status = '${PHOTO_STATUS.EN_PROGRESO}',
+             photo_notes  = @motivo,
              reviewer_id  = @reviewer,
              reviewed_at  = GETDATE()
       OUTPUT INSERTED.*
@@ -355,8 +362,30 @@ const reject = async (photoId, reviewerId, motivo) => {
   return r.recordset[0] ?? null;
 };
 
+
+// Persiste el cvImageId en SU columna (Issue #3). Reemplaza a updatePhotoNotes
+// para este uso: antes el id viajaba embebido en el texto de photo_notes y había
+// que reconstruir el string entero para actualizarlo, lo que además pisaba
+// cualquier motivo de rechazo que hubiera ahí.
+const updateCvImageId = async (photoId, cvImageId, imageHash = null) => {
+  const pool = await getPool();
+  const r = await pool.request()
+    .input('photoId',   sql.Int,          photoId)
+    .input('cvImageId', sql.VarChar(100), cvImageId)
+    .input('imageHash', sql.VarChar(64),  imageHash)
+    .query(`
+      UPDATE ${TABLE}
+      SET    cv_image_id = @cvImageId,
+             image_hash  = ISNULL(@imageHash, image_hash)
+      OUTPUT INSERTED.*
+      WHERE  photo_id = @photoId
+    `);
+  return r.recordset[0] ?? null;
+};
+
 module.exports = {
   PHOTO_STATUS,
+  updateCvImageId,
   markComplete,
   reject,
   findById,

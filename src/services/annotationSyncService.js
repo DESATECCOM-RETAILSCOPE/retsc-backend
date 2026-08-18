@@ -59,11 +59,24 @@ const aiModelRepo         = require('../repositories/aiModelRepo');
 const customVisionService = require('./customVisionService');
 const modelTrainingService = require('./modelTrainingService');
 const blobStorageService  = require('./blobStorageService');
+const configService        = require('./configService');
 const { hashBuffer }       = require('../utils/imageHasher');
 
 const CANALES = ['OMT', 'DTT', 'CONVENIENCE'];
 
-const THRESHOLD = () => parseInt(process.env.SHELF_TRAINING_THRESHOLD || '15', 10);
+// Umbral del PRIMER entrenamiento de una categoría — fijo, es el mínimo real que exige Azure
+// Custom Vision para entrenar detección (confirmado empíricamente, ver CLAUDE.md, hallazgo
+// 2026-08-08/2026-08-09). NO sale de RETSC_CONFIG a propósito: no es un parámetro de negocio
+// ajustable, es un piso técnico de la API — cambiarlo rompería el primer entrenamiento.
+const FIRST_TRAIN_THRESHOLD = () => parseInt(process.env.SHELF_TRAINING_THRESHOLD || '15', 10);
+
+// Umbral de los RE-entrenamientos siguientes (pedido de jefatura, 2026-08-10) — a diferencia
+// del primero, SÍ es un parámetro de negocio ajustable sin deploy: RETSC_CONFIG.clave=
+// 'RETRAIN_BATCH_SIZE'. Mismo patrón defensivo que SKU_MATCH_THRESHOLD (skuSearchService.js) —
+// cache/fallback/parseo seguro vía configService.getNumberConfig(), nunca un CAST crudo que
+// reviente si el valor tiene formato raro (coma decimal, texto, fila borrada, etc.).
+const RETRAIN_BATCH_SIZE_KEY      = 'RETRAIN_BATCH_SIZE';
+const RETRAIN_BATCH_SIZE_FALLBACK = 10;
 
 // Mismo container que usa shelfPhotoUploadService.js — necesario acá para el auto-registro
 // defensivo (Opción C, ver autoRegisterImage()).
@@ -139,15 +152,19 @@ function extractCvImageId(photoNotes) {
   return match ? match[1] : null;
 }
 
-// Opción C (auto-registro defensivo, 2026-08-05) — mitigación mientras el equipo de anotación
-// (#42, Arthur) siga insertando fotos directo a Blob/SQL sin pasar por
-// shelfPhotoUploadService.uploadShelfPhoto (desconexión estructural confirmada — ver
-// "Desconexión con #42" en CLAUDE.md/docs). Cuando una foto llega al sync sin cvImageId en
-// photo_notes, en vez de fallar acá mismo se la registra en Custom Vision: descarga el blob,
-// la sube, y persiste photo_notes con el MISMO formato que arma uploadShelfPhoto (Etapa 7) —
-// no se inventa un formato distinto — para que un sync futuro de la misma foto no tenga que
-// volver a auto-registrar (idempotente por diseño: solo se llama cuando extractCvImageId()
-// no encontró nada).
+// Desde 2026-08-12 este es el camino NORMAL: la subida (shelfPhotoUploadService.js) ya solo
+// escribe en Blob Storage + BD, con cv_image_id=null — el registro real en Custom Vision se
+// hace ACÁ, al sincronizar la anotación aprobada, momento en el que el proyecto de la
+// categoría ya existe con certeza (si no existiera, no habría nada para anotar/aprobar) y el
+// tag se resuelve con customVisionService.ensureTag(), la misma fuente de verdad que el resto
+// del pipeline de sync usa. Antes esto era una mitigación excepcional (Opción C, 2026-08-05)
+// solo para fotos insertadas directo a Blob/SQL sin pasar por uploadShelfPhoto (desconexión
+// #42, Arthur) — ese caso sigue funcionando igual acá, simplemente ya no es la excepción.
+//
+// Descarga el blob, lo sube a Custom Vision, y persiste el id en su columna propia
+// (trainingPhotoRepo.updateCvImageId — Issue #3) para que un sync futuro de la misma foto no
+// tenga que volver a registrarla (idempotente por diseño: solo se llama cuando la foto no
+// tiene ya un cv_image_id real).
 //
 // Solo es posible si la foto tiene blob_path Y el blob existe de verdad en
 // AZURE_GLOBAL_SHELF_CONTAINER — si no, se deja que la excepción se propague al catch de
@@ -157,10 +174,6 @@ function extractCvImageId(photoNotes) {
 // NO se llama si Custom Vision no está configurado / sin proyecto — ese caso ya corta antes,
 // en el guard de isConfigured()/projectId de syncRegionsForPhoto, así que acá siempre hay un
 // projectId válido y CV configurado.
-//
-// ⚠ Este auto-registro es una MITIGACIÓN, no la corrección de fondo — mientras #42 no suba
-// fotos vía POST /api/shelf-photos/upload, cada una de sus fotos pasará por acá con el
-// warning de abajo. La corrección real (Opción A) es que #42 use ese endpoint.
 async function autoRegisterImage(photo, projectId, tagId) {
   if (!photo.blob_path) {
     throw new Error(
@@ -177,13 +190,13 @@ async function autoRegisterImage(photo, projectId, tagId) {
   const hash = await hashBuffer(buffer);
   const { cvImageId } = await customVisionService.createImageFromData(projectId, buffer, tagId);
 
-  const photoNotes = `blob:${photo.blob_path} | sha256:${hash} | cvImageId:${cvImageId}`;
-  await trainingPhotoRepo.updatePhotoNotes(photo.photo_id, photoNotes);
+  // Se guarda en las COLUMNAS propias (Issue #3), no concatenado en photo_notes:
+  // esa columna quedó reservada para el motivo/comentario de la revisión.
+  await trainingPhotoRepo.updateCvImageId(photo.photo_id, cvImageId, hash);
 
-  console.warn(
-    `[annotationSync] photo_id=${photo.photo_id} entró SIN cvImageId (no pasó por ` +
-    `uploadShelfPhoto — ver desconexión #42), auto-registrada en Custom Vision con ` +
-    `cvImageId=${cvImageId} — corrección de fondo pendiente (Opción A, ver CLAUDE.md).`
+  console.log(
+    `[annotationSync] photo_id=${photo.photo_id} registrada en Custom Vision al sincronizar ` +
+    `(camino normal desde 2026-08-12) — cvImageId=${cvImageId}`
   );
 
   return cvImageId;
@@ -315,9 +328,18 @@ async function syncRegionsForPhoto(photo, rows) {
 
     tagId = await resolveTagId(projectId, photo.canal);
 
-    // Auto-registro defensivo (Opción C) si la foto llegó sin cvImageId — ver
-    // autoRegisterImage() para el porqué (desconexión con #42).
-    let cvImageId = extractCvImageId(photo.photo_notes);
+    // FIX 2026-08-12: un cv_image_id que empieza con 'stub-' NO es una imagen real de Custom
+    // Vision — lo generaba shelfPhotoUploadService.createImageFromData cuando la categoría
+    // todavía no tenía proyecto en CV (modelo PENDING/PROJECT_CREATED). Tratarlo como "no
+    // registrada" para que autoRegisterImage() la suba de verdad desde el blob. Esto hace que
+    // las fotos ya atascadas con un stub se auto-reparen en el próximo sync, sin tocar la BD
+    // a mano. (La subida ya no genera stubs desde este mismo fix — ver shelfPhotoUploadService.js
+    // — pero fotos subidas ANTES del fix pueden tener uno guardado.)
+    let cvImageId = photo.cv_image_id ?? extractCvImageId(photo.photo_notes);
+    if (cvImageId && String(cvImageId).startsWith('stub-')) {
+      console.warn(`[annotationSync] photo_id=${photo.photo_id} tenía cv_image_id stub (${cvImageId}) — se re-registra en Custom Vision desde el blob.`);
+      cvImageId = null;
+    }
     if (!cvImageId) {
       cvImageId = await autoRegisterImage(photo, projectId, tagId);
     }
@@ -435,8 +457,11 @@ async function removeRegionsForPhoto(photo, rows) {
   try {
     await deleteOldRegions(projectId, rows);
 
-    const cvImageId = extractCvImageId(photo.photo_notes);
-    if (cvImageId) {
+    // Mismo guard anti-stub que en syncRegionsForPhoto (FIX 2026-08-12): un id 'stub-...'
+    // nunca existió de verdad en Custom Vision — no tiene sentido pedirle a la API que borre
+    // algo que nunca creó (y CV lo rechazaría igual).
+    const cvImageId = photo.cv_image_id ?? extractCvImageId(photo.photo_notes);
+    if (cvImageId && !String(cvImageId).startsWith('stub-')) {
       await customVisionService.deleteImages(projectId, [cvImageId]);
     }
 
@@ -486,11 +511,21 @@ async function checkAndUpdateThreshold(categoryId) {
     return;
   }
 
-  const threshold = THRESHOLD();
+  // Dos umbrales distintos (pedido de jefatura, 2026-08-10): el conteo "desde trained_at" por
+  // categoría+canal (countSyncedSinceByCategoryChannel) ya existía y ya funciona igual para
+  // ambos casos — lo que cambia es contra qué número se compara. Sin esta distinción, comparar
+  // el conteo YA ACOTADO "desde trained_at" contra el mismo 15 de siempre habría hecho que un
+  // reentrenamiento necesitara 15 fotos nuevas en vez de las 10 de RETRAIN_BATCH_SIZE.
+  const isFirstTraining = model.trained_at == null;
+  const threshold = isFirstTraining
+    ? FIRST_TRAIN_THRESHOLD()
+    : await configService.getNumberConfig(RETRAIN_BATCH_SIZE_KEY, RETRAIN_BATCH_SIZE_FALLBACK, { min: 1 });
+
   for (const canal of CANALES) {
     const count = await trainingPhotoRepo.countSyncedSinceByCategoryChannel(categoryId, canal, model.trained_at);
     if (count >= threshold) {
-      console.log(`[annotationSync] umbral alcanzado — categoria=${categoryId} canal=${canal} (${count}/${threshold} SYNCED desde trained_at=${model.trained_at ?? 'nunca'}) → disparando entrenamiento automático`);
+      const motivo = isFirstTraining ? 'primer entrenamiento, umbral fijo' : 'reentrenamiento, RETSC_CONFIG.RETRAIN_BATCH_SIZE';
+      console.log(`[annotationSync] umbral alcanzado — categoria=${categoryId} canal=${canal} (${count}/${threshold} SYNCED desde trained_at=${model.trained_at ?? 'nunca'}, ${motivo}) → disparando entrenamiento automático`);
       await aiModelRepo.updateStatus(model.detection_model_id, 'IMAGES_UPLOADED');
 
       // Fire-and-forget — no se espera a que termine el training, el sync que llamó a esta

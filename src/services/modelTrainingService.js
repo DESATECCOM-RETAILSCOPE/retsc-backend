@@ -302,4 +302,4 @@ async function publishAndActivate(model, projectId, iterationId) {
   console.log(`[modelTraining] iteración publicada y activada — categoria=${categoryId} model_id=${modelId} version=${nextVersion} publishName=${publishName}`);
 }
 
-module.exports = { startTraining, pollTrainingStatus };
+module.exports = { startTraining, pollTrainingStatus, publishAndActivate };
