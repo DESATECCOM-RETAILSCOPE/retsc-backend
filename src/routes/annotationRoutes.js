@@ -32,6 +32,11 @@ router.get('/photo/:photoId/readiness',  c.readiness);
 // '/photos' (plural) no colisiona con '/photo/:photoId' (singular, distinto segmento
 // literal) ni con las rutas ':id' de más abajo (distinta cantidad de segmentos) —
 // verificado levantando el router, no solo por inspección.
+// Aprobación EN LOTE. Va ANTES de '/photos/:photoId...' a propósito: aunque hoy
+// ninguna ruta PATCH de un solo segmento bajo /photos colisiona, registrar la
+// literal primero evita que un ':photoId' futuro se la coma silenciosamente.
+router.patch('/photos/approve-batch',        canValidate, c.approvePhotosBatch);
+
 router.get('/photos',                        canValidate, c.listPhotos);
 router.get('/photos/:photoId',               canValidate, c.getPhotoDetail);
 router.patch('/photos/:photoId/approve',     canValidate, c.approvePhoto);
