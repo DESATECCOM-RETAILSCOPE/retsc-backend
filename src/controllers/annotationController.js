@@ -31,6 +31,11 @@ const CONTENT_TYPE_BY_EXT = {
 // hoy y no vale la pena crear uno para 3 usos idénticos.
 const CANALES_VALIDOS = ['OMT', 'DTT', 'CONVENIENCE'];
 
+// Tope del lote de aprobación. Cada foto implica subir sus cajitas a Custom
+// Vision, así que un lote enorme mantendría la petición HTTP abierta minutos y se
+// llevaría un timeout del proxy con parte del trabajo ya hecho.
+const MAX_BATCH_APPROVE = 50;
+
 function handleError(res, err) {
   const status = err.statusCode || 500;
   if (status === 500) console.error('[annotation]', err);
@@ -329,7 +334,84 @@ const rejectPhotoCtrl = async (req, res) => {
   }
 };
 
+
+// PATCH /api/annotations/photos/approve-batch — aprobar VARIAS fotos de una vez.
+//
+// Body: { photoIds: number[], clienteAjustoCajitas?: boolean }
+//
+// El motivo es de COSTOS, no de comodidad. Entrenar en Custom Vision cuesta lo
+// mismo con 10 fotos que con 40: el gasto depende de cuántas VECES se entrena, no
+// de cuántas cajitas se envían. Aprobando de a una, cada aprobación evalúa el
+// umbral por su cuenta y puede disparar su propio entrenamiento. Acá el umbral se
+// evalúa UNA sola vez al final, y una sola vez por categoría aunque el lote
+// mezcle varias.
+//
+// Cada foto se procesa por separado y un fallo no aborta el resto: se devuelve el
+// detalle por foto para que la UI diga exactamente cuáles quedaron pendientes.
+const approvePhotosBatch = async (req, res) => {
+  try {
+    const ids = Array.isArray(req.body?.photoIds) ? req.body.photoIds : null;
+    if (!ids || !ids.length) {
+      return res.status(400).json({ success: false, message: 'photoIds es requerido y debe ser una lista con al menos un id.' });
+    }
+    if (ids.length > MAX_BATCH_APPROVE) {
+      return res.status(400).json({
+        success: false,
+        message: `No se pueden aprobar más de ${MAX_BATCH_APPROVE} fotos por lote.`,
+      });
+    }
+
+    const clienteAjustoCajitas = req.body?.clienteAjustoCajitas !== false;
+    const aprobadas = [];
+    const fallidas  = [];
+    const categorias = new Set();
+
+    for (const raw of ids) {
+      const photoId = parseInt(raw, 10);
+      try {
+        if (isNaN(photoId)) throw Object.assign(new Error('id inválido'), { statusCode: 400 });
+
+        const photo = await trainingPhotoRepo.getPhotoWithRegions(photoId);
+        if (!photo) throw Object.assign(new Error('no encontrada'), { statusCode: 404 });
+        if (!(photo.regions ?? []).some(r => r.bbox_left != null)) {
+          throw Object.assign(new Error('no tiene ninguna cajita'), { statusCode: 409 });
+        }
+
+        await trainingPhotoRepo.approvePhoto(photoId, req.user.userId);
+        await annotationRepo.validateAllByPhoto(photoId);
+
+        // skipThresholdCheck: la verificación va una sola vez, al final del lote.
+        await annotationSyncService.syncApprovedPhoto(photoId, {
+          clienteAjustoCajitas,
+          skipThresholdCheck: true,
+        });
+
+        categorias.add(photo.category_id);
+        aprobadas.push(photoId);
+      } catch (err) {
+        console.warn(`[annotation] lote: foto ${photoId} falló — ${err.message}`);
+        fallidas.push({ photoId, message: err.message });
+      }
+    }
+
+    // UNA verificación de umbral por categoría, no una por foto.
+    for (const categoryId of categorias) {
+      await annotationSyncService.checkAndUpdateThreshold(categoryId)
+        .catch(err => console.error(`[annotation] verificación de umbral falló (categoria=${categoryId}):`, err.message));
+    }
+
+    return res.json({
+      success: true,
+      aprobadas,
+      fallidas,
+      verificacionesDeUmbral: categorias.size,
+    });
+  } catch (err) {
+    return handleError(res, err);
+  }
+};
+
 module.exports = {
   approve, correct, reject, listByPhoto, readiness, listPhotos, getPhotoDetail, approvePhoto,
-  getPhotoImage, createRegion, completePhoto, rejectPhotoCtrl,
+  getPhotoImage, createRegion, completePhoto, rejectPhotoCtrl, approvePhotosBatch,
 };
