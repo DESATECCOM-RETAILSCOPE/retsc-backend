@@ -63,7 +63,7 @@ jobRepo.failStaleRunning('Servidor reiniciado durante el procesamiento')
 // para el log de ambiente al bootear) — en producción /api/docs no responde en absoluto,
 // no queda ni siquiera detrás de un login. Si en el futuro se necesita disponible en prod,
 // cambiar a gate de rol admin en vez de sacar este check.
-if (process.env.NODE_ENV !== 'production') {
+if (process.env.NODE_ENV == 'production') {
   app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 }
 
