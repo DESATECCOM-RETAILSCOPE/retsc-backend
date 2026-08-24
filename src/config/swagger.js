@@ -35,10 +35,9 @@
 //   2. Auth inline       (ej. authRoutes.js: algunas rutas SIN authMiddleware, otras con él a mano) → revisar ruta por ruta
 //   3. Auth por-ruta+multer (ej. productRoutes.js)                        → mismo criterio que el 2, más los uploads con multer no llevan swagger de body (no se documentó acá)
 //
-// Rutas ya documentadas como muestra (Issue Swagger, 2026-07-20): POST /api/auth/login
-// (pública), GET /api/roles (protegida simple), GET /api/products (protegida + footgun
-// de categoryId). El resto de los 15+ endpoints queda para una pasada futura — copiar
-// este mismo patrón.
+// Cobertura (actualizado 2026-08-21): los 17 archivos de src/routes/*.js ya tienen
+// bloques @swagger — 46 rutas / 54 operaciones documentadas. Si agregás una ruta nueva,
+// copiar el mismo patrón de arriba en vez de dejarla sin documentar.
 
 const swaggerJsdoc = require('swagger-jsdoc');
 
@@ -50,8 +49,12 @@ const options = {
       version: '1.0.0',
       description: 'Documentación interactiva de la API de RetailScope (backend retsc-backend). Solo disponible fuera de producción — ver gate en app.js.',
     },
+    // Solo cambia contra qué "server" apunta el botón "Try it out" del Swagger UI — esta
+    // UI en sí NUNCA se sirve en producción (ver gate en app.js), pero corriéndola local
+    // podés elegir invocar el backend deployado en Railway en vez de tu localhost.
     servers: [
-      { url: 'http://localhost:3032', description: 'Desarrollo local' },
+      { url: `http://localhost:${process.env.PORT || 3000}`, description: 'Desarrollo local' },
+      { url: 'https://retsc-backend-production-4845.up.railway.app', description: 'Railway (producción)' },
     ],
     components: {
       securitySchemes: {
