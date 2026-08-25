@@ -31,8 +31,25 @@ const { uploadToContainer } = require('./blobStorageService');
 const { hashBuffer }        = require('../utils/imageHasher');
 const visitRepo             = require('../repositories/visitRepo');
 const categoryRepo          = require('../repositories/categoryRepo');
+const enterpriseRepo        = require('../repositories/enterpriseRepo');
+const retailerRepo          = require('../repositories/retailerRepo');
 const shelfPhotoRepo        = require('../repositories/shelfPhotoRepo');
 const detectionPipelineService = require('./detectionPipelineService');
+
+// Convierte una descripción de catálogo (nombre de empresa, PDV, categoría) en un segmento
+// de ruta de blob storage seguro: sin acentos, sin caracteres que Azure Blob no permite en
+// nombres de blob (/, \, etc. quedarían como separadores de carpeta si no se limpian), sin
+// espacios. Si la descripción no está disponible (catálogo caído, id sin match), usa el
+// fallback para no tumbar la subida de la foto por un nombre bonito.
+function pathSegment(description, fallback) {
+  if (!description) return fallback;
+  const clean = description
+    .toString()
+    .normalize('NFD').replace(/\p{Diacritic}/gu, '')
+    .replace(/[^a-zA-Z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return clean || fallback;
+}
 
 const VISIT_SHELF_CONTAINER = () =>
   process.env.AZURE_VISIT_SHELF_CONTAINER || 'enterprise-shelf-visits';
@@ -80,11 +97,27 @@ async function uploadVisitPhoto({ buffer, visitId, categoryId, shelfunitId, qual
 
   const hash = await hashBuffer(buffer);
 
-  // Path fijo de la guía (sección 3.1):
-  //   enterprise-shelf-visits/{enterprise_id}/{pdv_id}/{session_id}/{category_id}/
-  // pdv_id = Retailer_id de la visita (el PDV seleccionado en el Paso 0); session_id = Visit_id.
+  // Path de blob storage con descripciones legibles en vez de ids crudos (a pedido del
+  // equipo — la guía v1.9 sección 3.1 originalmente pedía enterprise_id/pdv_id/session_id/
+  // category_id). Enterprise_dsc y Retailer_dsc requieren una consulta extra a sus
+  // catálogos; category_id ya se resolvió arriba (category.Category_dsc). La visita no
+  // tiene una descripción propia en RETSC_EX_VISIT — se usa fecha + Visit_id
+  // (ej. "2026-08-18_visit-142") para que sea legible y no choque si dos visitas abren
+  // el mismo día al mismo PDV. Cada segmento cae a su id crudo si el catálogo no resuelve
+  // (retailerRepo.findById degrada a null si RETSC_OP_RETAILER no existe — ver ese archivo).
+  const [enterprise, retailer] = await Promise.all([
+    enterpriseRepo.findById(visit.Enterprise_id),
+    retailerRepo.findById(visit.Retailer_id),
+  ]);
+
+  const enterpriseFolder = pathSegment(enterprise?.Enterprise_dsc, `enterprise-${visit.Enterprise_id}`);
+  const retailerFolder   = pathSegment(retailer?.Retailer_dsc, `retailer-${visit.Retailer_id}`);
+  const categoryFolder   = pathSegment(category.Category_dsc, `category-${categoryIdInt}`);
+  const visitDateStr     = (visit.Visit_start ? new Date(visit.Visit_start) : new Date()).toISOString().slice(0, 10);
+  const visitFolder      = `${visitDateStr}_visit-${visit.Visit_id}`;
+
   const filename = `${Math.floor(Date.now() / 1000)}-${crypto.randomUUID().slice(0, 8)}.jpg`;
-  const blobPath = `${visit.Enterprise_id}/${visit.Retailer_id}/${visit.Visit_id}/${categoryIdInt}/${filename}`;
+  const blobPath = `${enterpriseFolder}/${retailerFolder}/${visitFolder}/${categoryFolder}/${filename}`;
 
   const { url: blobUrl } = await uploadToContainer({
     containerName: VISIT_SHELF_CONTAINER(),

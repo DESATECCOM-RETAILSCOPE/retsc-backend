@@ -54,4 +54,23 @@ const resolveCanalByRetailer = async (retailerId) => {
   }
 };
 
-module.exports = { list, resolveCanalByRetailer };
+// Devuelve la fila del retailer (Retailer_id, Retailer_dsc), o null si la tabla no existe
+// todavía, si el id no matchea, o si hay cualquier otro error — mismo degrade seguro que
+// resolveCanalByRetailer, para poder usar Retailer_dsc como nombre de carpeta en blob
+// storage sin tumbar la subida de la foto si el catálogo no está disponible.
+const findById = async (retailerId) => {
+  if (retailerId == null) return null;
+
+  try {
+    const pool = await getPool();
+    const r = await pool.request()
+      .input('id', sql.Int, retailerId)
+      .query(`SELECT Retailer_id, Retailer_dsc FROM ${TABLE} WHERE Retailer_id = @id`);
+    return r.recordset[0] ?? null;
+  } catch (err) {
+    console.warn(`[retailerRepo] no se pudo resolver Retailer_id=${retailerId} — ${err.message}`);
+    return null;
+  }
+};
+
+module.exports = { list, resolveCanalByRetailer, findById };
