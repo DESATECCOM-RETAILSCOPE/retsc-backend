@@ -1,0 +1,52 @@
+require('dotenv').config();
+
+const sql = require('mssql');
+const fs = require('fs');
+const { cropRegion } = require('./utils/imageCropper');
+const visionOcrService = require('./services/visionOcrService');
+
+(async () => {
+  const pool = await sql.connect(/* la config del repo */);
+ 
+  // 1. Traer una cajita real de una foto aprobada
+  const r = await pool.request().query(`
+    SELECT TOP 1
+           a.annotation_id,
+           a.bbox_left, a.bbox_top, a.bbox_width, a.bbox_height,
+           p.blob_path, p.photo_id
+    FROM RETSC_AI_TRAINING_ANNOTATIONS a
+    INNER JOIN RETSC_AI_TRAINING_PHOTOS p ON p.photo_id = a.photo_id
+    WHERE p.category_id = 2
+      AND p.photo_status = 'APROBADA'
+      AND a.bbox_left IS NOT NULL;
+  `);
+ 
+  const caja = r.recordset[0];
+  console.log('Cajita:', caja);
+ 
+  // 2. Traer la foto del Blob
+  const buffer = await descargarBlob(caja.blob_path);   // usar el helper del repo
+  console.log('Foto:', buffer.length, 'bytes');
+ 
+  // 3. Recortar
+  const crop = await cropRegion(buffer, {
+    left:   caja.bbox_left,
+    top:    caja.bbox_top,
+    width:  caja.bbox_width,
+    height: caja.bbox_height,
+  });
+ 
+  // Guardarlo para verlo con los ojos — importante
+  fs.writeFileSync('recorte_debug.jpg', crop);
+  console.log('Recorte guardado:', crop.length, 'bytes');
+ 
+  // 4. OCR con cronómetro
+  const t0 = Date.now();
+  const { text, width, height } = await visionOcrService.runOcr(crop);
+  const ms = Date.now() - t0;
+ 
+  console.log(`\nOCR: ${ms} ms · recorte de ${width}x${height}`);
+  console.log('Texto:', JSON.stringify(text));
+ 
+  await pool.close();
+})();

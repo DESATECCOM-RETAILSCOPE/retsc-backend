@@ -12,6 +12,7 @@ const { cropRegion }         = require('../utils/imageCropper');
 const azureVisionService     = require('./azureVisionService');
 const skuIdentificationService = require('./skuIdentificationService');
 const shelfPhotoDetectionRepo  = require('../repositories/shelfPhotoDetectionRepo');
+const visionOcrService = require('./visionOcrService');
 
 // detections: filas de RETSC_EX_SHELFPHOTO_DETECTION recién insertadas (con Detection_id y
 // las coordenadas Bbox_*). buffer: la foto completa (mismo buffer ya subido a Blob en el
@@ -31,7 +32,7 @@ async function identifyDetections(buffer, detections) {
         width:  d.Bbox_width,
         height: d.Bbox_height,
       });
-      const { text } = await azureVisionService.readText(crop);
+      const { text } = await visionOcrService.readText(crop); // Se cambia a visionOcrService.readText() para usar el OCR de Azure Vision, que es más preciso que Tesseract.  
       return text ?? '';
     } catch (err) {
       console.warn(`[productIdentification] no se pudo recortar/OCR Detection_id=${d.Detection_id} — ${err.message}`);
