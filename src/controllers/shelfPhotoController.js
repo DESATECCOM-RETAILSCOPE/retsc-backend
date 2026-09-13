@@ -69,8 +69,11 @@ const uploadPhoto = async (req, res) => {
 // POST /api/shelf-photos/visit
 // Multipart: campo de archivo "photo" + campos visitId, categoryId, shelfunitId (REQUERIDO
 // desde la reformulación del DBA 2026-08-07 — RETSC_EX_SHELFPHOTO.Shelfunit_id es NOT NULL),
-// qualityStatus, blurScore, brightness (estos 3 últimos YA calculados por el mobile — ver
-// guía sección 3, "aquí no se vuelve a validar eso, solo se guarda").
+// qualityStatus (veredicto YA calculado por el mobile — ver guía sección 3, "aquí no se
+// vuelve a validar eso, solo se guarda"). quality_error_code/width/height/blur_score/
+// brightness YA NO llegan del body (2026-08-29) — visitPhotoService los calcula del buffer
+// con el mismo validador (sharp) que usa el flujo de entrenamiento; ver su comentario de
+// cabecera para el porqué.
 // Roles móviles + admin (ver VISIT_ROLES/requireRole en la ruta) — es el flujo de
 // producción del auditor/gerente en tienda, no el de carga de entrenamiento de arriba.
 const uploadVisitPhoto = async (req, res) => {
@@ -85,7 +88,7 @@ const uploadVisitPhoto = async (req, res) => {
       });
     }
 
-    const { visitId, categoryId, shelfunitId, qualityStatus, blurScore, brightness } = req.body;
+    const { visitId, categoryId, shelfunitId, qualityStatus } = req.body;
     const buffer = await fs.readFile(req.file.path);
 
     const result = await uploadVisitPhotoSvc({
@@ -94,8 +97,6 @@ const uploadVisitPhoto = async (req, res) => {
       categoryId,
       shelfunitId,
       qualityStatus,
-      blurScore,
-      brightness,
       uploadedBy: req.user.userId,
     });
 

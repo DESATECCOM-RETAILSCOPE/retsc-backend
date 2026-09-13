@@ -56,6 +56,37 @@ const bulkInsert = async (photoId, detectionModelId, regions) => {
   return inserted;
 };
 
+// Inserta detecciones YA mapeadas al shape de columnas (photo_id, confidence, bbox_left,
+// bbox_top, bbox_width, bbox_height, detection_model_id — ver customVisionPredictService.js)
+// en UNA sola sentencia multi-fila, a diferencia de bulkInsert() de arriba (que hace un
+// INSERT por fila en un loop). Con 30-50 detecciones por foto, insertar de a una es
+// innecesariamente lento. Sigue sin transacción explícita, mismo criterio que bulkInsert.
+const bulkInsertDetections = async (detecciones) => {
+  if (!detecciones || detecciones.length === 0) return [];
+
+  const pool = await getPool();
+  const request = pool.request();
+  const rowsSql = detecciones.map((d, i) => {
+    request
+      .input(`photoId${i}`, sql.Int,   d.photo_id)
+      .input(`modelId${i}`, sql.Int,   d.detection_model_id ?? null)
+      .input(`conf${i}`,    sql.Float, d.confidence ?? null)
+      .input(`left${i}`,    sql.Float, d.bbox_left)
+      .input(`top${i}`,     sql.Float, d.bbox_top)
+      .input(`width${i}`,   sql.Float, d.bbox_width)
+      .input(`height${i}`,  sql.Float, d.bbox_height);
+    return `(@photoId${i}, @modelId${i}, @conf${i}, @left${i}, @top${i}, @width${i}, @height${i})`;
+  });
+
+  const r = await request.query(`
+    INSERT INTO ${TABLE}
+      (Photo_id, detection_model_id, Confidence, Bbox_left, Bbox_top, Bbox_width, Bbox_height)
+    OUTPUT INSERTED.*
+    VALUES ${rowsSql.join(', ')}
+  `);
+  return r.recordset;
+};
+
 // Paso 5 de la guía — UPDATE exacto de la sección 7.1: el EAN se saca del mismo sku_id en
 // la misma sentencia (RETSC_OP_SKUS.EAN es UNIQUE y NOT NULL, según la guía), en vez de
 // recibirlo como parámetro aparte. Si skuId es null (sin match), EAN queda NULL también
@@ -78,6 +109,41 @@ const updateIdentification = async (detectionId, { skuId, ocrText }) => {
       WHERE Detection_id = @id
     `);
   return r.recordset[0] ?? null;
+};
+
+// Igual que updateIdentification, pero para TODAS las cajitas de una foto en una sola
+// sentencia — con 30-50 detecciones por foto, actualizar de a una es lento sin necesidad.
+// Una sola sentencia UPDATE...FROM con una tabla derivada (VALUES) es atómica de por sí
+// (SQL Server envuelve cada sentencia individual en una transacción implícita) — no hace
+// falta BEGIN/COMMIT TRANSACTION explícito para lograr "todo o nada" acá, a diferencia de
+// bulkInsert() de arriba (ese si es deliberadamente no-atómico, ver su comentario).
+// resultados: [{ detectionId, skuId, ocrText }] — skuId null si no hubo match (EAN queda
+// NULL también, vía el LEFT JOIN); ocr_text se escribe siempre, haya o no match.
+const updateIdentifications = async (resultados) => {
+  if (!resultados || resultados.length === 0) return [];
+
+  const pool = await getPool();
+  const request = pool.request();
+  const rowsSql = resultados.map((r, i) => {
+    request
+      .input(`detId${i}`, sql.Int, r.detectionId)
+      .input(`sku${i}`,   sql.Int, r.skuId ?? null)
+      .input(`ocr${i}`,   sql.NVarChar(sql.MAX), r.ocrText ?? null);
+    return `(@detId${i}, @sku${i}, @ocr${i})`;
+  });
+
+  const r = await request.query(`
+    UPDATE d
+    SET d.Sku_id   = v.sku_id,
+        d.EAN      = sk.EAN,
+        d.ocr_text = v.ocr_text
+    OUTPUT INSERTED.*
+    FROM ${TABLE} d
+    INNER JOIN (VALUES ${rowsSql.join(', ')}) AS v(detection_id, sku_id, ocr_text)
+      ON v.detection_id = d.Detection_id
+    LEFT JOIN RETSC_OP_SKUS sk ON sk.SKU_ID = v.sku_id
+  `);
+  return r.recordset;
 };
 
 // ─── Lectura ─────────────────────────────────────────────────────────────────
@@ -164,7 +230,9 @@ const listUnidentifiedByEnterprise = async (enterpriseId) => {
 module.exports = {
   insert,
   bulkInsert,
+  bulkInsertDetections,
   updateIdentification,
+  updateIdentifications,
   findByPhotoId,
   shareDeGondolaByVisit,
   countUnidentifiedByVisit,

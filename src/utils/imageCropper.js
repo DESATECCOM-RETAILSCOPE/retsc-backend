@@ -2,7 +2,9 @@
 //
 // Usado en el Paso 5 de la guía "Fotos de Visita" v1.9 (sección 7.1, punto 1: "se recorta
 // la imagen original según las coordenadas de cada cajita detectada") antes de mandar cada
-// recorte a OCR (azureVisionService.readText()).
+// recorte a OCR (visionOcrService.runOcr()). El caller (productIdentificationService.js) ya
+// normaliza la orientación EXIF antes de llamar acá — este archivo asume que el buffer que
+// recibe ya está orientado correctamente.
 //
 // Mismo formato de coordenadas que ya usa el resto del repo para bounding boxes
 // (annotationRepo.js, customVisionService.js): normalizadas 0..1, no píxeles.

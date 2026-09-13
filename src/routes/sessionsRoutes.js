@@ -68,4 +68,88 @@ const c       = require('../controllers/sessionsController');
  */
 router.get('/:id/results', c.getResults);
 
+/**
+ * @swagger
+ * /api/sessions/{id}/compliance/{categoryId}:
+ *   get:
+ *     summary: Cumplimiento de surtido de una visita/categoría (María, 2026-09)
+ *     tags: [Sessions]
+ *     security:
+ *       - bearerAuth: []
+ *     description: >-
+ *       Se calcula BAJO DEMANDA en cada llamada — inserta una fila nueva en
+ *       RETSC_EX_ASSORTMENT_COMPLIANCE (histórico, no upsert). Supermarketchain_id/Format
+ *       salen del Retailer de la visita; el desglose "propio vs. competencia" depende de
+ *       RETSC_OP_ENTERPRISE.supplier_name (migración 011) — si ese enterprise no lo tiene
+ *       cargado, en_exceso_fuera_surtido queda subestimado (se loguea una advertencia,
+ *       nunca falla la respuesta). Mismo scoping por enterprise que GET /results.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *         description: Visit_id
+ *       - in: path
+ *         name: categoryId
+ *         required: true
+ *         schema: { type: integer }
+ *         description: RETSC_OP_SKUS.selected_category_id de la categoría a reportar
+ *     responses:
+ *       200:
+ *         description: Cumplimiento calculado + desglose + detalle de faltantes/exceso
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 compliance:
+ *                   type: object
+ *                   description: Fila insertada en RETSC_EX_ASSORTMENT_COMPLIANCE
+ *                   properties:
+ *                     compliance_id:           { type: integer }
+ *                     productos_esperados:     { type: integer }
+ *                     productos_detectados:    { type: integer }
+ *                     faltantes:               { type: integer }
+ *                     en_exceso_fuera_surtido: { type: integer }
+ *                     en_exceso_no_autorizado: { type: integer }
+ *                     prioritarios_faltantes:  { type: integer }
+ *                     cumplimiento_pct:        { type: number, format: float }
+ *                     calculado_en:            { type: string, format: date-time }
+ *                 share:
+ *                   type: array
+ *                   description: "Composición en góndola: una fila por (dimension, valor)"
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       dimension: { type: string, enum: [marca, fabricante, subcategoria, presentacion] }
+ *                       valor:     { type: string }
+ *                       cantidad:  { type: integer }
+ *                 faltantes:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       sku_id:        { type: integer }
+ *                       Product_dsc:   { type: string }
+ *                       Brand:         { type: string, nullable: true }
+ *                       es_prioritario: { type: boolean }
+ *                 enExceso:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       sku_id:      { type: integer }
+ *                       Product_dsc: { type: string }
+ *                       Brand:       { type: string, nullable: true }
+ *                       motivo:      { type: string, enum: [FUERA_DE_SURTIDO, NO_AUTORIZADO] }
+ *       400:
+ *         description: Visit ID o Category ID inválido
+ *       403:
+ *         description: La visita pertenece a otro enterprise
+ *       404:
+ *         description: Visita, retailer o enterprise no encontrado
+ */
+router.get('/:id/compliance/:categoryId', c.getCompliance);
+
 module.exports = router;

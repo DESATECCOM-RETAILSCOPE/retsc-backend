@@ -1,3 +1,9 @@
+// ⚠ SIN USO desde 2026-08-29 — detectionPipelineService.js ya no llama a este archivo.
+// El endpoint de Joel descrito abajo nunca se entregó; se decidió llamar directo a la
+// Prediction API de Custom Vision en su lugar (ver customVisionPredictService.js). Este
+// archivo queda sin borrar solo por el contexto/contrato documentado abajo, por si el
+// endpoint de Joel se retoma en el futuro como alternativa.
+//
 // Adaptador para "el endpoint que te da Joel" (guía "Fotos de Visita" v1.9, sección 5.2):
 // Daniel NO llama directo a la API de predicción de Custom Vision con sus credenciales —
 // se le pide a un endpoint que construye Joel, mandándole la imagen + category_id, y ese

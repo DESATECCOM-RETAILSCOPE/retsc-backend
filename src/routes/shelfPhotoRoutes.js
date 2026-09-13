@@ -127,10 +127,14 @@ router.post('/upload',
  *     tags: [ShelfPhotos]
  *     security:
  *       - bearerAuth: []
- *     description: La foto llega ya validada por el mobile (blur/luz/encuadre) — este
- *       endpoint NO vuelve a validar calidad, solo guarda quality_status/blur_score/
- *       brightness tal cual como registro de auditoría. Dispara la detección (Pasos 3-5)
- *       en background — el 201 no espera a Custom Vision/OCR.
+ *     description: >-
+ *       El veredicto de aceptar/rechazar la foto lo sigue decidiendo el mobile
+ *       (quality_status) — este endpoint no lo vuelve a evaluar para bloquear la subida.
+ *       Pero quality_error_code/width/height/blur_score/brightness SÍ se calculan acá
+ *       (2026-08-29) a partir del buffer recibido, con el mismo validador basado en sharp
+ *       que usa el flujo de entrenamiento — puramente informativo, nunca aborta la subida.
+ *       Dispara la detección (Pasos 3-5) en background — el 201 no espera a Custom
+ *       Vision/OCR.
  *     requestBody:
  *       required: true
  *       content:
@@ -142,10 +146,8 @@ router.post('/upload',
  *               photo:         { type: string, format: binary, description: "jpg/jpeg/png/webp, máx 10 MB" }
  *               visitId:       { type: integer, description: "Visit_id devuelto al abrir la visita (Paso 0)" }
  *               categoryId:    { type: integer, description: "Categoría seleccionada en el mobile para esta foto" }
- *               shelfunitId:   { type: integer, description: "REQUERIDO — RETSC_EX_SHELFPHOTO.Shelfunit_id es NOT NULL" }
- *               qualityStatus: { type: string, description: "Ya calculado por el mobile (Paso 3 de la guía)" }
- *               blurScore:     { type: number, format: float }
- *               brightness:    { type: number, format: float }
+ *               shelfunitId:   { type: integer, description: "REQUERIDO — RETSC_EX_SHELFPHOTO.Shelfunit_id es NOT NULL, es el número de estante" }
+ *               qualityStatus: { type: string, description: "Veredicto PASSED/REJECTED ya calculado por el mobile (Paso 3 de la guía)" }
  *     responses:
  *       201:
  *         description: Foto registrada, detección corriendo en background

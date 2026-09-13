@@ -7,15 +7,22 @@
 // background, no bloquea la respuesta HTTP de la subida): el mobile ya tiene su photoId,
 // no necesita esperar a Custom Vision + OCR + búsqueda de SKU para recibir el 201.
 //
+// 2026-08-29 — antes este archivo dependía de un endpoint intermedio que iba a construir
+// Joel (visionDetectionService.js, ver ese archivo — queda sin uso, no se borra por el
+// contexto documentado en sus comentarios). Nunca se entregó, así que ahora se llama
+// directo a customVisionPredictService, que habla con la Prediction API de Custom Vision
+// con las credenciales de este backend (CV_PREDICTION_ENDPOINT/KEY).
+//
 // NOTA: la guía (sección 5.1, callout "Si no hay ningún modelo PUBLISHED todavía") es
 // explícita en que la ausencia de modelo NO debe romper el flujo completo de la visita —
-// la detección queda pendiente. Se aplica el mismo criterio si el endpoint de Joel
-// (visionDetectionService) tampoco está configurado todavía: ninguno de los dos casos
-// lanza, ambos solo dejan la foto sin detecciones por ahora.
+// la detección queda pendiente. Mismo criterio para cualquier error de Custom Vision
+// (credenciales faltantes, timeout, 401, etc.): predecirFoto() lanza con un `.code`
+// descriptivo, y acá se atrapa para dejar la foto "pendiente" en vez de tumbar este job de
+// background (que de todas formas ya corre fire-and-forget, sin nadie esperando la
+// respuesta HTTP).
 
-const aiModelRepo            = require('../repositories/aiModelRepo');
 const shelfPhotoDetectionRepo = require('../repositories/shelfPhotoDetectionRepo');
-const visionDetectionService  = require('./visionDetectionService');
+const customVisionPredictService = require('./customVisionPredictService');
 const productIdentificationService = require('./productIdentificationService');
 
 // photoId: Photo_id ya insertado en RETSC_EX_SHELFPHOTO. buffer: la imagen ya validada por
@@ -25,25 +32,30 @@ const productIdentificationService = require('./productIdentificationService');
 // Devuelve un resumen { pending, reason?, detections } — pensado para logging/diagnóstico,
 // no para la respuesta HTTP (esto corre después de que esa respuesta ya se envió).
 async function processPhotoDetection(photoId, buffer, categoryId) {
-  const model = await aiModelRepo.findPublishedByCategoryId(categoryId);
-  if (!model) {
-    console.warn(`[detectionPipeline] Photo_id=${photoId} — sin modelo PUBLISHED/READY para category_id=${categoryId}. Detección pendiente.`);
-    return { pending: true, reason: 'NO_PUBLISHED_MODEL', detections: [] };
+  let resultado;
+  try {
+    resultado = await customVisionPredictService.predecirFoto(buffer, categoryId, photoId);
+  } catch (err) {
+    console.warn(
+      `[detectionPipeline] Photo_id=${photoId} — no se pudo predecir (${err.code || 'ERROR'}): ${err.message}` +
+      (err.azureBody ? ` — azureBody=${err.azureBody}` : '')
+    );
+    return { pending: true, reason: err.code || 'PREDICT_ERROR', detections: [] };
   }
 
-  const { pending, regions } = await visionDetectionService.detectRegions(buffer, categoryId);
-  if (pending) {
-    console.warn(`[detectionPipeline] Photo_id=${photoId} — endpoint de detección (Joel) no disponible todavía. Detección pendiente.`);
-    return { pending: true, reason: 'NO_DETECTION_ENDPOINT', detections: [] };
-  }
-
-  if (regions.length === 0) {
-    console.log(`[detectionPipeline] Photo_id=${photoId} — el modelo no detectó ninguna cajita.`);
+  if (resultado.detecciones.length === 0) {
+    console.log(
+      `[detectionPipeline] Photo_id=${photoId} — Custom Vision devolvió ${resultado.totalDevueltas} ` +
+      `predicción(es) (iteración ${resultado.iteracion}), ninguna superó el umbral ${resultado.umbralAplicado}.`
+    );
     return { pending: false, detections: [] };
   }
 
-  const inserted = await shelfPhotoDetectionRepo.bulkInsert(photoId, model.detection_model_id, regions);
-  console.log(`[detectionPipeline] Photo_id=${photoId} — ${inserted.length} cajita(s) detectada(s), identificando producto...`);
+  const inserted = await shelfPhotoDetectionRepo.bulkInsertDetections(resultado.detecciones);
+  console.log(
+    `[detectionPipeline] Photo_id=${photoId} — ${inserted.length}/${resultado.totalDevueltas} cajita(s) ` +
+    `sobre el umbral (${resultado.iteracion}), identificando producto...`
+  );
 
   // Paso 5 — no se espera aquí a que termine para "cerrar" el Paso 4 conceptualmente, pero
   // sí se await-ea dentro de esta misma función de background para que un error de

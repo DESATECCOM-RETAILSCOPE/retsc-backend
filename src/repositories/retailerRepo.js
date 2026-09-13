@@ -54,10 +54,11 @@ const resolveCanalByRetailer = async (retailerId) => {
   }
 };
 
-// Devuelve la fila del retailer (Retailer_id, Retailer_dsc), o null si la tabla no existe
-// todavía, si el id no matchea, o si hay cualquier otro error — mismo degrade seguro que
-// resolveCanalByRetailer, para poder usar Retailer_dsc como nombre de carpeta en blob
-// storage sin tumbar la subida de la foto si el catálogo no está disponible.
+// Devuelve la fila del retailer, o null si la tabla no existe todavía, si el id no matchea,
+// o si hay cualquier otro error — mismo degrade seguro que resolveCanalByRetailer.
+// Ampliado (2026-09-13, Supermarketchain_id/Formato) para assortmentComplianceService.js —
+// antes solo traía Retailer_id/Retailer_dsc, que alcanzaba para nombrar la carpeta de blob
+// storage pero no para resolver a qué fila de RETSC_OP_ASSORTMENT corresponde una visita.
 const findById = async (retailerId) => {
   if (retailerId == null) return null;
 
@@ -65,7 +66,7 @@ const findById = async (retailerId) => {
     const pool = await getPool();
     const r = await pool.request()
       .input('id', sql.Int, retailerId)
-      .query(`SELECT Retailer_id, Retailer_dsc FROM ${TABLE} WHERE Retailer_id = @id`);
+      .query(`SELECT * FROM ${TABLE} WHERE Retailer_id = @id`);
     return r.recordset[0] ?? null;
   } catch (err) {
     console.warn(`[retailerRepo] no se pudo resolver Retailer_id=${retailerId} — ${err.message}`);

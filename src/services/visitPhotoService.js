@@ -15,10 +15,21 @@
 // sin visita, con su propio gate de calidad de 8 etapas — Issues 7.1/7.2): este es el flujo
 // de PRODUCCIÓN, una foto por enterprise/PDV/visita real. La guía es explícita (sección 3):
 // "La foto llega al backend YA validada por el mobile (blur, luz, encuadre) — aquí no se
-// vuelve a validar eso, solo se guarda" — a propósito NO se llama a
-// shelfPhotoQualityService/imageQualityValidator aquí, aunque esas funciones existan y se
-// usen en el otro flujo. quality_status/blur_score/brightness llegan ya calculados en el
-// body y se guardan tal cual, como registro de auditoría (ver guía, Paso 2).
+// vuelve a validar eso, solo se guarda" — a propósito NO se usa imageQualityValidator para
+// RECHAZAR una foto acá (el mobile sigue siendo quien decide aceptar/rechazar, vía
+// quality_status en el body). quality_status llega tal cual del mobile y se guarda como
+// registro de auditoría (ver guía, Paso 2).
+//
+// PERO quality_error_code/width/height/blur_score/brightness sí se calculan acá (2026-08-29)
+// reusando imageQualityValidator — el mismo validador basado en sharp que ya usa el flujo de
+// entrenamiento — porque el mobile no puede calcular nitidez/brillo reales en JS puro (ver
+// NOTA en src/utils/imageQuality.js del repo del mobile: ahí blurScore/brightness siempre
+// viajan null). Antes esta función guardaba quality_error_code/width/height como null fijo
+// y blur_score/brightness como lo que mandara el mobile (o sea, también null en la práctica)
+// — la migración 005 pensaba estos campos para calibrar los umbrales con datos reales de
+// producción, y con eso siempre null nunca hubo nada que calibrar. El cálculo de calidad es
+// puramente informativo acá: si falla (buffer corrupto, etc.) se loguea y se sigue con
+// valores null, nunca se aborta la subida por esto.
 //
 // NOTA: la guía no pide un paso de deduplicación por hash para este flujo (a diferencia del
 // de entrenamiento). Igual se calcula y guarda image_hash — la columna ya existe en
@@ -27,8 +38,9 @@
 
 const crypto = require('crypto');
 
-const { uploadToContainer } = require('./blobStorageService');
-const { hashBuffer }        = require('../utils/imageHasher');
+const { uploadToContainer }    = require('./blobStorageService');
+const { hashBuffer }           = require('../utils/imageHasher');
+const { validateImageQuality } = require('../utils/imageQualityValidator');
 const visitRepo             = require('../repositories/visitRepo');
 const categoryRepo          = require('../repositories/categoryRepo');
 const enterpriseRepo        = require('../repositories/enterpriseRepo');
@@ -64,12 +76,46 @@ function parseIntOrThrow(value, label, errorCode) {
   return n;
 }
 
+// Mismo orden de prioridad que shelfPhotoQualityService.js (ERROR_PRIORITY), sin
+// DUPLICATE_IMAGE — este flujo no hace dedup, quality_error_code es una sola columna así
+// que si fallan varios criterios de píxeles se reporta el primero según esta prioridad.
+const QUALITY_ERROR_PRIORITY = ['LOW_RESOLUTION', 'BLURRY_IMAGE', 'POOR_LIGHTING'];
+
+function firstQualityError(errors) {
+  for (const code of QUALITY_ERROR_PRIORITY) {
+    if (errors.includes(code)) return code;
+  }
+  return errors[0] ?? null;
+}
+
+// Calcula resolución/nitidez/brillo reales del buffer ya en memoria. Puramente
+// informativo — nunca lanza ni bloquea la subida: si sharp no puede decodificar la
+// imagen (buffer corrupto, formato raro), se loguea y se sigue con todo en null.
+async function computeQualityMetrics(buffer) {
+  try {
+    const { errors, metrics } = await validateImageQuality(buffer);
+    return {
+      errorCode: firstQualityError(errors),
+      width:     metrics.width,
+      height:    metrics.height,
+      blurScore: metrics.sharpness,
+      brightness: metrics.brightness,
+    };
+  } catch (err) {
+    console.warn(`[visitPhoto] no se pudieron calcular métricas de calidad — ${err.message}`);
+    return { errorCode: null, width: null, height: null, blurScore: null, brightness: null };
+  }
+}
+
 // @param buffer         - contenido de la imagen (ya leído del archivo multer)
 // @param visitId        - Visit_id devuelto al abrir la visita (Paso 0)
 // @param categoryId     - categoría seleccionada en el mobile para ESTA foto
 // @param shelfunitId    - REQUERIDO (RETSC_EX_SHELFPHOTO.Shelfunit_id es NOT NULL en la BD)
-// @param qualityStatus, blurScore, brightness - ya calculados por el mobile (Paso 3, guía)
-async function uploadVisitPhoto({ buffer, visitId, categoryId, shelfunitId, qualityStatus, blurScore, brightness, uploadedBy }) {
+// @param qualityStatus  - veredicto PASSED/REJECTED ya decidido por el mobile (Paso 3, guía)
+// @param blurScore, brightness - LEGACY, ya no se usan para guardar (ver computeQualityMetrics
+//   arriba) — se siguen aceptando en la firma para no romper si algún caller viejo los manda,
+//   pero se ignoran a favor del cálculo real hecho acá con el buffer.
+async function uploadVisitPhoto({ buffer, visitId, categoryId, shelfunitId, qualityStatus, uploadedBy }) {
   const visitIdInt     = parseIntOrThrow(visitId, 'visitId', 'ERR_VISIT_ID_REQUERIDO');
   const categoryIdInt  = parseIntOrThrow(categoryId, 'categoryId', 'ERR_CATEGORIA_REQUERIDA');
   const shelfunitIdInt = parseIntOrThrow(shelfunitId, 'shelfunitId', 'ERR_SHELFUNIT_REQUERIDO');
@@ -95,8 +141,6 @@ async function uploadVisitPhoto({ buffer, visitId, categoryId, shelfunitId, qual
 
   console.log(`[visitPhoto] inicio carga — visit_id=${visitIdInt}, categoría=${categoryIdInt} (${category.Category_dsc}), uploadedBy=${uploadedBy}`);
 
-  const hash = await hashBuffer(buffer);
-
   // Path de blob storage con descripciones legibles en vez de ids crudos (a pedido del
   // equipo — la guía v1.9 sección 3.1 originalmente pedía enterprise_id/pdv_id/session_id/
   // category_id). Enterprise_dsc y Retailer_dsc requieren una consulta extra a sus
@@ -105,7 +149,9 @@ async function uploadVisitPhoto({ buffer, visitId, categoryId, shelfunitId, qual
   // (ej. "2026-08-18_visit-142") para que sea legible y no choque si dos visitas abren
   // el mismo día al mismo PDV. Cada segmento cae a su id crudo si el catálogo no resuelve
   // (retailerRepo.findById degrada a null si RETSC_OP_RETAILER no existe — ver ese archivo).
-  const [enterprise, retailer] = await Promise.all([
+  const [hash, quality, enterprise, retailer] = await Promise.all([
+    hashBuffer(buffer),
+    computeQualityMetrics(buffer),
     enterpriseRepo.findById(visit.Enterprise_id),
     retailerRepo.findById(visit.Retailer_id),
   ]);
@@ -139,11 +185,11 @@ async function uploadVisitPhoto({ buffer, visitId, categoryId, shelfunitId, qual
     visit_id:           visitIdInt,
     image_hash:         hash,
     quality_status:     qualityStatus ?? null,
-    quality_error_code: null,
-    width:              null,
-    height:             null,
-    blur_score:         blurScore != null ? parseFloat(blurScore) : null,
-    brightness:         brightness != null ? parseFloat(brightness) : null,
+    quality_error_code: quality.errorCode,
+    width:              quality.width,
+    height:             quality.height,
+    blur_score:         quality.blurScore,
+    brightness:         quality.brightness,
   });
 
   const photoId = photo.Photo_id;

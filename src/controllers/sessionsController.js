@@ -8,6 +8,7 @@
 
 const visitService         = require('../services/visitService');
 const visitResultsService  = require('../services/visitResultsService');
+const assortmentComplianceService = require('../services/assortmentComplianceService');
 const { ROLES, normalizeRole } = require('../config/roles');
 
 function handleError(res, err) {
@@ -42,4 +43,25 @@ const getResults = async (req, res) => {
   }
 };
 
-module.exports = { getResults };
+// GET /api/sessions/:id/compliance/:categoryId
+// "Cumplimiento de Surtido" (María, 2026-09) — se calcula bajo demanda cada vez que se pide
+// (INSERT nuevo, no upsert; ver assortmentComplianceRepo.js). Mismo scoping que getResults.
+const getCompliance = async (req, res) => {
+  try {
+    const visitId    = parseId(req.params.id, 'Visit ID (session_id)');
+    const categoryId = parseId(req.params.categoryId, 'Category ID');
+
+    const visit = await visitService.getVisit(visitId);
+    const isAdminDtc = normalizeRole(req.user.roleName) === ROLES.ADMIN_DTC;
+    if (!isAdminDtc && visit.enterpriseId !== req.user.enterpriseId) {
+      return res.status(403).json({ success: false, message: 'No puedes ver el cumplimiento de surtido de una visita de otro enterprise.' });
+    }
+
+    const result = await assortmentComplianceService.getCompliance(visitId, categoryId);
+    return res.json({ success: true, ...result });
+  } catch (err) {
+    return handleError(res, err);
+  }
+};
+
+module.exports = { getResults, getCompliance };

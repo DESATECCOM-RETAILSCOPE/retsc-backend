@@ -112,4 +112,30 @@ const listCategoryIdsByVisit = async (visitId) => {
   return r.recordset.map(row => row.CATEGORY_ID);
 };
 
-module.exports = { findByHash, findByHashGlobal, insert, listCategoryIdsByVisit };
+// Backfill de quality_error_code/width/height/blur_score/brightness para fotos insertadas
+// ANTES de que visitPhotoService.uploadVisitPhoto calculara estos valores del buffer
+// (2026-08-29, ver ese archivo) — no toca quality_status (ese es el veredicto del mobile,
+// nunca se recalcula server-side).
+const updateQualityMetrics = async (photoId, { qualityErrorCode, width, height, blurScore, brightness }) => {
+  const pool = await getPool();
+  const r = await pool.request()
+    .input('id',          sql.Int,   photoId)
+    .input('errorCode',   sql.VarChar(30), qualityErrorCode ?? null)
+    .input('width',       sql.Int,   width ?? null)
+    .input('height',      sql.Int,   height ?? null)
+    .input('blurScore',   sql.Float, blurScore ?? null)
+    .input('brightness',  sql.Float, brightness ?? null)
+    .query(`
+      UPDATE ${TABLE}
+      SET quality_error_code = @errorCode,
+          width              = @width,
+          height             = @height,
+          blur_score         = @blurScore,
+          brightness         = @brightness
+      OUTPUT INSERTED.*
+      WHERE Photo_id = @id
+    `);
+  return r.recordset[0] ?? null;
+};
+
+module.exports = { findByHash, findByHashGlobal, insert, listCategoryIdsByVisit, updateQualityMetrics };

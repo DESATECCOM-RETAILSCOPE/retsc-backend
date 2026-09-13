@@ -133,8 +133,21 @@ async function buscarSkuPorTexto(textos) {
 
   // Se resuelven una sola vez por llamada (no por texto) — evitan N lecturas de RETSC_CONFIG
   // y N validaciones de env vars cuando el arreglo trae muchas cajitas.
-  const threshold = await getThreshold();
-  const searchConfig = getSearchConfig();
+  //
+  // 2026-09-04 — este bloque vivía FUERA del try/catch de resolveOne: si faltaban
+  // AZURE_SEARCH_ENDPOINT/KEY, getSearchConfig() lanzaba acá mismo, antes de llegar a
+  // procesar un solo texto, y tumbaba TODA la llamada — justo lo que el comentario de
+  // arriba (y resolveOne) dicen explícitamente que no debe pasar ("un texto que falla no
+  // rompe el resto"). Ahora degrada igual que un fallo por-texto: matched:false para todos,
+  // logueado una vez, en vez de propagar la excepción a productIdentificationService.js.
+  let threshold, searchConfig;
+  try {
+    threshold = await getThreshold();
+    searchConfig = getSearchConfig();
+  } catch (err) {
+    console.error(`[skuSearch] no se pudo resolver config/umbral — degradando ${textos.length} texto(s) a matched:false:`, err.message);
+    return textos.map((texto) => ({ texto_original: texto, sku_id: null, similarity_score: null, matched: false }));
+  }
 
   return mapWithConcurrency(textos, CONCURRENCY, (texto) => resolveOne(texto, threshold, searchConfig));
 }
