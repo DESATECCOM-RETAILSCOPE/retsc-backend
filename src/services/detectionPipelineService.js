@@ -22,8 +22,19 @@
 // respuesta HTTP).
 
 const shelfPhotoDetectionRepo = require('../repositories/shelfPhotoDetectionRepo');
+const detectionPipelineLogRepo = require('../repositories/detectionPipelineLogRepo');
 const customVisionPredictService = require('./customVisionPredictService');
 const productIdentificationService = require('./productIdentificationService');
+
+// El log nunca debe tumbar el pipeline (es diagnóstico, no funcional) — si falla el INSERT
+// (ej. la migración 012 no corrió todavía en este ambiente), se loguea y se sigue.
+async function registrarLog(entry) {
+  try {
+    await detectionPipelineLogRepo.insert(entry);
+  } catch (err) {
+    console.error(`[detectionPipeline] Photo_id=${entry.photoId} — no se pudo guardar el log:`, err.message);
+  }
+}
 
 // photoId: Photo_id ya insertado en RETSC_EX_SHELFPHOTO. buffer: la imagen ya validada por
 // el mobile. categoryId: category_id de esa foto (Paso 3 de la guía: el modelo depende
@@ -32,6 +43,7 @@ const productIdentificationService = require('./productIdentificationService');
 // Devuelve un resumen { pending, reason?, detections } — pensado para logging/diagnóstico,
 // no para la respuesta HTTP (esto corre después de que esa respuesta ya se envió).
 async function processPhotoDetection(photoId, buffer, categoryId) {
+  const inicio = Date.now();
   let resultado;
   try {
     resultado = await customVisionPredictService.predecirFoto(buffer, categoryId, photoId);
@@ -40,6 +52,10 @@ async function processPhotoDetection(photoId, buffer, categoryId) {
       `[detectionPipeline] Photo_id=${photoId} — no se pudo predecir (${err.code || 'ERROR'}): ${err.message}` +
       (err.azureBody ? ` — azureBody=${err.azureBody}` : '')
     );
+    await registrarLog({
+      photoId, categoryId, status: 'ERROR', reasonCode: err.code || 'PREDICT_ERROR',
+      attempts: err.intentos, errorMessage: err.message, durationMs: Date.now() - inicio,
+    });
     return { pending: true, reason: err.code || 'PREDICT_ERROR', detections: [] };
   }
 
@@ -48,6 +64,12 @@ async function processPhotoDetection(photoId, buffer, categoryId) {
       `[detectionPipeline] Photo_id=${photoId} — Custom Vision devolvió ${resultado.totalDevueltas} ` +
       `predicción(es) (iteración ${resultado.iteracion}), ninguna superó el umbral ${resultado.umbralAplicado}.`
     );
+    await registrarLog({
+      photoId, categoryId, status: 'PENDING', reasonCode: 'NO_DETECTIONS_ABOVE_THRESHOLD',
+      rawPredictions: resultado.totalDevueltas, detectionsSaved: 0,
+      thresholdApplied: resultado.umbralAplicado, attempts: resultado.intentos,
+      durationMs: Date.now() - inicio,
+    });
     return { pending: false, detections: [] };
   }
 
@@ -56,6 +78,12 @@ async function processPhotoDetection(photoId, buffer, categoryId) {
     `[detectionPipeline] Photo_id=${photoId} — ${inserted.length}/${resultado.totalDevueltas} cajita(s) ` +
     `sobre el umbral (${resultado.iteracion}), identificando producto...`
   );
+  await registrarLog({
+    photoId, categoryId, status: 'SUCCESS',
+    rawPredictions: resultado.totalDevueltas, detectionsSaved: inserted.length,
+    thresholdApplied: resultado.umbralAplicado, attempts: resultado.intentos,
+    durationMs: Date.now() - inicio,
+  });
 
   // Paso 5 — no se espera aquí a que termine para "cerrar" el Paso 4 conceptualmente, pero
   // sí se await-ea dentro de esta misma función de background para que un error de

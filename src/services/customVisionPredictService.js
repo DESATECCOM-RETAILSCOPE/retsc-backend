@@ -176,6 +176,43 @@ function filtrarYMapear(predictions, umbralCrudo, photoId, detectionModelId) {
     }));
 }
 
+// Reintentos para fallos TRANSITORIOS de la llamada a Custom Vision (timeout, error de red,
+// 5xx del lado de Azure) — esto es justo lo que causó el bug real de "0 detecciones sin
+// ningún error visible" (Photo_id=33, 2026-09-24): el pipeline corre fire-and-forget después
+// de responder el 201 al mobile, así que un solo hipo de red se traducía en "no encontró
+// nada", indistinguible de un resultado legítimo. NO se reintenta en errores definitivos
+// (credenciales faltantes, modelo no publicado, 4xx) — esos no se arreglan solos.
+const RETRYABLE_CODES = new Set(['PREDICT_TIMEOUT', 'PREDICT_NETWORK']);
+const MAX_ATTEMPTS = parseInt(process.env.CV_PREDICTION_MAX_ATTEMPTS || '3', 10);
+
+function esReintentable(err) {
+  if (RETRYABLE_CODES.has(err.code)) return true;
+  return err.code === 'PREDICT_FAILED' && err.httpStatus >= 500 && err.httpStatus < 600;
+}
+
+async function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+
+async function llamarPredictConReintento(url, imagenBuffer) {
+  let ultimoError;
+  for (let intento = 1; intento <= MAX_ATTEMPTS; intento++) {
+    try {
+      const predictions = await llamarPredict(url, imagenBuffer);
+      if (intento > 1) {
+        console.log(`[customVisionPredict] éxito en el intento ${intento}/${MAX_ATTEMPTS} tras reintentar.`);
+      }
+      return { predictions, intentos: intento };
+    } catch (err) {
+      ultimoError = err;
+      if (!esReintentable(err) || intento === MAX_ATTEMPTS) throw Object.assign(err, { intentos: intento });
+      console.warn(
+        `[customVisionPredict] intento ${intento}/${MAX_ATTEMPTS} falló (${err.code}): ${err.message} — reintentando...`
+      );
+      await sleep(1000 * intento);   // backoff lineal: 1s, 2s, ...
+    }
+  }
+  throw ultimoError;
+}
+
 /**
  * Punto de entrada del servicio.
  *
@@ -210,7 +247,7 @@ async function predecirFoto(imagenBuffer, categoryId, photoId) {
   validarModelo(modelo, categoryId);
 
   const url = construirUrl(modelo.customvision_project_id, modelo.last_publish_name);
-  const predictions = await llamarPredict(url, imagenBuffer);
+  const { predictions, intentos } = await llamarPredictConReintento(url, imagenBuffer);
 
   const detecciones = filtrarYMapear(
     predictions,
@@ -225,6 +262,7 @@ async function predecirFoto(imagenBuffer, categoryId, photoId) {
     umbralAplicado:   normalizarUmbral(modelo.confidence_threshold),
     detectionModelId: modelo.detection_model_id,
     iteracion:        modelo.last_publish_name,
+    intentos,
   };
 }
 
