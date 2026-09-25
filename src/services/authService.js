@@ -46,9 +46,11 @@ async function pickBestRelation(relations) {
 
 function signAccessToken(payload) {
   return jwt.sign(payload, process.env.JWT_SECRET, {
-    // Default 30m (Issue B6/QA) — antes 1h. authMiddleware ya responde 401
-    // { code: 'TOKEN_EXPIRED' } al vencer, y el frontend redirige a login con eso.
-    expiresIn: process.env.JWT_EXPIRES_IN || '30m',
+    // 2026-09-25 — el fallback de 30m (Issue B6/QA, antes 1h) resultó demasiado corto para
+    // uso real de campo: una visita a un PDV puede durar más que eso, y authMiddleware
+    // desloguea con 401 TOKEN_EXPIRED apenas vence. Subido a 7d — si JWT_EXPIRES_IN no está
+    // seteada en el entorno (ver Railway), este es el valor que en verdad se usa.
+    expiresIn: process.env.JWT_EXPIRES_IN || '7d',
   });
 }
 
