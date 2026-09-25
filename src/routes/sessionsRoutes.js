@@ -10,6 +10,7 @@
 const express = require('express');
 const router  = express.Router();
 const c       = require('../controllers/sessionsController');
+const reportController = require('../controllers/reportController');
 
 /**
  * @swagger
@@ -132,6 +133,7 @@ router.get('/:id/results', c.getResults);
  *                     properties:
  *                       sku_id:        { type: integer }
  *                       Product_dsc:   { type: string }
+ *                       image_url:     { type: string, nullable: true }
  *                       Brand:         { type: string, nullable: true }
  *                       es_prioritario: { type: boolean }
  *                 enExceso:
@@ -141,6 +143,7 @@ router.get('/:id/results', c.getResults);
  *                     properties:
  *                       sku_id:      { type: integer }
  *                       Product_dsc: { type: string }
+ *                       image_url:   { type: string, nullable: true }
  *                       Brand:       { type: string, nullable: true }
  *                       motivo:      { type: string, enum: [FUERA_DE_SURTIDO, NO_AUTORIZADO] }
  *       400:
@@ -151,5 +154,74 @@ router.get('/:id/results', c.getResults);
  *         description: Visita, retailer o enterprise no encontrado
  */
 router.get('/:id/compliance/:categoryId', c.getCompliance);
+
+/**
+ * @swagger
+ * /api/sessions/{id}/photos:
+ *   get:
+ *     summary: Fotos de góndola tomadas en una visita ("Ver fotos de la visita")
+ *     tags: [Sessions]
+ *     security:
+ *       - bearerAuth: []
+ *     description: >-
+ *       Fotos de RETSC_EX_SHELFPHOTO para la visita, con su URL_blob ya firmada (SAS de
+ *       lectura de 60 min — el storage account no permite lectura pública anónima, ver
+ *       blobStorageService.signBlobUrl). Mismo scoping que /results y /compliance.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *         description: Visit_id
+ *       - in: query
+ *         name: categoryId
+ *         required: false
+ *         schema: { type: integer }
+ *         description: Si se manda, filtra solo las fotos de esa categoría.
+ *     responses:
+ *       200:
+ *         description: Lista de fotos de la visita
+ *       400:
+ *         description: Visit ID o Category ID inválido
+ *       403:
+ *         description: La visita pertenece a otro enterprise
+ *       404:
+ *         description: Visita no encontrada
+ */
+router.get('/:id/photos', c.getVisitPhotos);
+
+/**
+ * @swagger
+ * /api/sessions/{id}/compliance/{categoryId}/report-token:
+ *   get:
+ *     summary: Token de corta duración (5 min) para abrir el PDF de cumplimiento de surtido
+ *     tags: [Sessions]
+ *     security:
+ *       - bearerAuth: []
+ *     description: >-
+ *       El mobile usa este token para armar la URL de GET /api/reports/compliance.pdf, que
+ *       se abre en el navegador del sistema (sin header Authorization). Mismo scoping que
+ *       /compliance.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *         description: Visit_id
+ *       - in: path
+ *         name: categoryId
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200:
+ *         description: Token de reporte
+ *       400:
+ *         description: Visit ID o Category ID inválido
+ *       403:
+ *         description: La visita pertenece a otro enterprise
+ *       404:
+ *         description: Visita no encontrada
+ */
+router.get('/:id/compliance/:categoryId/report-token', reportController.getReportToken);
 
 module.exports = router;

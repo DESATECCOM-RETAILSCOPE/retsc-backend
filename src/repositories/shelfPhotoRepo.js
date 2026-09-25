@@ -116,6 +116,27 @@ const listCategoryIdsByVisit = async (visitId) => {
 // ANTES de que visitPhotoService.uploadVisitPhoto calculara estos valores del buffer
 // (2026-08-29, ver ese archivo) — no toca quality_status (ese es el veredicto del mobile,
 // nunca se recalcula server-side).
+// Fotos de una visita (opcionalmente filtradas por categoría) para la pantalla "Ver fotos
+// de la visita" del mobile. URL_blob se guarda SIN firmar (mismo criterio que
+// RETSC_OP_SKUS.image_url) — quien llame a esto tiene que firmarlo con
+// blobStorageService.signBlobUrl antes de devolverlo a un cliente.
+const findByVisitId = async (visitId, categoryId) => {
+  const pool = await getPool();
+  const request = pool.request().input('visitId', sql.Int, visitId);
+  let where = 'WHERE visit_id = @visitId';
+  if (categoryId != null) {
+    request.input('categoryId', sql.Int, categoryId);
+    where += ' AND CATEGORY_ID = @categoryId';
+  }
+  const r = await request.query(`
+    SELECT Photo_id, Shelfunit_id, photo_date, URL_blob, CATEGORY_ID, quality_status
+    FROM ${TABLE}
+    ${where}
+    ORDER BY Shelfunit_id, photo_date
+  `);
+  return r.recordset;
+};
+
 const updateQualityMetrics = async (photoId, { qualityErrorCode, width, height, blurScore, brightness }) => {
   const pool = await getPool();
   const r = await pool.request()
@@ -138,4 +159,4 @@ const updateQualityMetrics = async (photoId, { qualityErrorCode, width, height, 
   return r.recordset[0] ?? null;
 };
 
-module.exports = { findByHash, findByHashGlobal, insert, listCategoryIdsByVisit, updateQualityMetrics };
+module.exports = { findByHash, findByHashGlobal, insert, listCategoryIdsByVisit, findByVisitId, updateQualityMetrics };

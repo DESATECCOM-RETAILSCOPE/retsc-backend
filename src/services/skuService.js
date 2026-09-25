@@ -2,6 +2,7 @@ const crypto = require("crypto");
 const XLSX = require("xlsx");
 const skuRepo = require("../repositories/skuRepo");
 const entCatRepo = require("../repositories/enterpriseCategoryRepo");
+const blobStorageService = require("./blobStorageService");
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -340,7 +341,13 @@ const listGlobal = async (filters = {}) => {
     page: Number(page),
     limit: Number(limit),
   });
-  return { skus: rows.map(toSkuDTO), total, page: Number(page), limit: Number(limit) };
+  // imageUrl viene de RETSC_OP_SKUS.image_url sin firmar — el storage account no permite
+  // lectura pública anónima, hay que firmarlo con SAS antes de devolverlo al cliente.
+  const skus = await Promise.all(rows.map(toSkuDTO).map(async (s) => ({
+    ...s,
+    imageUrl: await blobStorageService.signBlobUrl(s.imageUrl),
+  })));
+  return { skus, total, page: Number(page), limit: Number(limit) };
 };
 
 module.exports = { processSkuExcel, listGlobal };

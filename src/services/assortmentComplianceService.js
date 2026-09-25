@@ -10,6 +10,17 @@ const visitRepo               = require('../repositories/visitRepo');
 const retailerRepo            = require('../repositories/retailerRepo');
 const enterpriseRepo          = require('../repositories/enterpriseRepo');
 const assortmentComplianceRepo = require('../repositories/assortmentComplianceRepo');
+const blobStorageService       = require('./blobStorageService');
+
+// image_url en RETSC_OP_SKUS se guarda sin firmar (ver blobStorageService.signBlobUrl) — el
+// storage account no permite lectura pública anónima, así que hay que firmar acá antes de
+// devolverlo al mobile.
+async function signProductPhotos(rows) {
+  return Promise.all(rows.map(async (row) => ({
+    ...row,
+    image_url: await blobStorageService.signBlobUrl(row.image_url),
+  })));
+}
 
 function svcError(message, statusCode, errorCode) {
   return Object.assign(new Error(message), { statusCode, errorCode });
@@ -58,10 +69,15 @@ async function getCompliance(visitId, categoryId) {
     visitId, categoryId, enterpriseId: visit.Enterprise_id,
   });
 
-  const [share, faltantes, enExceso] = await Promise.all([
+  const [share, faltantesRaw, enExcesoRaw] = await Promise.all([
     assortmentComplianceRepo.getShareByComplianceId(compliance.compliance_id),
     assortmentComplianceRepo.listFaltantes(params),
     assortmentComplianceRepo.listEnExceso(params),
+  ]);
+
+  const [faltantes, enExceso] = await Promise.all([
+    signProductPhotos(faltantesRaw),
+    signProductPhotos(enExcesoRaw),
   ]);
 
   return { compliance, share, faltantes, enExceso };

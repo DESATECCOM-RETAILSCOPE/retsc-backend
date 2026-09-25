@@ -193,7 +193,7 @@ const listFaltantes = async ({ enterpriseId, categoryId, supermarketchainId, for
         WHERE p.Visit_id = @visitId AND d.Sku_id IS NOT NULL
           AND d.Sku_id IN (SELECT sku_id FROM autorizados)
       )
-      SELECT sku.SKU_ID AS sku_id, sku.Product_dsc, seg.Brand, a.es_prioritario
+      SELECT sku.SKU_ID AS sku_id, sku.Product_dsc, sku.image_url, seg.Brand, a.es_prioritario
       FROM autorizados a
       JOIN RETSC_OP_SKUS sku ON sku.SKU_ID = a.sku_id
       LEFT JOIN RETSC_OP_ENTERPRISE_PRODUCT_SEG seg
@@ -243,7 +243,7 @@ const listEnExceso = async ({ enterpriseId, categoryId, supermarketchainId, form
         FROM RETSC_OP_ENTERPRISE_PRODUCT_SEG s
         WHERE s.enterprise_id = @enterpriseId AND @supplierName IS NOT NULL AND s.Supplier = @supplierName
       )
-      SELECT sku.SKU_ID AS sku_id, sku.Product_dsc, seg.Brand,
+      SELECT sku.SKU_ID AS sku_id, sku.Product_dsc, sku.image_url, seg.Brand,
         CASE WHEN dv.sku_id IN (SELECT sku_id FROM propios) THEN 'FUERA_DE_SURTIDO' ELSE 'NO_AUTORIZADO' END AS motivo
       FROM detectados_visita dv
       JOIN RETSC_OP_SKUS sku ON sku.SKU_ID = dv.sku_id

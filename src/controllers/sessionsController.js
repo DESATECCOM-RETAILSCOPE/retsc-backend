@@ -9,6 +9,8 @@
 const visitService         = require('../services/visitService');
 const visitResultsService  = require('../services/visitResultsService');
 const assortmentComplianceService = require('../services/assortmentComplianceService');
+const shelfPhotoRepo        = require('../repositories/shelfPhotoRepo');
+const blobStorageService    = require('../services/blobStorageService');
 const { ROLES, normalizeRole } = require('../config/roles');
 
 function handleError(res, err) {
@@ -64,4 +66,34 @@ const getCompliance = async (req, res) => {
   }
 };
 
-module.exports = { getResults, getCompliance };
+// GET /api/sessions/:id/photos?categoryId=  — "Ver fotos de la visita" (mobile). categoryId
+// es opcional: sin él trae todas las fotos de la visita, sin importar la categoría.
+// Mismo scoping que getResults/getCompliance.
+const getVisitPhotos = async (req, res) => {
+  try {
+    const visitId = parseId(req.params.id, 'Visit ID (session_id)');
+    const categoryId = req.query.categoryId != null ? parseId(req.query.categoryId, 'Category ID') : undefined;
+
+    const visit = await visitService.getVisit(visitId);
+    const isAdminDtc = normalizeRole(req.user.roleName) === ROLES.ADMIN_DTC;
+    if (!isAdminDtc && visit.enterpriseId !== req.user.enterpriseId) {
+      return res.status(403).json({ success: false, message: 'No puedes ver las fotos de una visita de otro enterprise.' });
+    }
+
+    const rows = await shelfPhotoRepo.findByVisitId(visitId, categoryId);
+    const photos = await Promise.all(rows.map(async (row) => ({
+      photoId:        row.Photo_id,
+      shelfunitId:    row.Shelfunit_id,
+      photoDate:      row.photo_date,
+      categoryId:     row.CATEGORY_ID,
+      qualityStatus:  row.quality_status,
+      url:            await blobStorageService.signBlobUrl(row.URL_blob),
+    })));
+
+    return res.json({ success: true, photos });
+  } catch (err) {
+    return handleError(res, err);
+  }
+};
+
+module.exports = { getResults, getCompliance, getVisitPhotos };
