@@ -112,7 +112,10 @@ async function resolveOne(texto, threshold, searchConfig) {
     };
   } catch (err) {
     console.error(`[skuSearch] fallo resolviendo match para texto="${texto}":`, err.message);
-    return { texto_original: texto, sku_id: null, similarity_score: null, matched: false };
+    // `error` (a diferencia de matched:false por score bajo) es lo que le permite al
+    // caller (productIdentificationService.js) distinguir "no encontró un SKU parecido" de
+    // "no pudo ni intentar buscar" al armar el log persistente de RETSC_LOG_SKU_IDENTIFICATION.
+    return { texto_original: texto, sku_id: null, similarity_score: null, matched: false, error: err.message };
   }
 }
 
@@ -146,7 +149,7 @@ async function buscarSkuPorTexto(textos) {
     searchConfig = getSearchConfig();
   } catch (err) {
     console.error(`[skuSearch] no se pudo resolver config/umbral — degradando ${textos.length} texto(s) a matched:false:`, err.message);
-    return textos.map((texto) => ({ texto_original: texto, sku_id: null, similarity_score: null, matched: false }));
+    return textos.map((texto) => ({ texto_original: texto, sku_id: null, similarity_score: null, matched: false, error: err.message }));
   }
 
   return mapWithConcurrency(textos, CONCURRENCY, (texto) => resolveOne(texto, threshold, searchConfig));

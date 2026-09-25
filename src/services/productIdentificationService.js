@@ -17,21 +17,38 @@
 // ocr_text se guarda SIEMPRE, haya o no match — es lo que alimenta la vista de "productos
 // no identificados" del dashboard web (guía sección 8.4).
 
-const sharp                   = require('sharp');
-const { cropRegion }          = require('../utils/imageCropper');
-const visionOcrService        = require('./visionOcrService');
-const skuSearchService        = require('./skuSearchService');
-const shelfPhotoDetectionRepo = require('../repositories/shelfPhotoDetectionRepo');
+const sharp                    = require('sharp');
+const { cropRegion }           = require('../utils/imageCropper');
+const visionOcrService         = require('./visionOcrService');
+const skuSearchService         = require('./skuSearchService');
+const shelfPhotoDetectionRepo  = require('../repositories/shelfPhotoDetectionRepo');
+const skuIdentificationLogRepo = require('../repositories/skuIdentificationLogRepo');
+
+// El log nunca debe tumbar la identificación (es diagnóstico, no funcional) — si falla el
+// INSERT (ej. la migración 013 no corrió todavía en este ambiente), se loguea y se sigue.
+async function registrarLog(entry) {
+  try {
+    await skuIdentificationLogRepo.insert(entry);
+  } catch (err) {
+    console.error(`[productIdentification] Photo_id=${entry.photoId} — no se pudo guardar el log:`, err.message);
+  }
+}
 
 // detections: filas de RETSC_EX_SHELFPHOTO_DETECTION recién insertadas (con Detection_id y
 // las coordenadas Bbox_*). buffer: la foto completa (mismo buffer ya subido a Blob en el
-// Paso 1 — no hace falta volver a descargarlo).
+// Paso 1 — no hace falta volver a descargarlo). photoId: solo para el log persistente de
+// RETSC_LOG_SKU_IDENTIFICATION (ver migración 013) — el caso real que lo motivó (2026-09-25):
+// Photo_id detectaba bien las cajitas pero terminaba con 0 SKUs identificados, y la única
+// pista (credenciales de Azure OpenAI/Search faltantes en Railway) vivía en un console.error
+// que el usuario no pudo ubicar en el dashboard de logs.
 //
 // No lanza si una cajita individual falla el recorte/OCR — la deja sin identificar (ocr_text
 // vacío) y sigue con las demás; una sola cajita rara no debe tumbar la identificación de
 // toda la foto.
-async function identifyDetections(buffer, detections) {
+async function identifyDetections(buffer, detections, photoId) {
   if (!detections || detections.length === 0) return [];
+
+  const inicio = Date.now();
 
   // EXIF: las fotos de celular (iPhone en particular) traen la orientación real en un
   // metadato, no rotada en los píxeles crudos. Custom Vision interpreta esa orientación al
@@ -81,7 +98,16 @@ async function identifyDetections(buffer, detections) {
   });
 
   // Un solo UPDATE...FROM en vez de N updates sueltos — ver shelfPhotoDetectionRepo.js.
-  return shelfPhotoDetectionRepo.updateIdentifications(resultados);
+  const updated = await shelfPhotoDetectionRepo.updateIdentifications(resultados);
+
+  const matchedCount = matches.filter((m) => m.matched).length;
+  const primerError = matches.find((m) => m.error)?.error ?? null;
+  await registrarLog({
+    photoId, totalBoxes: detections.length, matchedCount,
+    errorMessage: primerError, durationMs: Date.now() - inicio,
+  });
+
+  return updated;
 }
 
 module.exports = { identifyDetections };

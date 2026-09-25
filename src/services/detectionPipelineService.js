@@ -90,7 +90,7 @@ async function processPhotoDetection(photoId, buffer, categoryId) {
   // identificación quede registrado junto con el resto de este procesamiento, en vez de
   // convertirse en una promesa huérfana sin nadie que la observe.
   try {
-    await productIdentificationService.identifyDetections(buffer, inserted);
+    await productIdentificationService.identifyDetections(buffer, inserted, photoId);
   } catch (err) {
     console.error(`[detectionPipeline] Photo_id=${photoId} — error identificando productos:`, err.message);
   }
