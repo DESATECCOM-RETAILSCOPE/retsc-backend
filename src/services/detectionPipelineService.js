@@ -74,15 +74,16 @@ async function processPhotoDetection(photoId, buffer, categoryId) {
   }
 
   const inserted = await shelfPhotoDetectionRepo.bulkInsertDetections(resultado.detecciones);
+  const descartadasPorForma = resultado.descartadasPorForma?.length ?? 0;
   console.log(
     `[detectionPipeline] Photo_id=${photoId} — ${inserted.length}/${resultado.totalDevueltas} cajita(s) ` +
-    `sobre el umbral (${resultado.iteracion}), identificando producto...`
+    `sobre el umbral (${resultado.iteracion}), ${descartadasPorForma} descartada(s) por forma, identificando producto...`
   );
   await registrarLog({
     photoId, categoryId, status: 'SUCCESS',
     rawPredictions: resultado.totalDevueltas, detectionsSaved: inserted.length,
     thresholdApplied: resultado.umbralAplicado, attempts: resultado.intentos,
-    durationMs: Date.now() - inicio,
+    durationMs: Date.now() - inicio, discardedByShape: descartadasPorForma,
   });
 
   // Paso 5 — no se espera aquí a que termine para "cerrar" el Paso 4 conceptualmente, pero

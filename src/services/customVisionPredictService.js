@@ -21,6 +21,7 @@
 // hace exactamente el mismo filtro (category_id + is_active=1) con SELECT *.
 
 const aiModelRepo = require('../repositories/aiModelRepo');
+const { filtrarDetecciones } = require('./detectionFilter');
 
 const ENDPOINT = () => process.env.CV_PREDICTION_ENDPOINT;
 const KEY = () => process.env.CV_PREDICTION_KEY;
@@ -249,15 +250,23 @@ async function predecirFoto(imagenBuffer, categoryId, photoId) {
   const url = construirUrl(modelo.customvision_project_id, modelo.last_publish_name);
   const { predictions, intentos } = await llamarPredictConReintento(url, imagenBuffer);
 
-  const detecciones = filtrarYMapear(
+  const porUmbral = filtrarYMapear(
     predictions,
     modelo.confidence_threshold,
     photoId,
     modelo.detection_model_id
   );
 
+  // Filtro de forma (hallazgo de María, 2026-09-25 — ver detectionFilter.js): descarta
+  // cajitas espurias que Custom Vision genera sobre franjas parciales de un producto (la
+  // tapa/banda superior marcada como si fuera un producto aparte). `descartadas` no se
+  // inserta — se devuelve solo para poder auditar en el log qué se está tirando.
+  const { conservadas, descartadas, resumen } = filtrarDetecciones(porUmbral);
+  console.log(`[customVisionPredict] Photo_id=${photoId} — filtro de forma:`, JSON.stringify(resumen));
+
   return {
-    detecciones,
+    detecciones:        conservadas,
+    descartadasPorForma: descartadas,
     totalDevueltas:   predictions.length,     // antes de filtrar
     umbralAplicado:   normalizarUmbral(modelo.confidence_threshold),
     detectionModelId: modelo.detection_model_id,

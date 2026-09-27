@@ -8,7 +8,7 @@ const TABLE = 'RETSC_LOG_DETECTION_PIPELINE';
 
 const insert = async ({
   photoId, categoryId, status, reasonCode, rawPredictions, detectionsSaved,
-  thresholdApplied, attempts, errorMessage, durationMs,
+  thresholdApplied, attempts, errorMessage, durationMs, discardedByShape,
 }) => {
   const pool = await getPool();
   await pool.request()
@@ -22,13 +22,14 @@ const insert = async ({
     .input('attempts',         sql.Int,           attempts ?? 1)
     .input('errorMessage',     sql.NVarChar(sql.MAX), errorMessage ?? null)
     .input('durationMs',       sql.Int,           durationMs ?? null)
+    .input('discardedByShape', sql.Int,           discardedByShape ?? null)
     .query(`
       INSERT INTO ${TABLE}
         (photo_id, category_id, status, reason_code, raw_predictions, detections_saved,
-         threshold_applied, attempts, error_message, duration_ms)
+         threshold_applied, attempts, error_message, duration_ms, discarded_by_shape)
       VALUES
         (@photoId, @categoryId, @status, @reasonCode, @rawPredictions, @detectionsSaved,
-         @thresholdApplied, @attempts, @errorMessage, @durationMs)
+         @thresholdApplied, @attempts, @errorMessage, @durationMs, @discardedByShape)
     `);
 };
 
