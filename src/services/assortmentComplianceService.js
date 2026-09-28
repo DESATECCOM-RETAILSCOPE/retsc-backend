@@ -10,6 +10,7 @@ const visitRepo               = require('../repositories/visitRepo');
 const retailerRepo            = require('../repositories/retailerRepo');
 const enterpriseRepo          = require('../repositories/enterpriseRepo');
 const assortmentComplianceRepo = require('../repositories/assortmentComplianceRepo');
+const shelfPhotoRepo           = require('../repositories/shelfPhotoRepo');
 const blobStorageService       = require('./blobStorageService');
 
 // image_url en RETSC_OP_SKUS se guarda sin firmar (ver blobStorageService.signBlobUrl) — el
@@ -83,4 +84,18 @@ async function getCompliance(visitId, categoryId) {
   return { compliance, share, faltantes, enExceso };
 }
 
-module.exports = { getCompliance };
+// Resumen de cumplimiento por categoría para la pantalla de detalle de "Visitas" (mobile) —
+// a diferencia de getCompliance(), NO recalcula/inserta nada: lee la última fila ya
+// persistida por categoría (la que quedó guardada cuando esa categoría se procesó durante
+// la visita, vía getCompliance() desde ResultsScreen). Si una categoría nunca llegó a
+// calcularse (ej. el usuario descartó la visita antes de llegar al ResultsScreen de esa
+// categoría), compliance sale null para esa entrada en vez de forzar un cálculo nuevo.
+async function getComplianceSummaryForVisit(visitId) {
+  const categoryIds = await shelfPhotoRepo.listCategoryIdsByVisit(visitId);
+  return Promise.all(categoryIds.map(async (categoryId) => ({
+    categoryId,
+    compliance: await assortmentComplianceRepo.getLatestByVisitCategory(visitId, categoryId),
+  })));
+}
+
+module.exports = { getCompliance, getComplianceSummaryForVisit };

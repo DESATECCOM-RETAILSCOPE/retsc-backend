@@ -7,6 +7,7 @@
 // pueda abrir una visita "a nombre de" otro enterprise.
 
 const visitRepo = require('../repositories/visitRepo');
+const shelfPhotoRepo = require('../repositories/shelfPhotoRepo');
 
 function svcError(message, statusCode, errorCode) {
   return Object.assign(new Error(message), { statusCode, errorCode });
@@ -95,4 +96,17 @@ async function getOpenForUser(userId) {
   return openVisits.length > 0 ? toDTO(openVisits[0]) : null;
 }
 
-module.exports = { openVisit, closeVisit, getVisit, getOpenForUser };
+// Historial de visitas del usuario actual (pantalla "Visitas" del mobile) — incluye
+// OPEN y CLOSED, más reciente primero. categoryIds sale de listCategoryIdsByVisit (una
+// visita puede cubrir varias categorías bajo el mismo Visit_id, ver visitRepo.js) para que
+// la card pueda listar "todas las referencias de id" sin que el mobile tenga que pedirlas
+// aparte.
+async function listMyVisits(userId) {
+  const rows = await visitRepo.findByUser(userId);
+  return Promise.all(rows.map(async (row) => {
+    const categoryIds = await shelfPhotoRepo.listCategoryIdsByVisit(row.Visit_id);
+    return { ...toDTO(row), retailerDsc: row.Retailer_dsc ?? null, categoryIds };
+  }));
+}
+
+module.exports = { openVisit, closeVisit, getVisit, getOpenForUser, listMyVisits };

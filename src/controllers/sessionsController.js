@@ -96,4 +96,25 @@ const getVisitPhotos = async (req, res) => {
   }
 };
 
-module.exports = { getResults, getCompliance, getVisitPhotos };
+// GET /api/sessions/:id/summary — resumen de la visita para la card de detalle de
+// "Visitas" (mobile): cumplimiento de surtido por cada categoría cubierta por la visita,
+// SIN recalcular (lee la última fila ya persistida por categoría — ver
+// assortmentComplianceService.getComplianceSummaryForVisit). Mismo scoping que getResults.
+const getVisitSummary = async (req, res) => {
+  try {
+    const visitId = parseId(req.params.id, 'Visit ID (session_id)');
+
+    const visit = await visitService.getVisit(visitId);
+    const isAdminDtc = normalizeRole(req.user.roleName) === ROLES.ADMIN_DTC;
+    if (!isAdminDtc && visit.enterpriseId !== req.user.enterpriseId) {
+      return res.status(403).json({ success: false, message: 'No puedes ver el resumen de una visita de otro enterprise.' });
+    }
+
+    const categories = await assortmentComplianceService.getComplianceSummaryForVisit(visitId);
+    return res.json({ success: true, visit, categories });
+  } catch (err) {
+    return handleError(res, err);
+  }
+};
+
+module.exports = { getResults, getCompliance, getVisitPhotos, getVisitSummary };

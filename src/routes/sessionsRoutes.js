@@ -192,6 +192,37 @@ router.get('/:id/photos', c.getVisitPhotos);
 
 /**
  * @swagger
+ * /api/sessions/{id}/summary:
+ *   get:
+ *     summary: Resumen de la visita (pantalla "Visitas" del mobile) — cumplimiento por categoría
+ *     tags: [Sessions]
+ *     security:
+ *       - bearerAuth: []
+ *     description: >-
+ *       A diferencia de /compliance/{categoryId}, esto NO recalcula ni inserta nada: lee la
+ *       última fila ya persistida en RETSC_EX_ASSORTMENT_COMPLIANCE por cada categoría
+ *       cubierta por la visita (ver shelfPhotoRepo.listCategoryIdsByVisit). compliance sale
+ *       null para una categoría que nunca llegó a procesarse. Mismo scoping que /results.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *         description: Visit_id
+ *     responses:
+ *       200:
+ *         description: Visita + cumplimiento por categoría
+ *       400:
+ *         description: Visit ID inválido
+ *       403:
+ *         description: La visita pertenece a otro enterprise
+ *       404:
+ *         description: Visita no encontrada
+ */
+router.get('/:id/summary', c.getVisitSummary);
+
+/**
+ * @swagger
  * /api/sessions/{id}/compliance/{categoryId}/report-token:
  *   get:
  *     summary: Token de corta duración (5 min) para abrir el PDF de cumplimiento de surtido

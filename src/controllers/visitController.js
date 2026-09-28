@@ -77,4 +77,15 @@ const getMyOpen = async (req, res) => {
   }
 };
 
-module.exports = { open, close, getOne, getMyOpen };
+// GET /api/visits/mine — historial de visitas del usuario actual (pantalla "Visitas" del
+// mobile), OPEN y CLOSED, más reciente primero.
+const listMine = async (req, res) => {
+  try {
+    const visits = await visitService.listMyVisits(req.user.userId);
+    return res.json({ success: true, visits });
+  } catch (err) {
+    return handleError(res, err);
+  }
+};
+
+module.exports = { open, close, getOne, getMyOpen, listMine };

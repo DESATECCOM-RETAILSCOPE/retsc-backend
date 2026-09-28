@@ -35,6 +35,7 @@ const canOperate = requireRole(...VISIT_ROLES);
  */
 router.post('/',              canOperate, c.open);
 router.get('/me/open',         canOperate, c.getMyOpen);
+router.get('/mine',            canOperate, c.listMine);
 router.get('/:id',             canOperate, c.getOne);
 router.patch('/:id/close',     canOperate, c.close);
 

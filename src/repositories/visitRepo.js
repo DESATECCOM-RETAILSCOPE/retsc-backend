@@ -66,4 +66,21 @@ const findOpenByUser = async (userId) => {
   return r.recordset;
 };
 
-module.exports = { open, close, findById, findOpenByUser };
+// Historial completo (OPEN + CLOSED) de un usuario, más reciente primero — pantalla
+// "Visitas" del mobile. Trae Retailer_dsc con un LEFT JOIN (no vive en RETSC_EX_VISIT, ver
+// comentario de cabecera) para que el mobile no tenga que resolverlo aparte por cada card.
+const findByUser = async (userId) => {
+  const pool = await getPool();
+  const r = await pool.request()
+    .input('userId', sql.Int, userId)
+    .query(`
+      SELECT v.*, ret.Retailer_dsc
+      FROM ${TABLE} v
+      LEFT JOIN RETSC_OP_RETAILER ret ON ret.Retailer_id = v.Retailer_id
+      WHERE v.User_id = @userId
+      ORDER BY v.Visit_start DESC
+    `);
+  return r.recordset;
+};
+
+module.exports = { open, close, findById, findOpenByUser, findByUser };
