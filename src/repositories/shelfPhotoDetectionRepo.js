@@ -146,6 +146,22 @@ const updateIdentifications = async (resultados) => {
   return r.recordset;
 };
 
+// Borra cajitas ya identificadas como duplicado espurio (ver duplicateDetectionFilter.js) —
+// se ejecuta DESPUÉS de la identificación (Paso 5), a diferencia del filtro de forma
+// anterior que nunca llegaba a insertarlas. El resultado final es el mismo: estas filas no
+// quedan en la tabla.
+const deleteByIds = async (detectionIds) => {
+  if (!detectionIds || detectionIds.length === 0) return 0;
+  const pool = await getPool();
+  const request = pool.request();
+  const placeholders = detectionIds.map((id, i) => {
+    request.input(`id${i}`, sql.Int, id);
+    return `@id${i}`;
+  });
+  const r = await request.query(`DELETE FROM ${TABLE} WHERE Detection_id IN (${placeholders.join(', ')})`);
+  return r.rowsAffected[0];
+};
+
 // ─── Lectura ─────────────────────────────────────────────────────────────────
 
 const findByPhotoId = async (photoId) => {
@@ -233,6 +249,7 @@ module.exports = {
   bulkInsertDetections,
   updateIdentification,
   updateIdentifications,
+  deleteByIds,
   findByPhotoId,
   shareDeGondolaByVisit,
   countUnidentifiedByVisit,

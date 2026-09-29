@@ -25,6 +25,7 @@ const shelfPhotoDetectionRepo = require('../repositories/shelfPhotoDetectionRepo
 const detectionPipelineLogRepo = require('../repositories/detectionPipelineLogRepo');
 const customVisionPredictService = require('./customVisionPredictService');
 const productIdentificationService = require('./productIdentificationService');
+const { filtrarDuplicadosContenidos } = require('./duplicateDetectionFilter');
 
 // El log nunca debe tumbar el pipeline (es diagnóstico, no funcional) — si falla el INSERT
 // (ej. la migración 012 no corrió todavía en este ambiente), se loguea y se sigue.
@@ -74,29 +75,49 @@ async function processPhotoDetection(photoId, buffer, categoryId) {
   }
 
   const inserted = await shelfPhotoDetectionRepo.bulkInsertDetections(resultado.detecciones);
-  const descartadasPorForma = resultado.descartadasPorForma?.length ?? 0;
   console.log(
     `[detectionPipeline] Photo_id=${photoId} — ${inserted.length}/${resultado.totalDevueltas} cajita(s) ` +
-    `sobre el umbral (${resultado.iteracion}), ${descartadasPorForma} descartada(s) por forma, identificando producto...`
+    `sobre el umbral (${resultado.iteracion}), identificando producto...`
   );
-  await registrarLog({
-    photoId, categoryId, status: 'SUCCESS',
-    rawPredictions: resultado.totalDevueltas, detectionsSaved: inserted.length,
-    thresholdApplied: resultado.umbralAplicado, attempts: resultado.intentos,
-    durationMs: Date.now() - inicio, discardedByShape: descartadasPorForma,
-  });
 
   // Paso 5 — no se espera aquí a que termine para "cerrar" el Paso 4 conceptualmente, pero
   // sí se await-ea dentro de esta misma función de background para que un error de
   // identificación quede registrado junto con el resto de este procesamiento, en vez de
   // convertirse en una promesa huérfana sin nadie que la observe.
+  //
+  // Dedup POST-identificación (duplicateDetectionFilter.js, reemplaza el filtro de forma
+  // desactivado — ver customVisionPredictService.js): una cajita sin Sku_id contenida en
+  // otra cajita de la misma foto que sí se identificó es la tapa/label parcial de ESE
+  // producto, no una detección aparte — se borra de la tabla (nunca se insertaron en el
+  // filtro anterior tampoco, el resultado final es el mismo). Si la identificación falla por
+  // completo, no se puede evaluar contención sin datos reales — se deja `inserted` tal cual
+  // (todas sin SKU) en vez de arriesgar borrar algo a ciegas.
+  let finalDetections = inserted;
+  let discardedAsDuplicate = 0;
   try {
-    await productIdentificationService.identifyDetections(buffer, inserted, photoId);
+    const identified = await productIdentificationService.identifyDetections(buffer, inserted, photoId);
+    const { conservadas, duplicadas } = filtrarDuplicadosContenidos(identified);
+    if (duplicadas.length > 0) {
+      await shelfPhotoDetectionRepo.deleteByIds(duplicadas.map((d) => d.Detection_id));
+      console.log(
+        `[detectionPipeline] Photo_id=${photoId} — ${duplicadas.length} cajita(s) removida(s) ` +
+        `por ser duplicado contenido en otro producto ya identificado.`
+      );
+    }
+    finalDetections = conservadas;
+    discardedAsDuplicate = duplicadas.length;
   } catch (err) {
     console.error(`[detectionPipeline] Photo_id=${photoId} — error identificando productos:`, err.message);
   }
 
-  return { pending: false, detections: inserted };
+  await registrarLog({
+    photoId, categoryId, status: 'SUCCESS',
+    rawPredictions: resultado.totalDevueltas, detectionsSaved: finalDetections.length,
+    thresholdApplied: resultado.umbralAplicado, attempts: resultado.intentos,
+    durationMs: Date.now() - inicio, discardedAsDuplicate,
+  });
+
+  return { pending: false, detections: finalDetections };
 }
 
 module.exports = { processPhotoDetection };

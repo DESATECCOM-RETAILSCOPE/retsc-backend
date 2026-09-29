@@ -21,7 +21,8 @@
 // hace exactamente el mismo filtro (category_id + is_active=1) con SELECT *.
 
 const aiModelRepo = require('../repositories/aiModelRepo');
-const { filtrarDetecciones } = require('./detectionFilter');
+// filtrarDetecciones (detectionFilter.js) DESACTIVADO 2026-09-28 — ver el comentario en
+// predecirFoto() más abajo. El módulo se deja intacto para retomar la recalibración.
 
 const ENDPOINT = () => process.env.CV_PREDICTION_ENDPOINT;
 const KEY = () => process.env.CV_PREDICTION_KEY;
@@ -257,12 +258,20 @@ async function predecirFoto(imagenBuffer, categoryId, photoId) {
     modelo.detection_model_id
   );
 
-  // Filtro de forma (hallazgo de María, 2026-09-25 — ver detectionFilter.js): descarta
-  // cajitas espurias que Custom Vision genera sobre franjas parciales de un producto (la
-  // tapa/banda superior marcada como si fuera un producto aparte). `descartadas` no se
-  // inserta — se devuelve solo para poder auditar en el log qué se está tirando.
-  const { conservadas, descartadas, resumen } = filtrarDetecciones(porUmbral);
-  console.log(`[customVisionPredict] Photo_id=${photoId} — filtro de forma:`, JSON.stringify(resumen));
+  // Filtro de forma (hallazgo de María, 2026-09-25 — ver detectionFilter.js) — DESACTIVADO
+  // 2026-09-28: se calibró solo contra latas de aerosol Nivea Men (producto legítimo alto y
+  // angosto, ratio 4.2-5.2; cajita espuria casi cuadrada, ratio 1.0-1.8), pero el rollout de
+  // campo real (visitas 64-68, Auto Mercado) tiene desodorantes en formato stick (Speed
+  // Stick, Old Spice, Gillette) cuya forma real (ratio ~1.1-2.7) cae DENTRO del rango que el
+  // filtro asume espurio — confirmado recortando visualmente Photo_id=89 (visita 67): de 25
+  // "descartadas por forma", 22 eran productos stick legítimos, no cajitas de tapa. El
+  // aspect ratio solo no alcanza para separar sticks de tapas (sus rangos se solapan) — hace
+  // falta otra señal (ej. filtrar por forma SOLO entre las detecciones que además fallan
+  // identificación por OCR/SKU, ya que la cajita espuria real según María siempre sale con
+  // Sku_id NULL) antes de reactivar esto. filtrarDetecciones/detectionFilter.js se dejan
+  // intactos (no se borran) para retomar la recalibración — ver detectionFilter.js.
+  const conservadas = porUmbral;
+  const descartadas = [];
 
   return {
     detecciones:        conservadas,
