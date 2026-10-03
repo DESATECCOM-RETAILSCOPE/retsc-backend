@@ -103,7 +103,15 @@ const SHELF_CONTAINER = () =>
 //
 // AWAITING_APPROVAL retirado 2026-08-03 (decisión de jefatura — ya no existe ese estado, ver
 // aiModelRepo.js y docs/DIAGNOSTICO-spec-v1.4-vs-codigo.md).
-const SKIP_THRESHOLD_STATUSES = new Set(['TRAINING']);
+// Estados en los que NO se reevalúa el umbral: ya hay un entrenamiento en marcha.
+//
+// 'IMAGES_UPLOADED' se agregó por un problema de costos real: el flujo pone el
+// modelo en ese estado y RECIÉN DESPUÉS llama a entrenar, sin esperar. En esa
+// ventana el estado no era 'TRAINING' todavía, así que una segunda aprobación
+// que llegara ahí no veía el bloqueo y disparaba OTRO entrenamiento sobre el
+// mismo modelo. Aprobar varias fotos seguidas —lo normal cuando el revisor
+// despacha una tanda— es justo el escenario que lo provoca.
+const SKIP_THRESHOLD_STATUSES = new Set(['TRAINING', 'IMAGES_UPLOADED']);
 
 // Issue #35 (resuelto 2026-08-03, cableado spec v1.4) — antes esto leía CV_TAG_OMT/DTT/
 // CONVENIENCE (env vars globales, un solo tag id para TODAS las categorías del canal —
@@ -533,7 +541,15 @@ async function checkAndUpdateThreshold(categoryId) {
       // modelo fresco de BD (ya en IMAGES_UPLOADED) y sigue el mismo camino que antes tenía el
       // endpoint manual retirado — ver docs/DIAGNOSTICO-spec-v1.4-vs-codigo.md.
       modelTrainingService.startTraining(categoryId, null)
-        .catch(err => console.error(`[annotationSync] disparo automático de training falló (categoria=${categoryId}):`, err.message));
+        .catch(async (err) => {
+          console.error(`[annotationSync] disparo automático de training falló (categoria=${categoryId}):`, err.message);
+          // Devolver el modelo a PENDING es OBLIGATORIO ahora que IMAGES_UPLOADED
+          // bloquea la reevaluación del umbral: si se quedara en ese estado tras
+          // un fallo, no se reintentaría nunca y la categoría dejaría de
+          // entrenar en silencio.
+          await aiModelRepo.updateStatus(model.detection_model_id, 'PENDING')
+            .catch(e => console.error(`[annotationSync] no se pudo devolver el modelo a PENDING:`, e.message));
+        });
       return;
     }
   }
@@ -541,7 +557,34 @@ async function checkAndUpdateThreshold(categoryId) {
 
 // Punto de entrada tras aprobar la foto (photo_status='APROBADA' ya persistido en
 // RETSC_AI_TRAINING_PHOTOS por trainingPhotoRepo.approvePhoto).
-async function syncApprovedPhoto(photoId, { clienteAjustoCajitas } = {}) {
+//
+// OPCIÓN B — PENDIENTE DE EVALUAR (decisión de Arthur, 2026-08-12)
+//
+// Hoy aprobar sincroniza de inmediato: el revisor espera a que las cajitas suban
+// a Custom Vision antes de que la petición responda. La alternativa es DESACOPLAR
+// las dos cosas — aprobar sólo marca el estado, y un proceso aparte recoge las
+// aprobadas y las sincroniza en tanda (cada N minutos, o al juntar N fotos).
+//
+// A favor: la aprobación responde al instante sin importar cuántas cajitas tenga
+// la foto; se agrupan los envíos y las verificaciones de umbral aunque el revisor
+// apruebe de a una; un fallo de Custom Vision deja de bloquear al revisor.
+//
+// En contra: hace falta un job y una política de reintentos; el estado deja de
+// ser inmediato (una foto puede quedar APROBADA con cv_sync_status PENDING un
+// rato, y la UI tiene que explicarlo); y cambia el comportamiento que QA acaba de
+// validar.
+//
+// Se dejó para después de probar el lote en uso real: puede que agrupando la
+// aprobación ya alcance y no valga la pena el job. Si se implementa, el punto de
+// corte natural es acá — syncApprovedPhoto pasaría a ser lo que llama el job en
+// vez de lo que llama el controller.
+//
+// `skipThresholdCheck` existe para la aprobación EN LOTE: entrenar cuesta lo
+// mismo con 10 fotos que con 40, así que el gasto no depende de cuántas cajitas
+// se mandan sino de cuántas VECES se entrena. Verificando el umbral una vez por
+// foto, un lote de 10 lo evalúa 10 veces; quien aprueba en lote lo pasa en true y
+// llama a checkAndUpdateThreshold() UNA sola vez al final.
+async function syncApprovedPhoto(photoId, { clienteAjustoCajitas, skipThresholdCheck = false } = {}) {
   const photo = await trainingPhotoRepo.findById(photoId);
   if (!photo) {
     console.warn(`[annotationSync] photo_id=${photoId} no encontrada — nada que sincronizar`);
@@ -574,8 +617,8 @@ async function syncApprovedPhoto(photoId, { clienteAjustoCajitas } = {}) {
     didSync = true;
   }
 
-  await checkAndUpdateThreshold(photo.category_id);
-  return { synced: didSync };
+  if (!skipThresholdCheck) await checkAndUpdateThreshold(photo.category_id);
+  return { synced: didSync, categoryId: photo.category_id };
 }
 
 // Punto de entrada tras rechazar la foto. Conserva el registro en SQL.
