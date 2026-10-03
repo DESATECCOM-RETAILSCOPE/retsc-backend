@@ -8,7 +8,7 @@ const config = {
   database: process.env.SQL_DATABASE,
   options: {
     encrypt: true,
-    trustServerCertificate: false,
+    trustServerCertificate: true,
     enableArithAbort: true,
   },
   pool: {

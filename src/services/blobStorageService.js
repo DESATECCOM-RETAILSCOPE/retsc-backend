@@ -205,6 +205,41 @@ async function uploadToContainer({ containerName, blobPath, buffer, contentType 
 // recortarlas — primer consumidor de un `download` en este archivo (antes solo había upload).
 //
 // En mock: lee el archivo de data/blob-mock/{containerName}/{blobPath}.
+// Extrae container + blobPath de una URL de blob sin firmar (https://<account>.blob.core.windows.net/<container>/<blobPath...>).
+function parseAzureBlobUrl(url) {
+  const u = new URL(url);
+  const parts = u.pathname.replace(/^\//, '').split('/');
+  const containerName = parts.shift();
+  const blobPath = decodeURIComponent(parts.join('/'));
+  return { containerName, blobPath };
+}
+
+// Firma una URL de blob con un SAS de solo lectura de corta duración. `image_url` en DB se
+// guarda SIN firmar (uploadImage/uploadToContainer siempre devuelven blobClient.url a secas) —
+// las cuentas de storage de este proyecto no permiten acceso público anónimo, así que cualquier
+// image_url servido a un cliente tiene que pasar por acá primero. No se persiste el resultado:
+// se firma fresco en cada response para no guardar URLs que expiran.
+async function signBlobUrl(url, { expiryMinutes = 60 } = {}) {
+  if (!url) return url;
+  if (getMode() !== 'azure') return url; // mock: se sirve directo desde /blob-mock, nada que firmar
+  try {
+    const { BlobSASPermissions } = require('@azure/storage-blob');
+    const { containerName, blobPath } = parseAzureBlobUrl(url);
+    const blobClient = getAzureContainerByName(containerName).getBlockBlobClient(blobPath);
+    return await blobClient.generateSasUrl({
+      permissions: BlobSASPermissions.parse('r'),
+      expiresOn: new Date(Date.now() + expiryMinutes * 60 * 1000),
+    });
+  } catch {
+    return url; // si no se pudo firmar (URL no reconocida, etc.) mejor devolver la original que romper la response
+  }
+}
+
+// Firma varias URLs en paralelo (para listas de productos/detalle).
+async function signBlobUrls(urls, opts) {
+  return Promise.all(urls.map((u) => signBlobUrl(u, opts)));
+}
+
 async function downloadFromContainer({ containerName, blobPath }) {
   const mode = getMode();
 
@@ -222,4 +257,7 @@ async function downloadFromContainer({ containerName, blobPath }) {
   return fs.readFile(fullPath);
 }
 
-module.exports = { uploadImage, uploadImagesBatch, createMarker, prefixExists, ensureContainerExists, uploadToContainer, downloadFromContainer };
+module.exports = {
+  uploadImage, uploadImagesBatch, createMarker, prefixExists, ensureContainerExists,
+  uploadToContainer, downloadFromContainer, signBlobUrl, signBlobUrls,
+};

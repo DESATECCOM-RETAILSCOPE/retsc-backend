@@ -27,7 +27,7 @@ const { normalizeName }     = require('../utils/categoryNameNormalizer');
 const skuFeatureRepo        = require('../repositories/skuFeatureRepo');
 const skuImageLogRepo       = require('../repositories/skuImageLogRepo');
 const { getPool, sql }      = require('../config/db');
-const { uploadToContainer } = require('./blobStorageService');
+const { uploadToContainer, signBlobUrl } = require('./blobStorageService');
 const queueService          = require('./queueService');
 
 const TRAINING_CONTAINER = () =>
@@ -471,7 +471,10 @@ const resolveOrphansForSku = async (skuId, ean) => {
 // ─── listImagesBySkuId ────────────────────────────────────────────────────────
 
 const listImagesBySkuId = async (skuId) => {
-  return skuFeatureRepo.findBySkuId(skuId);
+  const rows = await skuFeatureRepo.findBySkuId(skuId);
+  // image_url se guarda sin firmar (el storage account no permite lectura pública anónima) —
+  // firmar acá antes de devolverlo al cliente.
+  return Promise.all(rows.map(async (row) => ({ ...row, image_url: await signBlobUrl(row.image_url) })));
 };
 
 module.exports = { processBatch, resolveOrphansForSku, listImagesBySkuId };

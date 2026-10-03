@@ -1,5 +1,15 @@
-const productRepo = require('../repositories/productRepo');
-const skuRepo     = require('../repositories/skuRepo');
+const productRepo        = require('../repositories/productRepo');
+const skuRepo             = require('../repositories/skuRepo');
+const blobStorageService  = require('./blobStorageService');
+
+// primaryImage viene de RETSC_OP_SKUS.image_url sin firmar (el storage account no permite
+// lectura pública anónima) — hay que firmarlo con SAS antes de devolverlo al cliente.
+async function signPrimaryImages(products) {
+  return Promise.all(products.map(async (p) => ({
+    ...p,
+    primaryImage: await blobStorageService.signBlobUrl(p.primaryImage),
+  })));
+}
 
 // categoryName prioriza client_category (la categoría propia del cliente, tal
 // como viene en su Excel de carga) por sobre commercial_category_dsc (el árbol
@@ -42,7 +52,7 @@ async function listByEnterprise(enterpriseId, filters = {}) {
     limit: Number(limit),
   });
 
-  const products = rows.map(toProductDTO);
+  const products = await signPrimaryImages(rows.map(toProductDTO));
 
   return { products, total, page: Number(page), limit: Number(limit) };
 }
@@ -84,7 +94,8 @@ async function listGlobal(filters = {}) {
     page: Number(page),
     limit: Number(limit),
   });
-  return { products: rows.map(toGlobalProductDTO), total, page: Number(page), limit: Number(limit) };
+  const products = await signPrimaryImages(rows.map(toGlobalProductDTO));
+  return { products, total, page: Number(page), limit: Number(limit) };
 }
 
 module.exports = { listByEnterprise, listCategoriesWithProducts, listGlobal };

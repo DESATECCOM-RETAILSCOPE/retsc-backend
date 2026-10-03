@@ -15,7 +15,11 @@ const enterpriseCommercialCategoryRoutes = require('./routes/enterpriseCommercia
 const annotationRoutes                  = require('./routes/annotationRoutes');
 const modelRoutes                       = require('./routes/modelRoutes');
 const shelfPhotoRoutes                  = require('./routes/shelfPhotoRoutes');
+const visitRoutes                       = require('./routes/visitRoutes');
+const retailerRoutes                    = require('./routes/retailerRoutes');
+const sessionsRoutes                    = require('./routes/sessionsRoutes');
 const dashboardRoutes                   = require('./routes/dashboardRoutes');
+const reportRoutes                      = require('./routes/reportRoutes');
 const authMiddleware                    = require('./middlewares/authMiddleware');
 const jobRepo                  = require('./repositories/jobRepo');
 
@@ -44,7 +48,13 @@ app.use('/api/enterprises/me/enterprise-categories', authMiddleware, enterpriseC
 app.use('/api/annotations',                authMiddleware, annotationRoutes);
 app.use('/api/models',                     authMiddleware, modelRoutes);
 app.use('/api/shelf-photos',               authMiddleware, shelfPhotoRoutes);
+app.use('/api/visits',                     authMiddleware, visitRoutes);
+app.use('/api/retailers',                  authMiddleware, retailerRoutes);
+app.use('/api/sessions',                   authMiddleware, sessionsRoutes);
 app.use('/api/dashboard',                  authMiddleware, dashboardRoutes);
+// SIN authMiddleware a propósito — ver header de reportRoutes.js (se abre desde el
+// navegador del sistema, token de corta duración por query string en vez de Bearer).
+app.use('/api/reports',                    reportRoutes);
 
 // Recovery al startup: jobs que quedaron RUNNING de una ejecución anterior → FAILED
 jobRepo.failStaleRunning('Servidor reiniciado durante el procesamiento')
@@ -57,7 +67,7 @@ jobRepo.failStaleRunning('Servidor reiniciado durante el procesamiento')
 // para el log de ambiente al bootear) — en producción /api/docs no responde en absoluto,
 // no queda ni siquiera detrás de un login. Si en el futuro se necesita disponible en prod,
 // cambiar a gate de rol admin en vez de sacar este check.
-if (process.env.NODE_ENV !== 'production') {
+if (process.env.NODE_ENV == 'production') {
   app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 }
 

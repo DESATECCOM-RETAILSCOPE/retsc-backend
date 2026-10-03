@@ -71,4 +71,32 @@ async function isShelf(_buffer) {
   return { stub: true, isShelf: true, tags: [] };
 }
 
-module.exports = { isConfigured, analyzeCaption, isShelf };
+// Lee el texto de un recorte de cajita detectada (Paso 5, sección 7.1 de la guía "Fotos de
+// Visita" v1.9 — "se le hace OCR a ese recorte: marca, nombre, tamaño, todo junto, sin
+// separar"). Distinto de analyzeCaption()/isShelf(): esto es OCR (Read/Text), no
+// caption/tags — Image Analysis 4.0 lo expone como el feature 'Read'.
+//
+// ESTADO ACTUAL: STUB — igual que analyzeCaption/isShelf, sin el SDK instalado todavía.
+// En modo stub devuelve texto vacío en vez de un texto inventado: productIdentificationService
+// llama a buscarSkuPorTexto() incluso con texto vacío (sin match casi seguro, pero no debe
+// romper el flujo) — un stub "permisivo" acá sería inventar texto que nunca vino de la foto,
+// lo cual sería peor que no tener texto.
+//
+// TODO: implementar con Image Analysis 4.0 (feature 'Read') cuando el SDK esté instalado:
+//   const result = await client.path('/imageanalysis:analyze').post({
+//     body: buffer,
+//     queryParameters: { features: ['Read'] },
+//     contentType: 'application/octet-stream',
+//   });
+//   const text = result.body.readResult?.blocks
+//     ?.flatMap(b => b.lines).map(l => l.text).join(' ') ?? '';
+//   return { stub: false, text };
+async function readText(_buffer) {
+  if (!isConfigured()) {
+    return { stub: true, text: '' };
+  }
+  console.warn('[azureVision] isConfigured=true pero readText aún no implementado. Devolviendo texto vacío.');
+  return { stub: true, text: '' };
+}
+
+module.exports = { isConfigured, analyzeCaption, isShelf, readText };
