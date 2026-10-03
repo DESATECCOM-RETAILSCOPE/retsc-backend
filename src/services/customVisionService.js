@@ -384,6 +384,52 @@ async function publishIteration(projectId, iterationId, publishName, predictionR
   return published; // boolean crudo devuelto por la API
 }
 
+// Inferencia contra una iteración YA PUBLICADA (Prediction API, distinta de la Training API
+// que usa el resto de este archivo — endpoint v3.0, no v3.3, y usa Prediction-Key en vez de
+// Training-key). Agregado 2026-08-12 para correr predicción manual sobre fotos de visita
+// (container "enterprise-shelf-visits", fuera del pipeline de entrenamiento) contra el modelo
+// publicado de una categoría — ver scripts/predict-shelf-photo.js, primer y único caller.
+//
+// Formato verificado por consistencia con el resto de la API (mismo patrón sin-SDK, mismo
+// motivo: la key de Azure AI Services unificada trae caracteres no-ASCII que el módulo http
+// de Node rechaza en headers pero fetch acepta):
+//   POST {endpoint}/customvision/v3.0/Prediction/{projectId}/detect/iterations/{publishName}/image
+//     Headers: Prediction-Key, Content-Type: application/octet-stream. Body: bytes crudos.
+//     Devuelve { id, project, iteration, created, predictions: [{ probability, tagId, tagName,
+//     boundingBox: { left, top, width, height } }, ...] } — boundingBox normalizado 0..1, mismo
+//     formato que usa el resto de este repo para bbox_left/top/width/height.
+//
+// isConfigured() no alcanza acá porque exige CUSTOM_VISION_TRAINING_KEY — la predicción usa
+// CUSTOM_VISION_PREDICTION_KEY, una credencial distinta; se valida aparte.
+async function predictImage(projectId, publishName, buffer) {
+  const predictionKey = process.env.CUSTOM_VISION_PREDICTION_KEY;
+  if (!predictionKey) {
+    throw new Error('CUSTOM_VISION_PREDICTION_KEY no está configurada — no se puede predecir.');
+  }
+  if (!publishName) {
+    throw new Error('publishName vacío — la categoría no tiene un modelo publicado (last_publish_name).');
+  }
+
+  const base = (process.env.CUSTOM_VISION_ENDPOINT || '').replace(/\/$/, '');
+  const url = `${base}/customvision/v3.0/Prediction/${projectId}/detect/iterations/${encodeURIComponent(publishName)}/image`;
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Prediction-Key': predictionKey,
+      'Content-Type': 'application/octet-stream',
+    },
+    body: buffer,
+  });
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`Custom Vision Prediction ${res.status}: ${body.slice(0, 300)}`);
+  }
+
+  return res.json();
+}
+
 module.exports = {
   isConfigured,
   createProject,
@@ -400,4 +446,5 @@ module.exports = {
   ensureTag,
   deleteTag,
   publishIteration,
+  predictImage,
 };
