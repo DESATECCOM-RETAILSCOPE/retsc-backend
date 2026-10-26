@@ -6,10 +6,10 @@
 //   2a. Calidad de píxeles (resolución/nitidez/brillo) — local con sharp
 //   2b. Caption confidence — Azure AI Vision (stub permisivo hasta que haya credenciales)
 //   3.  Validación de contenido ("¿es una góndola?") — Azure AI Vision (stub permisivo)
-//   4.  Deduplicación por hash SHA-256 (scope global: ENTERPRISE_ID IS NULL)
-//   5.  Upload a Blob Storage SIEMPRE, un archivo por canal (FIX 2026-08-05)
+//   4.  Deduplicación por hash SHA-256 + categoría (ciclo 5, A1 — antes hash + canal)
+//   5.  Upload a Blob Storage, carpeta del canal: dtc-{categoria}/{canal}/
 //   7.  Insert en RETSC_AI_TRAINING_PHOTOS, con cv_image_id=null (FIX 2026-07-26 / 2026-08-12)
-//   8.  Verificación de umbral por canal (no bloquea la subida)
+//   8.  Conteo informativo de fotos aprobadas en el canal (ciclo 5: YA NO toca el modelo)
 //
 // FIX 2026-08-12: esta subida ya NO registra la imagen en Custom Vision (Etapa 6 eliminada).
 // Antes, createImageFromData() se llamaba acá mismo con la categoría recién validada — pero si
@@ -55,7 +55,6 @@ const { generateFilename }        = require('../utils/shelfPhotoFilenameGenerato
 const { normalizeName }           = require('../utils/categoryNameNormalizer');
 const categoryRepo                = require('../repositories/categoryRepo');
 const trainingPhotoRepo           = require('../repositories/trainingPhotoRepo');
-const aiModelRepo                 = require('../repositories/aiModelRepo');
 
 const CANALES_VALIDOS = ['OMT', 'DTT', 'CONVENIENCE'];
 
@@ -65,8 +64,6 @@ const SHELF_CONTAINER = () =>
 const CAPTION_MIN_CONFIDENCE = () =>
   parseFloat(process.env.QUALITY_CAPTION_MIN_CONFIDENCE || '0.6');
 
-const TRAINING_THRESHOLD = () =>
-  parseInt(process.env.SHELF_TRAINING_THRESHOLD || '15', 10);
 
 function svcError(message, statusCode, errorCode) {
   return Object.assign(new Error(message), { statusCode, errorCode });
@@ -161,20 +158,26 @@ async function uploadShelfPhoto({ buffer, dtcCategoryId, canal, uploadedBy, ente
   // 'Retailer_id'" — como ese INSERT ocurría ANTES de la Etapa 7, la foto ni siquiera llegaba
   // a RETSC_AI_TRAINING_PHOTOS. Ahora (hash, canal) se resuelve por completo en esta tabla,
   // sin cruzar con la de Carlos.
+  //
+  // CICLO 5 (A1, plan del 27-sep — reemplaza la regla "una vez por canal" del 05-ago): el
+  // dedup es por hash + CATEGORÍA. Desde A2 hay un solo proyecto de Custom Vision por categoría
+  // y el umbral de entrenamiento suma todos los canales, así que la misma foto en dos canales
+  // sería una imagen repetida en el mismo set de entrenamiento y contaría doble.
   const hash = quality.hash; // ya calculado por validateQualityMetrics
 
-  const alreadyInThisChannel = await trainingPhotoRepo.findByHashAndCanal(hash, canal);
-  if (alreadyInThisChannel) {
+  const existing = await trainingPhotoRepo.findByHashAndCategory(hash, dtcId);
+  if (existing) {
     throw Object.assign(
-      new Error(`Esta foto ya fue subida antes para el canal ${canal}. Si es una foto distinta, verificá que no sea exactamente el mismo archivo (mismo contenido de imagen).`),
-      { statusCode: 409, errorCode: 'ERR_DUPLICATE_IMAGE', existingPhotoId: alreadyInThisChannel.photo_id }
+      new Error(`Esta foto ya fue subida antes para esta categoría (canal ${existing.canal}). Si es una foto distinta, verificá que no sea exactamente el mismo archivo (mismo contenido de imagen).`),
+      { statusCode: 409, errorCode: 'ERR_DUPLICATE_IMAGE', existingPhotoId: existing.photo_id, existingCanal: existing.canal }
     );
   }
 
   // ── Etapa 5: Upload a Blob Storage, SIEMPRE ──────────────────────────────────
-  // FIX 2026-08-05 (decisión de producto, María): el blob se sube SIEMPRE a la carpeta del
-  // canal ACTUAL, exista o no el hash en otro canal (un archivo por canal) — la Etapa 4 ya
-  // garantiza que solo llega hasta acá si (hash, canal) todavía no existe.
+  // El blob va a la carpeta del canal: dtc-{categoria}/{canal en minúscula}/ — misma
+  // convención con la que aiInfrastructureService crea los prefijos al dar de alta la
+  // categoría (ciclo 5, A1: "seguir la convención existente"). La Etapa 4 ya garantiza que
+  // solo llega hasta acá si (hash, categoría) todavía no existe.
   const categoriaSlug = normalizeName(category.Category_dsc);
   const filename      = generateFilename({ categoriaSlug, canal });
   const blobPath      = `dtc-${categoriaSlug}/${canal.toLowerCase()}/${filename}`;
@@ -235,22 +238,14 @@ async function uploadShelfPhoto({ buffer, dtcCategoryId, canal, uploadedBy, ente
   const trainingPhotoId = trainingPhoto.photo_id;
   console.log(`[shelfPhoto] foto de entrenamiento registrada — photo_id=${trainingPhotoId}`);
 
-  // ── Etapa 8: Verificar umbral por canal (no bloquea la subida) ───────────────
-  // NOTA: 'IMAGES_UPLOADED' es un status nuevo para el modelo; la columna status
-  // es varchar(20) y lo soporta. Indica que hay imágenes suficientes para entrenar.
-  // `model` se resuelve acá (ya no en la Etapa 6, que se eliminó) — es lo único que
-  // todavía necesita aiModelRepo en este flujo.
-
-  const model = await aiModelRepo.findByCategoryId(dtcId);
+  // ── Etapa 8: Conteo informativo (no bloquea la subida, no toca el modelo) ──────
+  // CICLO 5 (A3): antes esta etapa marcaba el modelo IMAGES_UPLOADED al llegar a 15 fotos
+  // aprobadas EN EL CANAL, sin disparar ningún entrenamiento. Como evaluarEntrenamiento()
+  // (annotationSyncService) no reevalúa un modelo en IMAGES_UPLOADED, el modelo quedaba
+  // trabado ahí para siempre y la categoría nunca entrenaba. La decisión de entrenar vive
+  // SOLO en evaluarEntrenamiento(), al APROBAR fotos (las recién subidas todavía no tienen
+  // cajitas, no pueden contar). Acá solo se devuelve el conteo del canal para la pantalla.
   const channelCount = await trainingPhotoRepo.countValidatedApprovedByCategoryChannel(dtcId, canal);
-  const threshold    = TRAINING_THRESHOLD();
-  const thresholdReached = channelCount >= threshold;
-
-  if (thresholdReached && model) {
-    await aiModelRepo.updateStatus(model.detection_model_id, 'IMAGES_UPLOADED')
-      .catch(err => console.warn(`[shelfPhoto] no se pudo actualizar status del modelo:`, err.message));
-    console.log(`[shelfPhoto] umbral alcanzado (${channelCount}/${threshold}) — modelo marcado IMAGES_UPLOADED`);
-  }
 
   return {
     photoId: trainingPhotoId,
@@ -261,7 +256,6 @@ async function uploadShelfPhoto({ buffer, dtcCategoryId, canal, uploadedBy, ente
     canal,
     dtcCategoryId: dtcId,
     channelCount,
-    thresholdReached,
   };
 }
 

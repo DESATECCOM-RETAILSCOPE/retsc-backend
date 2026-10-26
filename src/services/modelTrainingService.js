@@ -4,14 +4,14 @@
 // RETIRADO 2026-08-03 (decisión de jefatura): el endpoint manual — POST /api/training/models/
 // :categoryId/train, trainingRoutes.js/trainingController.js — fue eliminado por completo (no
 // queda puerta manual ni para pruebas). El único caller de `startTraining()` hoy es
-// `annotationSyncService.checkAndUpdateThreshold()`, que lo llama automáticamente al detectar
-// ≥`SHELF_TRAINING_THRESHOLD` fotos SYNCED (por primera vez, o acumuladas desde el último
-// entrenamiento) para una categoría+canal — ver ese archivo y
+// `annotationSyncService.evaluarEntrenamiento()` (ciclo 5, A3), que lo llama (con await) al
+// detectar ≥ RETSC_CONFIG.FIRST_TRAIN_MIN_PHOTOS (15) fotos aprobadas+SYNCED de la CATEGORÍA, o
+// ≥ RETRAIN_BATCH_SIZE (5) nuevas desde el último entrenamiento — ver ese archivo y
 // docs/DIAGNOSTICO-spec-v1.4-vs-codigo.md. `adminUserId` puede venir `null` cuando el disparo
 // es automático (no hay un admin detrás) — el log de abajo lo contempla.
 //
 // Solo se puede iniciar si el modelo está en IMAGES_UPLOADED (guardia de estado) —
-// `checkAndUpdateThreshold` ya marca ese estado antes de llamar a esta función.
+// `evaluarEntrenamiento` lo pone ahí con aiModelRepo.claimForTraining() (UPDATE atómico).
 //
 // FIRE-AND-FORGET: startTraining() dispara el entrenamiento en Custom Vision y responde de
 // inmediato — el polling de estado (pollTrainingStatus) corre en background dentro del mismo
@@ -20,7 +20,8 @@
 // GET /api/models/category/:categoryId (Issue 8.5) — devuelve el `status` actual del modelo
 // (TRAINING → TRAINED → PUBLISHED | TRAINING_FAILED).
 //
-// LIMITACIÓN CONOCIDA: el polling vive en memoria del proceso Node. Si el server se reinicia
+// RESUELTO ciclo 5 (A4) — ver recuperarEntrenamientosAlArrancar() al final del archivo.
+// LIMITACIÓN CONOCIDA (histórica): el polling vive en memoria del proceso Node. Si el server se reinicia
 // a mitad de un entrenamiento, el polling se pierde y el modelo queda "colgado" en TRAINING
 // (Custom Vision sigue entrenando del lado de Azure, pero nadie lo vuelve a consultar).
 // TODO: idealmente, al arrancar el server debería revisarse si hay modelos en TRAINING y
@@ -67,9 +68,11 @@
 // TRAINED sin publicar, logueado, sin romper el polling ni el resto del ciclo.
 
 const aiModelRepo         = require('../repositories/aiModelRepo');
-const customVisionService = require('./customVisionService');
+const modelProvider       = require('./modelProvider'); // ciclo 5 (A4): único acceso a Custom Vision
 
-const POLL_INTERVAL_MS            = 30_000;      // 30s entre consultas a Custom Vision
+// 30 s entre consultas a Custom Vision. CV_POLL_INTERVAL_MS solo existe para los tests (no
+// hace falta en el .env).
+const POLL_INTERVAL_MS            = parseInt(process.env.CV_POLL_INTERVAL_MS || '30000', 10);
 const MAX_POLL_ATTEMPTS           = 40;          // 40 * 30s = 20 min — timeout de seguridad
 const MAX_CONSECUTIVE_FETCH_ERRORS = 3;          // reintentos ante fallos de red/API antes de rendirse
 
@@ -90,10 +93,10 @@ function sleep(ms) {
 // "BadRequestDetectionTrainingValidationFailed: Not enough images per tag for training" que
 // tumba el training del proyecto ENTERO si cualquiera de sus tags tiene 0 imágenes, aunque los
 // demás tags sí cumplan el mínimo. Causa real confirmada en category_id=2: un tag quedó
-// huérfano (creado por customVisionService.ensureTag() en un sync anterior que falló DESPUÉS de
+// huérfano (creado por modelProvider.asegurarTag() en un sync anterior que falló DESPUÉS de
 // crear el tag pero ANTES de que createImageRegions() confirmara al menos una región — ver
 // annotationSyncService.js, resolveTagId()/syncRegionsForPhoto()). Como el disparo automático
-// (checkAndUpdateThreshold) no debe depender de que alguien limpie esto a mano, se revisa y se
+// (evaluarEntrenamiento) no debe depender de que alguien limpie esto a mano, se revisa y se
 // autocorrige acá, justo antes de cada intento de entrenamiento — no solo la vez que se descubrió
 // el problema. No lanza si la limpieza misma falla (un tag huérfano que no se pudo borrar no
 // debe impedir el intento de training — Custom Vision simplemente lo va a rechazar de nuevo con
@@ -101,7 +104,7 @@ function sleep(ms) {
 async function purgeEmptyTags(projectId) {
   let tags;
   try {
-    tags = await customVisionService.listTags(projectId);
+    tags = await modelProvider.listarTags(projectId);
   } catch (err) {
     console.warn(`[modelTraining] no se pudieron listar tags antes de entrenar (proyecto=${projectId}) — se sigue igual, Custom Vision validará por su cuenta:`, err.message);
     return;
@@ -112,7 +115,7 @@ async function purgeEmptyTags(projectId) {
 
   console.warn(`[modelTraining] ${emptyTags.length} tag(s) vacío(s) detectado(s) antes de entrenar (proyecto=${projectId}) — Custom Vision rechazaría el training entero por esto; eliminando: ${emptyTags.map(t => t.name).join(', ')}`);
   for (const tag of emptyTags) {
-    await customVisionService.deleteTag(projectId, tag.id)
+    await modelProvider.borrarTag(projectId, tag.id)
       .catch(err => console.error(`[modelTraining] no se pudo eliminar el tag vacío ${tag.name} (id=${tag.id}, proyecto=${projectId}):`, err.message));
   }
 }
@@ -138,7 +141,7 @@ async function startTraining(categoryId, adminUserId) {
 
   let iteration;
   try {
-    iteration = await customVisionService.trainProject(model.customvision_project_id);
+    iteration = await modelProvider.entrenar(model.customvision_project_id);
   } catch (err) {
     // Fix 2026-08-08 (fallo silencioso encontrado investigando category_id=2): antes esto se
     // propagaba directo al .catch() fire-and-forget de checkAndUpdateThreshold, que solo hace
@@ -158,7 +161,7 @@ async function startTraining(categoryId, adminUserId) {
   console.log(`[modelTraining] entrenamiento iniciado por ${trigger} — categoria=${categoryId} model_id=${model.detection_model_id} iterationId=${iteration.id}`);
 
   // Fire-and-forget: no se hace await de esto — el caller (antes el endpoint retirado, ahora
-  // annotationSyncService.checkAndUpdateThreshold) ya siguió su curso.
+  // annotationSyncService.evaluarEntrenamiento) ya siguió su curso.
   pollTrainingStatus(model.detection_model_id, model.customvision_project_id, iteration.id)
     .catch(err => console.error(`[modelTraining] el polling de fondo terminó con un error inesperado (model_id=${model.detection_model_id}):`, err.message));
 
@@ -176,7 +179,7 @@ async function pollTrainingStatus(modelId, projectId, iterationId) {
 
     let iteration;
     try {
-      iteration = await customVisionService.getIteration(projectId, iterationId);
+      iteration = await modelProvider.consultarIteracion(projectId, iterationId);
       consecutiveErrors = 0;
     } catch (err) {
       consecutiveErrors++;
@@ -222,7 +225,7 @@ async function handleTrainingCompleted(modelId, projectId, iterationId) {
 
   let performance = null;
   try {
-    performance = await customVisionService.getIterationPerformance(projectId, iterationId);
+    performance = await modelProvider.metricasIteracion(projectId, iterationId);
   } catch (err) {
     console.error(`[modelTraining] no se pudieron obtener métricas de rendimiento (model_id=${modelId}):`, err.message);
   }
@@ -275,7 +278,20 @@ async function handleTrainingCompleted(modelId, projectId, iterationId) {
 // el mismo mecanismo, sin cambios de código, en cuanto el Resource ID de predicción correcto
 // esté configurado.
 async function publishAndActivate(model, projectId, iterationId) {
-  const { detection_model_id: modelId, category_id: categoryId, prediction_resource_id: predictionResourceId } = model;
+  const { detection_model_id: modelId, category_id: categoryId } = model;
+
+  // Ciclo 5 (A4): el Resource ID de predicción se lee SIEMPRE del .env al publicar — nunca del
+  // valor guardado en la fila (que pudo quedar viejo o truncado; ver BLOQUEANTES DE AZURE
+  // arriba). Si falta o tiene mal formato, no se intenta publicar: queda en TRAINED con el
+  // motivo en last_training_error, y se reintenta en el próximo entrenamiento.
+  const pr = modelProvider.leerPredictionResourceId();
+  if (!pr.ok) {
+    console.warn(`[modelTraining] publicación NO intentada — categoria=${categoryId} model_id=${modelId}: ${pr.error}`);
+    await aiModelRepo.setTrainingError(modelId, `Publicación pendiente: ${pr.error}`)
+      .catch(e2 => console.error('[modelTraining] no se pudo persistir el motivo:', e2.message));
+    return;
+  }
+  const predictionResourceId = pr.value;
 
   const nextVersion = (await aiModelRepo.getMaxVersion(categoryId)) + 1;
   // Nombre único por versión + fecha (spec v1.4: "incluir fecha o versión para evitar
@@ -285,7 +301,7 @@ async function publishAndActivate(model, projectId, iterationId) {
   const publishName = `v${nextVersion}-${new Date().toISOString().slice(0, 10)}`;
 
   try {
-    await customVisionService.publishIteration(projectId, iterationId, publishName, predictionResourceId, { overwrite: true });
+    await modelProvider.publicar(projectId, iterationId, publishName, predictionResourceId, { overwrite: true });
   } catch (err) {
     console.warn(`[modelTraining] publicación automática PENDIENTE de configuración de Azure — categoria=${categoryId} model_id=${modelId} iterationId=${iterationId}: ${err.message}. El modelo queda en TRAINED (entrenado, no publicado); se reintentará en el próximo ciclo de entrenamiento sin cambios de código una vez el Resource ID de predicción esté configurado correctamente.`);
     // Fix 2026-08-08 (mismo fallo silencioso que trainProject — ver startTraining()): antes
@@ -299,7 +315,70 @@ async function publishAndActivate(model, projectId, iterationId) {
 
   await aiModelRepo.markPublished(modelId, { modelVersion: nextVersion, lastPublishName: publishName });
   await aiModelRepo.setActiveVersion(categoryId, modelId);
+  await aiModelRepo.updatePredictionResourceId(modelId, predictionResourceId)
+    .catch(err => console.warn(`[modelTraining] publicado, pero no se pudo actualizar prediction_resource_id en la fila (model_id=${modelId}):`, err.message));
   console.log(`[modelTraining] iteración publicada y activada — categoria=${categoryId} model_id=${modelId} version=${nextVersion} publishName=${publishName}`);
 }
 
-module.exports = { startTraining, pollTrainingStatus, publishAndActivate };
+// Ciclo 5 (A4) — RECUPERACIÓN AL ARRANCAR (resuelve la LIMITACIÓN CONOCIDA de la cabecera).
+// El polling vive en memoria: si el servidor se reinicia (cada deploy en Railway) a mitad de un
+// entrenamiento, el modelo quedaba en TRAINING para siempre. Al arrancar (src/app.js):
+//   · TRAINING → se busca la última iteración del proyecto en Custom Vision:
+//       Training/New/Queued → se retoma el polling en background
+//       Completed           → se completa el flujo (métricas, TRAINED, publicación)
+//       Failed / ninguna    → TRAINING_FAILED con motivo
+//   · IMAGES_UPLOADED → TRAINING_FAILED con motivo (no hay entrenamiento en curso que retomar;
+//       la próxima aprobación reintenta). Incluye modelos que dejó así la Etapa 8 vieja.
+// Supone UNA instancia del backend (Railway hoy). Nunca lanza.
+async function recuperarEntrenamientosAlArrancar() {
+  const resumen = { reanudados: 0, completados: 0, fallidos: 0 };
+  let modelos;
+  try {
+    modelos = (await aiModelRepo.listAll()).filter(m => m.status === 'TRAINING' || m.status === 'IMAGES_UPLOADED');
+  } catch (err) {
+    console.error('[modelTraining] recuperación al arrancar: no se pudieron listar modelos:', err.message);
+    return resumen;
+  }
+
+  for (const m of modelos) {
+    const modelId = m.detection_model_id;
+    const fail = async (motivo) => {
+      resumen.fallidos++;
+      console.warn(`[modelTraining] recuperación: model_id=${modelId} (categoria=${m.category_id}) → TRAINING_FAILED: ${motivo}`);
+      await aiModelRepo.markTrainingFailed(modelId, motivo)
+        .catch(e => console.error('[modelTraining] no se pudo marcar TRAINING_FAILED:', e.message));
+    };
+    try {
+      if (m.status === 'IMAGES_UPLOADED') {
+        await fail('Quedó en IMAGES_UPLOADED sin entrenamiento en curso (reinicio del servidor o Etapa 8 anterior al ciclo 5) — se reintenta con la próxima aprobación');
+        continue;
+      }
+      if (!modelProvider.estaConfigurado() || !m.customvision_project_id) {
+        await fail('Servidor reiniciado durante el entrenamiento y Custom Vision no está configurado para retomarlo');
+        continue;
+      }
+      const iteraciones = await modelProvider.listarIteraciones(m.customvision_project_id);
+      const ultima = [...(iteraciones ?? [])].sort((a, b) => new Date(b.created) - new Date(a.created))[0];
+      if (!ultima) { await fail('Servidor reiniciado durante el entrenamiento y el proyecto no tiene iteraciones'); continue; }
+
+      if (ultima.status === 'Completed') {
+        resumen.completados++;
+        console.log(`[modelTraining] recuperación: model_id=${modelId} — la iteración ${ultima.id} terminó mientras el servidor estaba caído; completando el flujo`);
+        handleTrainingCompleted(modelId, m.customvision_project_id, ultima.id)
+          .catch(e => console.error(`[modelTraining] recuperación: fallo completando model_id=${modelId}:`, e.message));
+      } else if (ultima.status === 'Failed') {
+        await fail('Custom Vision reportó la iteración como Failed (detectado al reiniciar el servidor)');
+      } else {
+        resumen.reanudados++;
+        console.log(`[modelTraining] recuperación: model_id=${modelId} — retomando el polling de la iteración ${ultima.id} (${ultima.status})`);
+        pollTrainingStatus(modelId, m.customvision_project_id, ultima.id)
+          .catch(e => console.error(`[modelTraining] recuperación: el polling retomado falló (model_id=${modelId}):`, e.message));
+      }
+    } catch (err) {
+      await fail(`Error al recuperar tras reinicio: ${err.message}`);
+    }
+  }
+  return resumen;
+}
+
+module.exports = { startTraining, pollTrainingStatus, publishAndActivate, handleTrainingCompleted, recuperarEntrenamientosAlArrancar };

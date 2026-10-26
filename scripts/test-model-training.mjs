@@ -1,15 +1,15 @@
 // Diagnóstico + prueba del entrenamiento de un modelo de detección de góndola.
 //
 // El endpoint manual de entrenamiento fue RETIRADO: hoy el único disparador real es
-// annotationSyncService.checkAndUpdateThreshold(), que dispara startTraining() de forma
-// automática cuando una categoría acumula >= SHELF_TRAINING_THRESHOLD (15) fotos SYNCED en
-// algún canal. Este script permite (a) DIAGNOSTICAR por qué entrena o no, y (b) DISPARAR una
-// prueba controlada.
+// annotationSyncService.evaluarEntrenamiento() (ciclo 5, A3), que entrena solo cuando la
+// CATEGORÍA (todos los canales) junta >= RETSC_CONFIG.FIRST_TRAIN_MIN_PHOTOS (15) fotos
+// aprobadas+SYNCED, o >= RETRAIN_BATCH_SIZE (5) aprobadas desde el último entrenamiento.
+// Este script permite (a) DIAGNOSTICAR por qué entrena o no, y (b) DISPARAR una prueba controlada.
 //
 // Uso (desde la raíz del repo, con .env apuntando a BD + Custom Vision reales):
 //   node scripts/test-model-training.mjs <categoryId>            → solo diagnóstico (read-only)
-//   node scripts/test-model-training.mjs <categoryId> --run      → camino REAL: checkAndUpdateThreshold
-//                                                                   (solo entrena si hay >=15 SYNCED)
+//   node scripts/test-model-training.mjs <categoryId> --run      → camino REAL: evaluarEntrenamiento
+//                                                                   (solo entrena si alcanza el umbral)
 //   node scripts/test-model-training.mjs <categoryId> --force    → fuerza IMAGES_UPLOADED y llama
 //                                                                   startTraining directo (prueba el
 //                                                                   trainProject de CV aunque no haya
@@ -24,9 +24,7 @@ const trainingPhotoRepo    = require(path.join(process.cwd(), 'src', 'repositori
 const customVisionService  = require(path.join(process.cwd(), 'src', 'services', 'customVisionService'));
 const modelTrainingService = require(path.join(process.cwd(), 'src', 'services', 'modelTrainingService'));
 const annotationSync       = require(path.join(process.cwd(), 'src', 'services', 'annotationSyncService'));
-
-const CANALES   = ['OMT', 'DTT', 'CONVENIENCE'];
-const THRESHOLD = parseInt(process.env.SHELF_TRAINING_THRESHOLD || '15', 10);
+const configService        = require(path.join(process.cwd(), 'src', 'services', 'configService'));
 const CV_MIN_PER_TAG = 15; // mínimo de Custom Vision para entrenar detección: 15 imágenes por tag
 
 const categoryId = parseInt(process.argv[2], 10);
@@ -50,16 +48,16 @@ async function diagnose() {
   if (model.last_training_error) console.log(`  last_training_error: ${model.last_training_error}`);
   console.log(`  Custom Vision cfg  : ${customVisionService.isConfigured() ? 'OK' : '❌ NO configurado (CUSTOM_VISION_ENDPOINT/KEY)'}`);
 
-  // Conteo de fotos SYNCED por canal (lo que dispara el umbral automático).
+  // Conteo POR CATEGORÍA (lo que usa evaluarEntrenamiento — ciclo 5, A3).
+  const isFirst   = model.trained_at == null;
+  const THRESHOLD = isFirst
+    ? await configService.getNumberConfig('FIRST_TRAIN_MIN_PHOTOS', 15, { min: 15 })
+    : await configService.getNumberConfig('RETRAIN_BATCH_SIZE', 5, { min: 1 });
   line();
-  console.log(`FOTOS SYNCED por canal (desde trained_at=${model.trained_at ?? 'nunca'}) · umbral=${THRESHOLD}`);
-  let algunCanalListo = false;
-  for (const canal of CANALES) {
-    const n = await trainingPhotoRepo.countSyncedSinceByCategoryChannel(categoryId, canal, model.trained_at ?? null);
-    const ok = n >= THRESHOLD;
-    if (ok) algunCanalListo = true;
-    console.log(`  ${canal.padEnd(12)}: ${n}/${THRESHOLD} ${ok ? '✅' : ''}`);
-  }
+  console.log(`FOTOS APROBADAS + SYNCED de la categoría (${isFirst ? 'primer entrenamiento, todas' : `aprobadas desde trained_at=${model.trained_at}`})`);
+  const n = await trainingPhotoRepo.countSyncedSinceByCategory(categoryId, isFirst ? null : model.trained_at);
+  const umbralOk = n >= THRESHOLD;
+  console.log(`  ${n}/${THRESHOLD} (${isFirst ? 'RETSC_CONFIG.FIRST_TRAIN_MIN_PHOTOS' : 'RETSC_CONFIG.RETRAIN_BATCH_SIZE'}) ${umbralOk ? '✅' : ''}`);
 
   // Tags en Custom Vision con su imageCount (precondición REAL de CV: >=15 imágenes por tag).
   line();
@@ -84,7 +82,8 @@ async function diagnose() {
   // Veredicto.
   line();
   console.log('VEREDICTO');
-  console.log(`  ¿algún canal con >=${THRESHOLD} SYNCED?  ${algunCanalListo ? 'SÍ ✅' : 'NO ❌ (el disparo automático no salta)'}`);
+  console.log(`  ¿categoría con >=${THRESHOLD} fotos?  ${umbralOk ? 'SÍ ✅' : 'NO ❌ (el disparo automático no salta)'}`);
+  if (['TRAINING', 'IMAGES_UPLOADED'].includes(model.status)) console.log(`  ⚠ status=${model.status}: evaluarEntrenamiento no dispara (en curso). Si quedó trabado, ver migrations/017.`);
   console.log(`  ¿algún tag con >=${CV_MIN_PER_TAG} imágenes? ${algunTagListo ? 'SÍ ✅' : 'NO ❌ (CV dará "Not enough images per tag")'}`);
   console.log('  Recordá: subir fotos a CV NO alcanza — deben estar ANOTADAS (cajitas) y SYNCED,');
   console.log('  porque el entrenamiento de detección necesita regiones etiquetadas por tag.');
@@ -118,10 +117,11 @@ async function pollUntilTerminal(modelId, maxMin = 21) {
     if (mode === 'diagnose') { console.log('\n(Modo diagnóstico. Agregá --run o --force para disparar.)'); process.exit(0); }
 
     if (mode === 'run') {
-      console.log('\n▶ --run: llamando annotationSync.checkAndUpdateThreshold() (camino automático real)…');
-      await annotationSync.checkAndUpdateThreshold(categoryId);
-      // checkAndUpdateThreshold dispara startTraining fire-and-forget; observamos el modelo.
-      await pollUntilTerminal(model.detection_model_id);
+      console.log('\n▶ --run: llamando annotationSync.evaluarEntrenamiento() (camino automático real)…');
+      const r = await annotationSync.evaluarEntrenamiento(categoryId);
+      console.log(`  evaluarEntrenamiento → ${JSON.stringify(r)}`);
+      // El polling de CV corre en background en este mismo proceso; observamos el modelo en BD.
+      if (r.triggered) await pollUntilTerminal(model.detection_model_id);
       process.exit(0);
     }
 
