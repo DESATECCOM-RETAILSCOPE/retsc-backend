@@ -4,6 +4,7 @@ const requireAdmin = require('../middlewares/requireAdmin');
 const requireRole  = require('../middlewares/requireRole');
 const { ROLES }    = require('../config/roles');
 const c = require('../controllers/userController');
+const preferencesController = require('../controllers/userPreferencesController');
 
 /**
  * @swagger
@@ -46,6 +47,59 @@ const c = require('../controllers/userController');
 // (p. ej. GERENCIA) debe poder VER el listado sin poder editarlo, sacar el GET
 // de este router.use() y darle su propio requireRole — el resto de las rutas
 // (creación/edición/cambio de rol) tiene que seguir restringido a Admin.
+/**
+ * @swagger
+ * /api/users/me/preferences:
+ *   get:
+ *     summary: Preferencias personales del usuario autenticado (self-service)
+ *     tags: [Users]
+ *     security:
+ *       - bearerAuth: []
+ *     description: >-
+ *       Declarado ANTES de router.use(requireAdmin) a propósito — CUALQUIER usuario
+ *       autenticado puede leer/guardar sus propias preferencias, no solo Admin (ese gate
+ *       es para administrar OTROS usuarios). Hoy solo cubre el radio de búsqueda de puntos
+ *       de venta del mapa (antes hardcodeado en MapScreen.js, RADIO_KM=5).
+ *     responses:
+ *       200:
+ *         description: Preferencias del usuario
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 preferences:
+ *                   type: object
+ *                   properties:
+ *                     customRadiusEnabled: { type: boolean, description: "Si es false, el mobile debe usar el radio default (5km) sin importar searchRadiusKm" }
+ *                     searchRadiusKm:      { type: integer, example: 5 }
+ *   put:
+ *     summary: Guarda las preferencias personales del usuario autenticado
+ *     tags: [Users]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [customRadiusEnabled, searchRadiusKm]
+ *             properties:
+ *               customRadiusEnabled: { type: boolean }
+ *               searchRadiusKm:      { type: integer, minimum: 1, maximum: 50 }
+ *     responses:
+ *       200:
+ *         description: Preferencias guardadas
+ *       400:
+ *         description: customRadiusEnabled no es boolean, o searchRadiusKm fuera de rango (1-50)
+ *       401:
+ *         description: Sin token, o token expirado
+ */
+router.get('/me/preferences', preferencesController.getMyPreferences);
+router.put('/me/preferences', preferencesController.setMyPreferences);
+
 router.use(requireAdmin);
 
 // GET /api/users/global — cross-empresa, exclusivo ADMIN_DTC (Issue B3 mismo criterio que
