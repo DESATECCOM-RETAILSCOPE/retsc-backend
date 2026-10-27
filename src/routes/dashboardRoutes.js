@@ -97,6 +97,7 @@ const controller = require('../controllers/dashboardController');
  *           items: { type: integer }
  *           description: "Hasta 8 valores, del más viejo al más nuevo (incluye hoy). 1 elemento o vacío si no hay historial todavía."
  */
+router.use('/cumplimiento', require('./dashboardCumplimientoRoutes'));
 router.get('/', controller.getDashboard);
 
 module.exports = router;
