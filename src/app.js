@@ -21,6 +21,7 @@ const sessionsRoutes                    = require('./routes/sessionsRoutes');
 const dashboardRoutes                   = require('./routes/dashboardRoutes');
 const reportRoutes                      = require('./routes/reportRoutes');
 const readinessRoutes                   = require('./routes/readinessRoutes');
+const planogramRoutes                   = require('./routes/planogramRoutes');
 const authMiddleware                    = require('./middlewares/authMiddleware');
 const jobRepo                  = require('./repositories/jobRepo');
 
@@ -49,6 +50,7 @@ app.use('/api/enterprises/me/enterprise-categories', authMiddleware, enterpriseC
 app.use('/api/annotations',                authMiddleware, annotationRoutes);
 app.use('/api/models',                     authMiddleware, modelRoutes);
 app.use('/api/shelf-photos',               authMiddleware, shelfPhotoRoutes);
+app.use('/api/planograms',                 authMiddleware, planogramRoutes);   // ciclo 5, B2
 app.use('/api/visits',                     authMiddleware, visitRoutes);
 app.use('/api/retailers',                  authMiddleware, retailerRoutes);
 app.use('/api/sessions',                   authMiddleware, sessionsRoutes);
@@ -62,6 +64,12 @@ app.use('/api/reports',                    reportRoutes);
 jobRepo.failStaleRunning('Servidor reiniciado durante el procesamiento')
   .then(n => { if (n > 0) console.warn(`[startup] ${n} job(s) RUNNING marcados como FAILED`); })
   .catch(err => console.error('[startup] error en recovery de jobs:', err.message));
+
+// Ciclo 5 (A4): entrenamientos que quedaron a medias por un reinicio (TRAINING / IMAGES_UPLOADED)
+// → se retoman o se marcan TRAINING_FAILED con motivo. Ver modelTrainingService.
+require('./services/modelTrainingService').recuperarEntrenamientosAlArrancar()
+  .then(r => { if (r.reanudados || r.completados || r.fallidos) console.warn('[startup] recuperación de entrenamientos:', r); })
+  .catch(err => console.error('[startup] error en recuperación de entrenamientos:', err.message));
 
 // Documentación interactiva (Swagger UI) — GATE DE PRODUCCIÓN OBLIGATORIO: este backend
 // corre contra recursos -prod, y una UI que lista + ejecuta la API entera es superficie de

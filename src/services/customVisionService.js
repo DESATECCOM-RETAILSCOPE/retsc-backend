@@ -97,13 +97,8 @@ async function createProject(name) {
 // Si !isConfigured() o projectId es null (modelo aún en PENDING): devuelve stub con ID
 // simulado, igual que antes — permite probar el resto del flujo sin credenciales.
 //
-// tagId resuelve el canal de la foto (OMT/DTT/CONVENIENCE → tag de Custom Vision) — ver
-// resolveTagId() en annotationSyncService.js. NOTA (Issue #35, sin resolver acá): el mapeo
-// hoy es una env var global (CV_TAG_OMT/DTT/CONVENIENCE) pero cada proyecto CV tiene sus
-// propios tag IDs — con más de una categoría con proyecto activo simultáneo, esa única env
-// var no puede ser correcta para todas a la vez. Confirmado en el E2E previo. Fuera de
-// alcance de este cierre; requiere un mapeo canal+categoría→tagId persistido, no una sola
-// env var por canal.
+// tagId = tag de la CATEGORÍA dentro del proyecto CV de esa categoría (ciclo 5, A2) — ver
+// resolveTagId() en annotationSyncService.js. El canal no viaja a Custom Vision.
 async function createImageFromData(projectId, buffer, tagId) {
   if (!isConfigured() || !projectId) {
     return { stub: true, cvImageId: `stub-${crypto.randomUUID()}` };
@@ -255,6 +250,12 @@ async function getIteration(projectId, iterationId) {
   return cvFetch(`projects/${projectId}/iterations/${iterationId}`);
 }
 
+// Ciclo 5 (A4) — lista las iteraciones del proyecto (para retomar un entrenamiento tras un
+// reinicio del servidor). GET .../projects/{projectId}/iterations → [{ id, name, status, created, ... }]
+async function listIterations(projectId) {
+  return (await cvFetch(`projects/${projectId}/iterations`)) ?? [];
+}
+
 // Consulta las métricas de rendimiento de una iteración ya completada.
 async function getIterationPerformance(projectId, iterationId) {
   return cvFetch(`projects/${projectId}/iterations/${iterationId}/performance`);
@@ -306,13 +307,11 @@ async function createTag(projectId, tagName) {
 // nombres distintos; si el llamador no normaliza el nombre de canal antes de pasarlo acá,
 // dos llamadas con distinto casing crean dos tags para lo que debería ser el mismo canal.
 //
-// Convención de nombre del tag: la spec v1.4 usa el canal como nombre de tag (OMT/DTT/
-// CONVENIENCE) porque el tag ya vive DENTRO del proyecto de una categoría — no hace falta
-// componer categoría+canal en el nombre, el proyecto ya es la categoría. Se deja el nombre
-// como parámetro libre (no se fuerza a un CANALES fijo acá) para no tomar la decisión de
-// negocio por el llamador — pero la recomendación, dado que 1 proyecto = 1 categoría, es
-// pasar el canal solo (p. ej. "OMT"), no el compuesto "CATEGORIA OMT" que se ve hoy en el
-// pool de Custom Vision (ese naming es de un flujo/convención anterior a esta función).
+// Convención de nombre del tag (ciclo 5, A2): 1 proyecto = 1 categoría = 1 tag, y el tag es
+// el nombre de la categoría normalizado (ej. "DESODORANTES_CORPORALES") — lo arma
+// annotationSyncService.categoryTagName(). El canal NO se usa como tag. Tags viejos que
+// pueden quedar en Custom Vision de convenciones anteriores: "OMT"/"DTT"/"CONVENIENCE" y
+// compuestos tipo "CATEGORIA OMT".
 async function ensureTag(projectId, tagName) {
   const tags = await listTags(projectId);
   const existing = tags.find(t => t.name === tagName);
@@ -326,6 +325,32 @@ async function ensureTag(projectId, tagName) {
 // aunque los demás tags sí tengan suficientes — un tag huérfano (creado por ensureTag() antes de
 // que createImageRegions() confirmara al menos una región, y nunca completado por un fallo
 // posterior en ese mismo sync) tumba el entrenamiento del proyecto entero, no solo de ese tag.
+// Ciclo 5 (A2, migración de tags) — usadas por scripts/a2-migrar-tags-categoria.js.
+//
+//   GET   .../projects/{projectId}/images/tagged?tagIds={tagId}&take={n}&skip={m}   (take máx. 256)
+//     → [{ id, regions: [{ regionId, tagId, tagName, left, top, width, height }], ... }]
+//   PATCH .../projects/{projectId}/tags/{tagId}   body: { name, description, type }
+//     Renombrar conserva el tagId → las regiones y los cv_region_id de la BD no cambian.
+//   DELETE .../projects/{projectId}/images/regions?regionIds=a&regionIds=b   (máx. 64 por llamada)
+async function getTaggedImages(projectId, tagId, { take = 256, skip = 0 } = {}) {
+  const params = new URLSearchParams({ tagIds: tagId, take: String(take), skip: String(skip) });
+  return (await cvFetch(`projects/${projectId}/images/tagged?${params}`)) ?? [];
+}
+
+async function updateTag(projectId, tag, newName) {
+  const body = { name: newName, description: tag.description ?? '', type: tag.type ?? 'Regular' };
+  const updated = await cvFetch(`projects/${projectId}/tags/${tag.id}`, { method: 'PATCH', body: JSON.stringify(body) });
+  console.log(`[customVision] tag renombrado — proyecto=${projectId} id=${tag.id} "${tag.name}" → "${newName}"`);
+  return updated;
+}
+
+async function deleteImageRegions(projectId, regionIds) {
+  for (let i = 0; i < regionIds.length; i += 64) {
+    const params = regionIds.slice(i, i + 64).map(id => `regionIds=${encodeURIComponent(id)}`).join('&');
+    await cvFetch(`projects/${projectId}/images/regions?${params}`, { method: 'DELETE' });
+  }
+}
+
 async function deleteTag(projectId, tagId) {
   await cvFetch(`projects/${projectId}/tags/${tagId}`, { method: 'DELETE' });
   console.log(`[customVision] tag eliminado — proyecto=${projectId} tagId=${tagId}`);
@@ -436,15 +461,19 @@ module.exports = {
   createImageFromData,
   createImageRegions,
   deleteImageRegion,
+  deleteImageRegions,
   deleteImages,
   trainProject,
   getIteration,
+  listIterations,
   getIterationPerformance,
   // Issue #35 / 4.4 — aisladas, aún sin cablear al flujo (ver nota de cabecera del archivo)
   listTags,
   createTag,
   ensureTag,
   deleteTag,
+  getTaggedImages,
+  updateTag,
   publishIteration,
   predictImage,
 };
