@@ -57,6 +57,9 @@ async function ultimaIteracion(category) {
 }
 
 // Tasa de lectura OCR, nivel 1 (anexo 9).
+// Empresa y fechas son opcionales: el Resumen las pasa (KPI de la empresa en el
+// período); la pantalla 4 no tiene esos filtros en el mockup y la llama sin ellos
+// (todas las empresas, todo el período).
 async function lecturaOcr(f) {
   const pool = await getPool();
   const r = await pool.request()
@@ -70,10 +73,10 @@ async function lecturaOcr(f) {
              SUM(CASE WHEN NULLIF(LTRIM(RTRIM(d.ocr_text)), '') IS NOT NULL AND d.Sku_id IS NOT NULL THEN 1 ELSE 0 END) AS texto_leido_con_match
       FROM ${DETECTION} d
       INNER JOIN ${PHOTO} p ON p.Photo_id = d.Photo_id
-      WHERE p.Enterprise_id = @enterpriseId
+      WHERE (@enterpriseId IS NULL OR p.Enterprise_id = @enterpriseId)
         AND (@category IS NULL OR p.CATEGORY_ID = @category)
-        AND d.created_at >= @desde
-        AND d.created_at <  @hastaExclusive;
+        AND (@desde IS NULL OR d.created_at >= @desde)
+        AND (@hastaExclusive IS NULL OR d.created_at < @hastaExclusive);
     `);
   const row = r.recordset[0] ?? {};
   return {

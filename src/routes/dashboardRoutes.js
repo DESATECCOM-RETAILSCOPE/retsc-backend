@@ -23,5 +23,6 @@ router.use('/cumplimiento', require('./dashboardCumplimientoRoutes'));
 router.use('/opciones', require('./dashboardOpcionesRoutes'));
 router.use('/resumen', require('./dashboardResumenRoutes'));
 router.use('/catalogo', require('./dashboardCatalogoRoutes'));
+router.use('/modelo', require('./dashboardModeloRoutes'));
 
 module.exports = router;
