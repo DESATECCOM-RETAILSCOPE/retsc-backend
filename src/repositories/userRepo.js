@@ -69,6 +69,27 @@ const update = async (id, partial) => {
   return r.recordset[0] ?? null;
 };
 
+// Preferencias personales del usuario (pantalla "Configuración" del mobile, 2026-10-21) —
+// separado a propósito de update(): ese es para datos que un Admin administra sobre OTRO
+// usuario (nombre/email/password/status); esto es self-service, el propio usuario sobre sí
+// mismo (ver userPreferencesService.js y la ruta GET/PUT /api/users/me/preferences,
+// declarada antes del gate de Admin en userRoutes.js).
+const updatePreferences = async (id, { customRadiusEnabled, searchRadiusKm }) => {
+  const pool = await getPool();
+  const r = await pool.request()
+    .input('id',                  sql.Int, id)
+    .input('customRadiusEnabled', sql.Bit, customRadiusEnabled)
+    .input('searchRadiusKm',      sql.Int, searchRadiusKm)
+    .query(`
+      UPDATE ${TABLE}
+      SET custom_radius_enabled = @customRadiusEnabled,
+          search_radius_km      = @searchRadiusKm
+      OUTPUT INSERTED.*
+      WHERE User_id = @id
+    `);
+  return r.recordset[0] ?? null;
+};
+
 const remove = async (id) => {
   const pool = await getPool();
   await pool.request()
@@ -77,4 +98,4 @@ const remove = async (id) => {
   return true;
 };
 
-module.exports = { findById, findByEmail, findByCedula, listAll, insert, update, remove };
+module.exports = { findById, findByEmail, findByCedula, listAll, insert, update, updatePreferences, remove };

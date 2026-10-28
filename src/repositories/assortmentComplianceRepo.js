@@ -256,6 +256,30 @@ const listEnExceso = async ({ enterpriseId, categoryId, supermarketchainId, form
   return r.recordset;
 };
 
+// Chequeo liviano de "¿hay al menos un SKU autorizado activo para este
+// enterprise/cadena/formato/categoría?" — mismo criterio exacto que el CTE `autorizados` de
+// calculateAndSave, sin calcular nada más. Usado por processReadinessService para bloquear
+// ANTES de intentar calcular cumplimiento — ver el crash real de NULL en cumplimiento_pct
+// cuando ese conteo da 0 (Enterprise_id=2, 2026-10-23: nunca se cargó surtido para esa
+// empresa, así que calculateAndSave intentaba insertar NULL en una columna NOT NULL).
+const hasActiveAssortment = async ({ enterpriseId, supermarketchainId, format, categoryId }) => {
+  const pool = await getPool();
+  const r = await pool.request()
+    .input('enterpriseId', sql.Int,         enterpriseId)
+    .input('smktChainId',  sql.Int,         supermarketchainId)
+    .input('format',       sql.VarChar(50), format)
+    .input('category',     sql.Int,         categoryId)
+    .query(`
+      SELECT TOP 1 1 AS found
+      FROM RETSC_OP_ASSORTMENT a
+      INNER JOIN RETSC_OP_SKUS sku ON sku.SKU_ID = a.sku_id
+      WHERE a.enterprise_id = @enterpriseId AND a.status = 'ACTIVO'
+        AND a.Supermarketchain_id = @smktChainId AND a.Format = @format
+        AND sku.detection_category_id = @category
+    `);
+  return r.recordset.length > 0;
+};
+
 const getLatestByVisitCategory = async (visitId, categoryId) => {
   const pool = await getPool();
   const r = await pool.request()
@@ -275,5 +299,6 @@ module.exports = {
   getShareByComplianceId,
   listFaltantes,
   listEnExceso,
+  hasActiveAssortment,
   getLatestByVisitCategory,
 };

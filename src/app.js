@@ -20,6 +20,7 @@ const retailerRoutes                    = require('./routes/retailerRoutes');
 const sessionsRoutes                    = require('./routes/sessionsRoutes');
 const dashboardRoutes                   = require('./routes/dashboardRoutes');
 const reportRoutes                      = require('./routes/reportRoutes');
+const readinessRoutes                   = require('./routes/readinessRoutes');
 const planogramRoutes                   = require('./routes/planogramRoutes');
 const authMiddleware                    = require('./middlewares/authMiddleware');
 const jobRepo                  = require('./repositories/jobRepo');
@@ -28,7 +29,7 @@ const path = require('path');
 
 const app = express();
 
-app.use(cors());
+app.use(cors({ exposedHeaders: ['Content-Disposition'] }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -54,6 +55,7 @@ app.use('/api/visits',                     authMiddleware, visitRoutes);
 app.use('/api/retailers',                  authMiddleware, retailerRoutes);
 app.use('/api/sessions',                   authMiddleware, sessionsRoutes);
 app.use('/api/dashboard',                  authMiddleware, dashboardRoutes);
+app.use('/api/readiness',                  authMiddleware, readinessRoutes);
 // SIN authMiddleware a propósito — ver header de reportRoutes.js (se abre desde el
 // navegador del sistema, token de corta duración por query string en vez de Bearer).
 app.use('/api/reports',                    reportRoutes);

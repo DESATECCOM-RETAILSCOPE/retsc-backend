@@ -12,6 +12,7 @@ const enterpriseRepo          = require('../repositories/enterpriseRepo');
 const assortmentComplianceRepo = require('../repositories/assortmentComplianceRepo');
 const shelfPhotoRepo           = require('../repositories/shelfPhotoRepo');
 const blobStorageService       = require('./blobStorageService');
+const processReadinessService  = require('./processReadinessService');
 
 // image_url en RETSC_OP_SKUS se guarda sin firmar (ver blobStorageService.signBlobUrl) — el
 // storage account no permite lectura pública anónima, así que hay que firmar acá antes de
@@ -52,6 +53,25 @@ async function getCompliance(visitId, categoryId) {
     console.warn(
       `[assortmentCompliance] Enterprise_id=${visit.Enterprise_id} sin supplier_name ` +
       `(migración 011) — en_exceso_fuera_surtido va a quedar subestimado para esta visita.`
+    );
+  }
+
+  // Red de seguridad (ver processReadinessService.js): el mobile ya bloquea la entrada al
+  // módulo de captura si falta alguna de estas condiciones (GET /api/readiness, llamado desde
+  // VisitCaptureScreen), pero si ese chequeo se bypassea por una caché vieja o una condición
+  // de carrera, esto evita volver a producir el crash real de 2026-10-23 (NULL crudo en
+  // cumplimiento_pct porque Enterprise_id=2 nunca tuvo surtido cargado) — un 409 con mensaje
+  // accionable en su lugar.
+  const readiness = await processReadinessService.checkReadiness({
+    enterpriseId: visit.Enterprise_id,
+    retailerId:   visit.Retailer_id,
+    categoryId,
+  });
+  if (!readiness.ready) {
+    throw svcError(
+      readiness.blockers.map((b) => b.message).join(' '),
+      409,
+      'ERR_NOT_READY_FOR_COMPLIANCE',
     );
   }
 
