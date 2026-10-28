@@ -99,6 +99,7 @@ const controller = require('../controllers/dashboardController');
  */
 router.use('/cumplimiento', require('./dashboardCumplimientoRoutes'));
 router.use('/opciones', require('./dashboardOpcionesRoutes'));
+router.use('/resumen', require('./dashboardResumenRoutes'));
 router.get('/', controller.getDashboard);
 
 module.exports = router;

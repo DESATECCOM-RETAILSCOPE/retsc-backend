@@ -208,6 +208,19 @@ async function composicion(f, { por }) {
   return r.recordset;
 }
 
+// KPI "Cumplimiento promedio" del Resumen: promedio y visitas del período filtrado.
+// El controller lo llama dos veces (período actual y anterior) para la variación.
+async function promedioPeriodo(f) {
+  const r = await (await baseRequest(f)).query(`${LATEST}
+    SELECT COUNT(DISTINCT c.visit_id) AS visitas,
+           CAST(AVG(CAST(c.cumplimiento_pct AS DECIMAL(9,4))) AS DECIMAL(5,1)) AS cumplimiento_promedio
+    FROM c
+    INNER JOIN ${VISIT} v ON v.Visit_id = c.visit_id
+    WHERE ${BASE_WHERE};
+  `);
+  return r.recordset[0] ?? { visitas: 0, cumplimiento_promedio: null };
+}
+
 module.exports = {
   tendencia,
   visitas,
@@ -215,6 +228,7 @@ module.exports = {
   rankingCadenas,
   excesoPrioritarios,
   composicion,
+  promedioPeriodo,
   DIMENSIONES,
   AGRUPACIONES: Object.keys(PERIOD_EXPR),
 };

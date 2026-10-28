@@ -10,27 +10,10 @@
 // La tendencia y el top 5 de tiendas del Resumen usan estos mismos endpoints
 // (tendencia y ranking-tiendas con limit=5).
 
-const repo           = require('../repositories/dashboardCumplimientoRepo');
-const enterpriseRepo = require('../repositories/enterpriseRepo');
-const { resolveFilters }                       = require('../utils/dashboardFilters');
-const { sendCsv, wantsCsv, buildCsvFilename } = require('../utils/csvExport');
+const repo = require('../repositories/dashboardCumplimientoRepo');
+const { cardHandler: baseCardHandler, httpError } = require('../utils/dashboardCard');
 
 const PANTALLA = 'cumplimiento';
-
-function httpError(statusCode, message) {
-  const err = new Error(message);
-  err.statusCode = statusCode;
-  return err;
-}
-
-function handleError(res, err) {
-  const status = err.statusCode || 500;
-  if (status === 500) console.error('[dashboard/cumplimiento]', err);
-  return res.status(status).json({
-    success: false,
-    message: status === 500 ? 'Error al obtener los datos del dashboard.' : err.message,
-  });
-}
 
 // Parámetros propios de algunas tarjetas.
 function parseAgrupar(value) {
@@ -67,45 +50,8 @@ function withShare(rows) {
   }));
 }
 
-async function enterpriseName(enterpriseId) {
-  try {
-    const e = await enterpriseRepo.findById(enterpriseId);
-    return e?.Enterprise_dsc || `empresa-${enterpriseId}`;
-  } catch {
-    return `empresa-${enterpriseId}`;
-  }
-}
-
-// Fabrica el handler de una tarjeta.
-//   tarjeta: nombre para el archivo CSV
-//   params:  (req) => parámetros propios de la tarjeta
-//   fetch:   (filtros, params) => filas
-//   columns: columnas del CSV { key, header }
-function cardHandler({ tarjeta, params = () => ({}), fetch, columns }) {
-  return async (req, res) => {
-    try {
-      const filtros = resolveFilters(req, PANTALLA);
-      const extra   = params(req);
-      const data    = await fetch(filtros, extra);
-
-      if (wantsCsv(req)) {
-        const nombreTarjeta = typeof tarjeta === 'function' ? tarjeta(extra) : tarjeta;
-        const filename = buildCsvFilename({
-          pantalla: PANTALLA,
-          tarjeta:  nombreTarjeta,
-          empresa:  await enterpriseName(filtros.enterpriseId),
-          desde:    filtros.desde,
-          hasta:    filtros.hasta,
-        });
-        return await sendCsv(res, { filename, columns, rows: data });
-      }
-
-      return res.json({ success: true, filtros: { ...filtros, ...extra }, data });
-    } catch (err) {
-      return handleError(res, err);
-    }
-  };
-}
+// Todas las tarjetas de esta pantalla usan los filtros de 'cumplimiento'.
+const cardHandler = (opts) => baseCardHandler({ pantalla: PANTALLA, ...opts });
 
 const tendencia = cardHandler({
   tarjeta: (p) => `tendencia-${p.agrupar}`,
