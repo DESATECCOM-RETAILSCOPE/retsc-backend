@@ -22,5 +22,6 @@ const router     = express.Router();
 router.use('/cumplimiento', require('./dashboardCumplimientoRoutes'));
 router.use('/opciones', require('./dashboardOpcionesRoutes'));
 router.use('/resumen', require('./dashboardResumenRoutes'));
+router.use('/catalogo', require('./dashboardCatalogoRoutes'));
 
 module.exports = router;
