@@ -1,3 +1,12 @@
+-- ============================================================================
+-- OBSOLETA (28-oct-2026): NO APLICAR.
+-- La tabla RETSC_LOG_DASHBOARD_SNAPSHOTS solo la usaba el dashboard provisorio
+-- (GET /api/dashboard, dashboardRepo.js), que se retiró en el commit d1507b5.
+-- Las pantallas nuevas del Dashboard web (/api/dashboard/resumen, cumplimiento,
+-- catalogo y modelo) no usan esta tabla. El archivo se conserva como historial;
+-- su eliminación queda a decisión de Jimmy (autor) y María.
+-- ============================================================================
+
 -- Crea RETSC_LOG_DASHBOARD_SNAPSHOTS: un snapshot diario de los números del
 -- dashboard (Issue B7 follow-up — tendencias/históricos). Sin esta tabla no hay
 -- con qué comparar para calcular "+12% vs. hace 30 días" — GET /api/dashboard
