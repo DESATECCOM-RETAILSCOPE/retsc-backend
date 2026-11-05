@@ -9,7 +9,7 @@
     "backfill:smart-categories": "node scripts/backfill-smart-categories.js"
   },
   "engines": {
-    "node": ">=20.19"
+    "node": ">=22.13"
   },
   "dependencies": {
     "@azure/storage-blob": "^12.31.0",

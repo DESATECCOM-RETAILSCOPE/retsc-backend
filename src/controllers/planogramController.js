@@ -11,10 +11,12 @@ function handleError(res, err) {
   return res.status(status).json({ success: false, message: err.message, ...(err.errorCode && { errorCode: err.errorCode }) });
 }
 
+// Planogram_seq es IDENTITY: puede valer 0 (en QA la tabla quedó numerando desde 0), así que
+// se valida "entero >= 0" — no `!n`, que rechazaba el planograma 0.
 const parseSeq = (v) => {
-  const n = parseInt(v, 10);
-  if (!n) throw Object.assign(new Error('Planogram_seq inválido.'), { statusCode: 400 });
-  return n;
+  const s = String(v ?? '').trim();
+  if (!/^\d+$/.test(s)) throw Object.assign(new Error('Planogram_seq inválido.'), { statusCode: 400 });
+  return Number(s);
 };
 
 // GET /api/planograms/catalogos — cadenas y tiendas para el formulario de carga.

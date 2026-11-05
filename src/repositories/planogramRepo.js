@@ -170,7 +170,7 @@ const aprobarPlanograma = async ({ seq, enterpriseId, filas }) => {
 
 // Herramienta de reporte (scripts/): sin filtro de empresa.
 const findBySeqs = async (seqs) => {
-  const ids = [...new Set((seqs ?? []).map(Number).filter(Boolean))];
+  const ids = [...new Set((seqs ?? []).map(Number).filter((n) => Number.isInteger(n) && n >= 0))];   // 0 es válido
   if (!ids.length) return [];
   const pool = await getPool();
   const req = pool.request();

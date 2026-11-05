@@ -219,3 +219,27 @@ test('reinterpretar: vuelve a correr sobre el PDF guardado; solo BORRADOR y solo
   const img = load({ planograma: { Planogram_seq: 7, Status: 'BORRADOR', URL_picture: 'a/b/c.png' } });
   await assert.rejects(img.svc.reinterpretar(7, 2), (e) => e.errorCode === 'ERR_NO_ES_PDF');
 });
+
+// ── Planogram_seq = 0 (IDENTITY que numera desde 0, caso real de QA) ─────────
+test('controller: el planograma 0 es válido; texto, negativo o vacío → 400 "Planogram_seq inválido."', async () => {
+  const vistos = [];
+  stub(SRC('services/planogramService.js'), { getPropuesta: async (seq) => { vistos.push(seq); return { estado: 'LISTO' }; } });
+  stub(SRC('repositories/planogramRepo.js'), {});
+  delete require.cache[SRC('controllers/planogramController.js')];
+  const c = require(SRC('controllers/planogramController.js'));
+  const llamar = async (seq) => {
+    const res = { code: 200, body: null, status(n) { this.code = n; return this; }, json(b) { this.body = b; return this; }, set() { return this; } };
+    await c.getPropuesta({ params: { seq }, user: { enterpriseId: 2 } }, res);
+    return res;
+  };
+  let r = await llamar('0');
+  assert.equal(r.code, 200);
+  assert.deepEqual(vistos, [0], 'llega como número 0 al servicio');
+  for (const malo of ['undefined', 'skus', '-1', '1.5', '']) {
+    r = await llamar(malo);
+    assert.equal(r.code, 400, `"${malo}" → 400`);
+    assert.equal(r.body.message, 'Planogram_seq inválido.');
+  }
+  delete require.cache[SRC('services/planogramService.js')];
+  delete require.cache[SRC('repositories/planogramRepo.js')];
+});
