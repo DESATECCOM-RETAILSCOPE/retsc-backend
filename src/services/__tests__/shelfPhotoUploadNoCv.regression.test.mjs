@@ -24,7 +24,7 @@ function installStubs() {
   stub('../utils/categoryNameNormalizer', { normalizeName: (s) => s.toLowerCase().replace(/\s+/g, '-') });
   stub('../repositories/categoryRepo', { findById: async () => ({ Category_dsc: 'Desodorantes Corporales', is_smart_dtc: 1 }) });
   stub('../repositories/shelfPhotoRepo', { findByHashGlobal: () => { throw new Error('no tocar RETSC_EX_SHELFPHOTO'); } });
-  stub('../repositories/trainingPhotoRepo', { findByHashAndCanal: async () => null, insert: async (row) => { calls.trainingInsert.push(row); return { photo_id: 1000 }; }, countValidatedApprovedByCategoryChannel: async () => 0 });
+  stub('../repositories/trainingPhotoRepo', { findByHashAndCategory: async () => null, insert: async (row) => { calls.trainingInsert.push(row); return { photo_id: 1000 }; }, countValidatedApprovedByCategoryChannel: async () => 0 });
   stub('../repositories/aiModelRepo', { findByCategoryId: async () => null, updateStatus: async () => {} });
 }
 function loadFresh() { delete require.cache[abs('./shelfPhotoUploadService')]; return require(abs('./shelfPhotoUploadService')); }

@@ -23,6 +23,12 @@ const REPO_DIR = path.join(process.cwd(), 'src', 'repositories');
 const absSvc  = (p) => require.resolve(path.join(SVC_DIR, p));
 const absRepo = (p) => require.resolve(path.join(REPO_DIR, p));
 
+// Ciclo 5 (A4): la publicación lee el Resource ID de predicción del .env (formato ARM válido) y
+// el polling usa CV_POLL_INTERVAL_MS (corto en tests en vez de 30 s).
+const PRED_RES_ID = '/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.CognitiveServices/accounts/cvrscopeaiprod-Prediction';
+process.env.CUSTOM_VISION_PREDICTION_RESOURCE_ID = PRED_RES_ID;
+process.env.CV_POLL_INTERVAL_MS = '5';
+
 function stub(absPath, exports) {
   require.cache[absPath] = { id: absPath, filename: absPath, loaded: true, exports };
 }
@@ -113,10 +119,11 @@ test('cadena automática completa: umbral → train → poll → publish → PUB
     // cubierto por el código preexistente), solo que la CADENA hasta PUBLISHED se ejecuta sola.
     getIteration: async () => ({ status: 'Completed' }),
     getIterationPerformance: async () => ({ precision: 0.9, recall: 0.85, averagePrecision: 0.88 }),
-    publishIteration: async () => true,
+    publishIteration: async (_p, _it, _name, resId) => { calls.publishResId = resId; return true; },
   });
 
   stub(absRepo('aiModelRepo'), {
+    updatePredictionResourceId: async (id, res) => { calls.updatePredictionResourceId = { id, res }; },
     findByCategoryId: async () => model,
     findById: async (id) => (id === model.detection_model_id ? model : null),
     updateStatus: async (id, status) => { calls.updateStatus.push({ id, status }); model.status = status; },
@@ -156,4 +163,6 @@ test('cadena automática completa: umbral → train → poll → publish → PUB
   assert.ok(calls.setActiveVersion.length >= 1, 'debe llamar a setActiveVersion — el paso que realmente marca PUBLISHED');
   assert.equal(calls.setTrainingError.length, 0, 'la publicación no debe haber fallado');
   assert.equal(model.status, 'PUBLISHED', 'el modelo debe terminar en PUBLISHED sin ningún paso manual');
+  assert.equal(calls.publishResId, PRED_RES_ID, 'ciclo 5 (A4): publica con el Resource ID del .env, no con el de la fila (res-2)');
+  assert.deepEqual(calls.updatePredictionResourceId, { id: 5, res: PRED_RES_ID }, 'y lo deja grabado en la fila');
 });

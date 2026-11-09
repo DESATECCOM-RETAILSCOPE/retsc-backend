@@ -147,7 +147,7 @@ async function llamarPredict(url, imagenBuffer) {
 /**
  * Filtra por umbral de confianza y mapea al formato de RETSC_EX_SHELFPHOTO_DETECTION.
  *
- * NOTA sobre 'tagName': Custom Vision devuelve el tag (hoy el canal, ej. 'OMT'), pero el
+ * NOTA sobre 'tagName': Custom Vision devuelve el tag (la categoría, ej. 'DESODORANTES_CORPORALES'), pero el
  * pipeline de visita lo ignora deliberadamente. La categoría sale de
  * RETSC_EX_SHELFPHOTO.CATEGORY_ID y el canal se deriva del Retailer_id. Así el pipeline
  * no depende de cómo esté configurado el tag en Custom Vision, que es un tema abierto.

@@ -81,6 +81,22 @@ const findByHashAndCanal = async (hash, canal) => {
   return r.recordset[0] ?? null;
 };
 
+// Ciclo 5 (A1): dedup POR CATEGORÍA — reemplaza a findByHashAndCanal en la carga. Con 1 proyecto
+// CV por categoría (A2), la misma foto subida en OMT y en DTT entraría dos veces al mismo
+// proyecto y contaría doble para el umbral de entrenamiento. Devuelve la foto existente
+// (incluye su canal, para el mensaje de error) o null.
+const findByHashAndCategory = async (hash, categoryId) => {
+  const pool = await getPool();
+  const r = await pool.request()
+    .input('categoryId', sql.Int,         categoryId)
+    .input('hash',       sql.VarChar(64), hash)
+    .query(`
+      SELECT TOP 1 * FROM ${TABLE}
+      WHERE category_id = @categoryId AND image_hash = @hash
+    `);
+  return r.recordset[0] ?? null;
+};
+
 // Inserta la foto recién subida. Estado inicial 'EN_PROGRESO' (sin cajitas todavía —
 // Issue #42, equipo de anotación, todavía no vive en este repo).
 const insert = async ({
@@ -233,7 +249,7 @@ const approvePhoto = async (photoId, reviewerId) => {
 };
 
 // Cuenta fotos APROBADAS por categoría/canal (Etapa 8 de shelfPhotoUploadService +
-// annotationSyncService.checkAndUpdateThreshold). Antes vivía en annotationRepo contando
+// annotationSyncService.evaluarEntrenamiento). Antes vivía en annotationRepo contando
 // DISTINCT photo_id con is_validated=1 AND photo_approved=1 sobre las anotaciones; ahora
 // categoría/canal/estado son nativos de esta tabla, no hace falta tocar anotaciones.
 const countValidatedApprovedByCategoryChannel = async (categoryId, canal) => {
@@ -270,6 +286,32 @@ const countSyncedSinceByCategoryChannel = async (categoryId, canal, sinceDate) =
       FROM ${TABLE}
       WHERE category_id = @categoryId AND canal = @canal AND cv_sync_status = 'SYNCED'
         AND (@since IS NULL OR created_at > @since)
+    `);
+  return r.recordset[0].n;
+};
+
+// Ciclo 5 (A3) — conteo para el disparo automático de entrenamiento, POR CATEGORÍA (suma
+// todos los canales: desde A2 hay un solo proyecto/tag de Custom Vision por categoría).
+// Reemplaza a countSyncedSinceByCategoryChannel en evaluarEntrenamiento().
+//
+// Cuenta fotos APROBADAS y SINCRONIZADAS. Con `sinceDate` (= model.trained_at, reentrenamiento)
+// solo las aprobadas DESPUÉS del último entrenamiento: se compara `reviewed_at` (fecha de
+// aprobación, que es cuando la foto se sincroniza a CV) y NO `created_at` (fecha de subida) —
+// con created_at, una foto subida antes del entrenamiento pero aprobada después nunca contaba
+// para el siguiente. reviewed_at y trained_at se graban ambos con GETDATE() en la misma BD
+// (Azure SQL → UTC), así que la comparación es consistente.
+const countSyncedSinceByCategory = async (categoryId, sinceDate) => {
+  const pool = await getPool();
+  const r = await pool.request()
+    .input('categoryId', sql.Int,      categoryId)
+    .input('since',      sql.DateTime, sinceDate ?? null)
+    .query(`
+      SELECT COUNT(*) AS n
+      FROM ${TABLE}
+      WHERE category_id = @categoryId
+        AND photo_status = 'APROBADA'
+        AND cv_sync_status = 'SYNCED'
+        AND (@since IS NULL OR reviewed_at > @since)
     `);
   return r.recordset[0].n;
 };
@@ -390,9 +432,11 @@ module.exports = {
   reject,
   findById,
   findByHashAndCanal,
+  findByHashAndCategory,
   insert,
   listPhotos,
   countSyncedSinceByCategoryChannel,
+  countSyncedSinceByCategory,
   getPhotoWithRegions,
   approvePhoto,
   countValidatedApprovedByCategoryChannel,

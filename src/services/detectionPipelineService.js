@@ -23,7 +23,7 @@
 
 const shelfPhotoDetectionRepo = require('../repositories/shelfPhotoDetectionRepo');
 const detectionPipelineLogRepo = require('../repositories/detectionPipelineLogRepo');
-const customVisionPredictService = require('./customVisionPredictService');
+const modelProvider              = require('./modelProvider'); // ciclo 5 (A4): único acceso a Custom Vision
 const productIdentificationService = require('./productIdentificationService');
 const { filtrarDuplicadosContenidos } = require('./duplicateDetectionFilter');
 
@@ -47,7 +47,7 @@ async function processPhotoDetection(photoId, buffer, categoryId) {
   const inicio = Date.now();
   let resultado;
   try {
-    resultado = await customVisionPredictService.predecirFoto(buffer, categoryId, photoId);
+    resultado = await modelProvider.predecir(buffer, categoryId, photoId);
   } catch (err) {
     console.warn(
       `[detectionPipeline] Photo_id=${photoId} — no se pudo predecir (${err.code || 'ERROR'}): ${err.message}` +

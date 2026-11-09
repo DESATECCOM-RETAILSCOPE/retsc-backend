@@ -36,10 +36,22 @@ const CANALES_VALIDOS = ['OMT', 'DTT', 'CONVENIENCE'];
 // llevaría un timeout del proxy con parte del trabajo ya hecho.
 const MAX_BATCH_APPROVE = 50;
 
+// Ciclo 5 (A1): límite de Custom Vision — máx. 300 regiones (cajitas) por imagen. Una foto con
+// más no se puede sincronizar, así que se frena en la aprobación con un error claro.
+const MAX_CAJITAS_CV = 300;
+const countBoxes = (photo) => (photo?.regions ?? []).filter(r => r.bbox_left != null).length;
+function tooManyBoxesError(photoId, n) {
+  return Object.assign(
+    new Error(`La foto ${photoId} tiene ${n} cajitas y Custom Vision acepta máximo ${MAX_CAJITAS_CV} por imagen. Eliminá o uní cajitas antes de aprobar.`),
+    { statusCode: 409, errorCode: 'ERR_DEMASIADAS_CAJITAS' }
+  );
+}
+
 function handleError(res, err) {
   const status = err.statusCode || 500;
   if (status === 500) console.error('[annotation]', err);
-  return res.status(status).json({ success: false, message: err.message });
+  // errorCode (si existe) viaja al front para que muestre un mensaje específico (ciclo 5).
+  return res.status(status).json({ success: false, message: err.message, ...(err.errorCode && { errorCode: err.errorCode }) });
 }
 
 function parseId(value, label) {
@@ -182,6 +194,14 @@ const approvePhoto = async (req, res) => {
   try {
     const photoId = parseId(req.params.photoId, 'Photo ID');
     const clienteAjustoCajitas = req.body?.clienteAjustoCajitas !== false;
+
+    // Ciclo 5 (A1): validar el límite de cajitas ANTES de aprobar.
+    const withRegions = await trainingPhotoRepo.getPhotoWithRegions(photoId);
+    if (!withRegions) {
+      return res.status(404).json({ success: false, message: `Foto ${photoId} no encontrada.` });
+    }
+    const nBoxes = countBoxes(withRegions);
+    if (nBoxes > MAX_CAJITAS_CV) throw tooManyBoxesError(photoId, nBoxes);
 
     const photo = await trainingPhotoRepo.approvePhoto(photoId, req.user.userId);
     if (!photo) {
@@ -366,16 +386,40 @@ const approvePhotosBatch = async (req, res) => {
     const fallidas  = [];
     const categorias = new Set();
 
+    // Ciclo 5 (A1): un lote = UN canal y UNA categoría. Se cargan todas las fotos ANTES de
+    // aprobar nada; si el lote mezcla, se rechaza entero (400) sin tocar ninguna foto.
+    const loaded = new Map();
+    for (const raw of ids) {
+      const photoId = parseInt(raw, 10);
+      if (!isNaN(photoId) && !loaded.has(photoId)) {
+        loaded.set(photoId, await trainingPhotoRepo.getPhotoWithRegions(photoId));
+      }
+    }
+    const found = [...loaded.values()].filter(Boolean);
+    const canalesLote     = [...new Set(found.map(p => p.canal))];
+    const categoriasLote  = [...new Set(found.map(p => p.dtc_category_id))];
+    if (canalesLote.length > 1 || categoriasLote.length > 1) {
+      return res.status(400).json({
+        success: false,
+        errorCode: 'ERR_LOTE_MEZCLADO',
+        message: 'Un lote de aprobación debe ser de un solo canal y una sola categoría. Filtrá por canal y categoría y volvé a intentar.',
+        canales: canalesLote,
+        categorias: categoriasLote,
+      });
+    }
+
     for (const raw of ids) {
       const photoId = parseInt(raw, 10);
       try {
         if (isNaN(photoId)) throw Object.assign(new Error('id inválido'), { statusCode: 400 });
 
-        const photo = await trainingPhotoRepo.getPhotoWithRegions(photoId);
+        const photo = loaded.get(photoId);
         if (!photo) throw Object.assign(new Error('no encontrada'), { statusCode: 404 });
-        if (!(photo.regions ?? []).some(r => r.bbox_left != null)) {
+        const nBoxes = countBoxes(photo);
+        if (nBoxes === 0) {
           throw Object.assign(new Error('no tiene ninguna cajita'), { statusCode: 409 });
         }
+        if (nBoxes > MAX_CAJITAS_CV) throw tooManyBoxesError(photoId, nBoxes);
 
         await trainingPhotoRepo.approvePhoto(photoId, req.user.userId);
         await annotationRepo.validateAllByPhoto(photoId);
@@ -386,7 +430,10 @@ const approvePhotosBatch = async (req, res) => {
           skipThresholdCheck: true,
         });
 
-        categorias.add(photo.category_id);
+        // FIX ciclo 5: getPhotoWithRegions() devuelve la categoría como `dtc_category_id`, no
+        // `category_id`. Antes quedaba undefined → checkAndUpdateThreshold(undefined) no encontraba
+        // modelo y la aprobación masiva NUNCA disparaba el entrenamiento (incidentes 27 y 29-ago).
+        categorias.add(photo.dtc_category_id);
         aprobadas.push(photoId);
       } catch (err) {
         console.warn(`[annotation] lote: foto ${photoId} falló — ${err.message}`);
@@ -396,8 +443,9 @@ const approvePhotosBatch = async (req, res) => {
 
     // UNA verificación de umbral por categoría, no una por foto.
     for (const categoryId of categorias) {
-      await annotationSyncService.checkAndUpdateThreshold(categoryId)
-        .catch(err => console.error(`[annotation] verificación de umbral falló (categoria=${categoryId}):`, err.message));
+      // evaluarEntrenamiento nunca lanza (ciclo 5, A3) — el catch queda como red de seguridad.
+      await annotationSyncService.evaluarEntrenamiento(categoryId)
+        .catch(err => console.error(`[annotation] evaluación de entrenamiento falló (categoria=${categoryId}):`, err.message));
     }
 
     return res.json({

@@ -26,7 +26,7 @@ const abs = (p) => require.resolve(path.join(SVC_DIR, p));
 
 let calls;
 function resetCalls() {
-  calls = { updateCvSync: [], updateCvRegionId: [], createImageRegions: [], updateStatus: [] };
+  calls = { updateCvSync: [], updateCvRegionId: [], createImageRegions: [], updateStatus: [], ensureTag: [], retryForCategory: [] };
 }
 
 // bbox_left único por id (en vez de un valor fijo compartido) para que coordsMatch() pueda
@@ -40,7 +40,7 @@ function makeAnnotation(id, hasCvRegion) {
   };
 }
 
-function installStubs({ annotations, model = null, createImageRegionsBehavior = 'normal' }) {
+function installStubs({ annotations, model = null, createImageRegionsBehavior = 'normal', modelAfterRetry }) {
   const stub = (relPath, exports) => { const id = abs(relPath); require.cache[id] = { id, filename: id, loaded: true, exports }; };
 
   stub('../repositories/annotationRepo', {
@@ -55,14 +55,25 @@ function installStubs({ annotations, model = null, createImageRegionsBehavior = 
     }),
     updateCvSync: async (photoId, { syncStatus, syncError }) => { calls.updateCvSync.push({ photoId, syncStatus, syncError }); return {}; },
     countSyncedSinceByCategoryChannel: async () => 0,
+    countSyncedSinceByCategory: async () => 0,
+  });
+  // modelAfterRetry: simula que retryForCategory() creó el proyecto CV (A2.4) — la 2.ª lectura
+  // del modelo devuelve el modelo ya provisionado.
+  let modelReads = 0;
+  stub('./aiInfrastructureService', {
+    retryForCategory: async (categoryId) => { calls.retryForCategory.push(categoryId); return { status: 'PROVISIONED', errors: [] }; },
   });
   stub('../repositories/aiModelRepo', {
-    findByCategoryId: async () => model,
+    findByCategoryId: async () => (modelAfterRetry !== undefined && modelReads++ > 0 ? modelAfterRetry : model),
     updateStatus: async (id, status) => { calls.updateStatus.push({ id, status }); },
   });
+  stub('../repositories/categoryRepo', {
+    findById: async (id) => ({ Category_id: id, Category_dsc: 'Desodorantes Corporales' }),
+  });
+  stub('./configService', { getNumberConfig: async (_k, fallback) => fallback });
   stub('./customVisionService', {
     isConfigured: () => true,
-    ensureTag: async (_projectId, canal) => ({ id: `tag-${canal}` }),
+    ensureTag: async (_projectId, tagName) => { calls.ensureTag.push(tagName); return { id: `tag-${tagName}` }; },
     listTags: async () => [],
     deleteTag: async () => {},
     createImageRegions: async (_projectId, regions, opts) => {
@@ -157,4 +168,46 @@ test('fallo de lote parcial (F1.1/Fase 2): lo confirmado ANTES del fallo se pers
   assert.equal(calls.updateCvSync.length, 1);
   assert.equal(calls.updateCvSync[0].syncStatus, 'ERROR', 'la foto no puede quedar SYNCED si una cajita real quedó sin confirmar');
   assert.equal(result.synced, true); // syncApprovedPhoto no lanza — el fallo se registra en cv_sync_status, no como excepción
+});
+
+test('A2 (ciclo 5): el tag de Custom Vision es la CATEGORÍA, no el canal', async () => {
+  resetCalls();
+  installStubs({
+    annotations: [makeAnnotation(20, false)],
+    model: { detection_model_id: 1, customvision_project_id: 'proj-123', status: 'PROJECT_CREATED', trained_at: null },
+  });
+  const { syncApprovedPhoto } = loadServiceFresh();
+
+  await syncApprovedPhoto(99, {}); // la foto stub es canal 'OMT'
+
+  assert.deepEqual(calls.ensureTag, ['DESODORANTES_CORPORALES'], 'el tag debe ser la categoría normalizada');
+  assert.ok(!calls.ensureTag.includes('OMT'), 'el canal no debe viajar a Custom Vision');
+});
+
+test('A2.4 (ciclo 5): categoría sin proyecto CV → se provisiona en la primera aprobación y la foto se sincroniza', async () => {
+  resetCalls();
+  installStubs({
+    annotations: [makeAnnotation(30, false)],
+    model: { detection_model_id: 5, customvision_project_id: null, status: 'PENDING', trained_at: null },
+    modelAfterRetry: { detection_model_id: 5, customvision_project_id: 'proj-nuevo', status: 'PROJECT_CREATED', trained_at: null },
+  });
+  const { syncApprovedPhoto } = loadServiceFresh();
+
+  await syncApprovedPhoto(101, {});
+
+  assert.deepEqual(calls.retryForCategory, [2], 'debe reintentar el provisioning de la categoría de la foto');
+  assert.equal(calls.createImageRegions.length, 1, 'con el proyecto recién creado, las cajitas deben subir a Custom Vision');
+});
+
+test('A2.4: si la categoría YA tiene proyecto CV, no se reintenta el provisioning', async () => {
+  resetCalls();
+  installStubs({
+    annotations: [makeAnnotation(31, false)],
+    model: { detection_model_id: 1, customvision_project_id: 'proj-123', status: 'PROJECT_CREATED', trained_at: null },
+  });
+  const { syncApprovedPhoto } = loadServiceFresh();
+
+  await syncApprovedPhoto(102, {});
+
+  assert.equal(calls.retryForCategory.length, 0);
 });

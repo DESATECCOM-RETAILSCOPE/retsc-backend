@@ -7,7 +7,7 @@ import path from 'node:path';
 // FIX 2026-08-12 (dos fixes de la misma tanda):
 //   1. El flujo NO debe tocar RETSC_EX_SHELFPHOTO (tabla de EJECUCIÓN de otro equipo). El
 //      dedup se hace 100% contra RETSC_AI_TRAINING_PHOTOS (columna image_hash propia vía
-//      findByHashAndCanal).
+//      findByHashAndCategory — ciclo 5, antes findByHashAndCanal).
 //   2. La subida ya NO registra la imagen en Custom Vision (Etapa 6 eliminada) — eso pasa al
 //      sincronizar la anotación aprobada (ver shelfPhotoUploadNoCv.regression.test.mjs para el
 //      test dedicado a esto). Acá solo se ajustó el stub de customVisionService para que tire
@@ -21,7 +21,7 @@ const abs = (p) => require.resolve(path.join(SVC_DIR, p));
 let calls;
 function resetCalls() { calls = { uploadToContainer: [], trainingInsert: [], shelfPhotoRepoCalled: false, cvCalled: false }; }
 
-function installStubs({ hashInThisChannel = null } = {}) {
+function installStubs({ existingInCategory = null } = {}) {
   const stub = (relPath, exports) => { const id = abs(relPath); require.cache[id] = { id, filename: id, loaded: true, exports }; };
   stub('./shelfPhotoQualityService', { validateQualityMetrics: async () => ({ accepted: true, hash: 'a'.repeat(64), metrics: { width: 1200, height: 900, sharpness: 0.9, brightness: 0.5 } }) });
   stub('./azureVisionService', { analyzeCaption: async () => ({ stub: true, confidence: 1 }), isShelf: async () => ({ stub: true, isShelf: true }) });
@@ -34,13 +34,13 @@ function installStubs({ hashInThisChannel = null } = {}) {
   // Guardia: si el flujo vuelve a tocar RETSC_EX_SHELFPHOTO, cualquier método marca el flag y tira.
   const boom = () => { calls.shelfPhotoRepoCalled = true; throw new Error('El flujo NO debe tocar RETSC_EX_SHELFPHOTO'); };
   stub('../repositories/shelfPhotoRepo', { findByHashGlobal: boom, findByHash: boom, insert: boom });
-  stub('../repositories/trainingPhotoRepo', { findByHashAndCanal: async () => hashInThisChannel, insert: async (row) => { calls.trainingInsert.push(row); return { photo_id: 1000 }; }, countValidatedApprovedByCategoryChannel: async () => 0 });
+  stub('../repositories/trainingPhotoRepo', { findByHashAndCategory: async () => existingInCategory, insert: async (row) => { calls.trainingInsert.push(row); return { photo_id: 1000 }; }, countValidatedApprovedByCategoryChannel: async () => 0 });
   stub('../repositories/aiModelRepo', { findByCategoryId: async () => null, updateStatus: async () => {} });
 }
 function loadServiceFresh() { delete require.cache[abs('./shelfPhotoUploadService')]; return require(abs('./shelfPhotoUploadService')); }
 
 test('imagen nueva → sube el blob a /omt/, graba en TRAINING_PHOTOS y NO toca RETSC_EX_SHELFPHOTO', async () => {
-  resetCalls(); installStubs({ hashInThisChannel: null });
+  resetCalls(); installStubs({ existingInCategory: null });
   const { uploadShelfPhoto } = loadServiceFresh();
   const res = await uploadShelfPhoto({ buffer: Buffer.from('x'), dtcCategoryId: 42, canal: 'OMT', uploadedBy: 44, enterpriseId: 35 });
   assert.equal(calls.uploadToContainer.length, 1);
@@ -52,17 +52,19 @@ test('imagen nueva → sube el blob a /omt/, graba en TRAINING_PHOTOS y NO toca 
   assert.equal(calls.cvCalled, false, 'no debe registrar en Custom Vision al subir');
 });
 
-test('misma imagen ya en OTRO canal (DTT) → se sube igual a /omt/ sin tocar RETSC_EX_SHELFPHOTO', async () => {
-  resetCalls(); installStubs({ hashInThisChannel: null }); // no existe para OMT
+test('CICLO 5 (A1): misma imagen ya en OTRO canal (DTT) de la MISMA categoría → 409 y no sube nada', async () => {
+  resetCalls(); installStubs({ existingInCategory: { photo_id: 54, canal: 'DTT' } });
   const { uploadShelfPhoto } = loadServiceFresh();
-  const res = await uploadShelfPhoto({ buffer: Buffer.from('x'), dtcCategoryId: 42, canal: 'OMT', uploadedBy: 44, enterpriseId: 35 });
-  assert.equal(calls.uploadToContainer.length, 1);
-  assert.match(res.blobPath, /\/omt\//);
+  await assert.rejects(
+    () => uploadShelfPhoto({ buffer: Buffer.from('x'), dtcCategoryId: 42, canal: 'OMT', uploadedBy: 44, enterpriseId: 35 }),
+    (err) => err.statusCode === 409 && err.errorCode === 'ERR_DUPLICATE_IMAGE' && err.existingCanal === 'DTT'
+  );
+  assert.equal(calls.uploadToContainer.length, 0);
   assert.equal(calls.shelfPhotoRepoCalled, false);
 });
 
 test('duplicado exacto en el MISMO canal → 409 y no sube nada', async () => {
-  resetCalls(); installStubs({ hashInThisChannel: { photo_id: 55 } });
+  resetCalls(); installStubs({ existingInCategory: { photo_id: 55, canal: 'OMT' } });
   const { uploadShelfPhoto } = loadServiceFresh();
   await assert.rejects(
     () => uploadShelfPhoto({ buffer: Buffer.from('x'), dtcCategoryId: 42, canal: 'OMT', uploadedBy: 44, enterpriseId: 35 }),

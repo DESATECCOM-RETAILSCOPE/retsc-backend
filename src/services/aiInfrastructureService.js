@@ -31,7 +31,7 @@ const categoryRepo              = require('../repositories/categoryRepo');
 const globalBlobContainerRepo   = require('../repositories/globalBlobContainerRepo');
 const aiModelRepo               = require('../repositories/aiModelRepo');
 const blobStorageService        = require('./blobStorageService');
-const customVisionService       = require('./customVisionService');
+const modelProvider             = require('./modelProvider'); // ciclo 5 (A4): único acceso a Custom Vision
 const { normalizeName }         = require('../utils/categoryNameNormalizer');
 
 const CANALES = ['omt', 'dtt', 'convenience'];
@@ -188,9 +188,9 @@ const provisionForCategory = async ({ categoryId, categoryName }) => {
   });
 
   // 6. Custom Vision (stub: siempre devuelve null hasta que lleguen las credenciales)
-  if (customVisionService.isConfigured()) {
+  if (modelProvider.estaConfigurado()) {
     try {
-      const project = await customVisionService.createProject(`${prefix}-v1`);
+      const project = await modelProvider.crearProyecto(`${prefix}-v1`);
       if (project) {
         await aiModelRepo.updateCustomVisionRefs(model.detection_model_id, {
           customvisionProjectId: project.id,
@@ -258,9 +258,9 @@ const retryForCategory = async (categoryId) => {
   await provisionShelfPrefixesForCategory({ categoryId, slug, errors });
 
   // Reintentar Custom Vision si el modelo sigue PENDING
-  if (existingModel.status === 'PENDING' && customVisionService.isConfigured()) {
+  if (existingModel.status === 'PENDING' && modelProvider.estaConfigurado()) {
     try {
-      const project = await customVisionService.createProject(`${prefix}-v1`);
+      const project = await modelProvider.crearProyecto(`${prefix}-v1`);
       if (project) {
         await aiModelRepo.updateCustomVisionRefs(existingModel.detection_model_id, {
           customvisionProjectId: project.id,

@@ -20,7 +20,7 @@
 //     (setApproval() eliminado de este repo; approveVersion/rejectVersion eliminados de
 //     modelVersioningService.js). La spec v1.4 exige publicación 100% automática, sin gate de
 //     métricas ni aprobación manual — cableado en modelTrainingService.handleTrainingCompleted()
-//     y annotationSyncService.checkAndUpdateThreshold() (disparo automático por umbral, 4.3).
+//     y annotationSyncService.evaluarEntrenamiento() (disparo automático por umbral, 4.3).
 //   trained_at                DATETIME      NULL
 //   created_at                DATETIME      NULL
 //   model_version             INT           NULL
@@ -179,6 +179,24 @@ const updateStatus = async (detectionModelId, status) => {
   return r.recordset[0] ?? null;
 };
 
+// Ciclo 5 (A3) — "toma" el modelo para entrenar de forma ATÓMICA: pasa a IMAGES_UPLOADED solo
+// si NO estaba ya en TRAINING/IMAGES_UPLOADED. Devuelve true si esta llamada lo tomó.
+// Reemplaza el leer-estado-y-después-actualizar de antes, que dejaba una ventana donde dos
+// aprobaciones casi simultáneas veían el modelo libre y disparaban DOS entrenamientos (costo).
+// Con un solo UPDATE condicional, SQL Server garantiza que solo una de las dos gana.
+const claimForTraining = async (detectionModelId) => {
+  const pool = await getPool();
+  const r = await pool.request()
+    .input('id', sql.Int, detectionModelId)
+    .query(`
+      UPDATE ${TABLE}
+      SET status = 'IMAGES_UPLOADED'
+      WHERE detection_model_id = @id
+        AND status NOT IN ('TRAINING', 'IMAGES_UPLOADED')
+    `);
+  return r.rowsAffected[0] === 1;
+};
+
 // ─── Versioning y re-entrenamiento (Issue 8.5) ────────────────────────────────
 
 // Devuelve un modelo por su PK.
@@ -241,20 +259,46 @@ const saveMetrics = async (detectionModelId, { precisionScore, recallScore, mean
 // suficiente. Si se requiriera atomicidad estricta ante concurrencia, envolver en una
 // transacción mssql.
 const setActiveVersion = async (categoryId, detectionModelId) => {
+  // Ciclo 5 (A4) — UN SOLO UPDATE atómico. Antes eran dos (desactivar todas → activar una): si
+  // el segundo fallaba, la categoría quedaba SIN modelo activo, y entre ambos había una ventana
+  // con 0 activos (docs/BUG-is_active-no-unico.md). Así nunca hay 0 ni 2 filas activas, y es
+  // compatible con el índice único filtrado de migrations/018.
   const pool = await getPool();
-  await pool.request()
-    .input('categoryId', sql.Int, categoryId)
-    .query(`UPDATE ${TABLE} SET is_active = 0 WHERE category_id = @categoryId`);
-
   const r = await pool.request()
-    .input('id', sql.Int, detectionModelId)
+    .input('categoryId', sql.Int, categoryId)
+    .input('id',         sql.Int, detectionModelId)
     .query(`
       UPDATE ${TABLE}
-      SET is_active = 1, status = 'PUBLISHED'
+      SET is_active = CASE WHEN detection_model_id = @id THEN 1 ELSE 0 END,
+          status    = CASE WHEN detection_model_id = @id THEN 'PUBLISHED' ELSE status END
       OUTPUT INSERTED.*
-      WHERE detection_model_id = @id
+      WHERE category_id = @categoryId
     `);
-  return r.recordset[0] ?? null;
+  return r.recordset.find(row => row.detection_model_id === detectionModelId) ?? null;
+};
+
+// Ciclo 5 (A4) — al publicar se graba el Resource ID de predicción que se USÓ (leído del .env),
+// para que la fila refleje la realidad. Nunca se lee de vuelta para publicar.
+const updatePredictionResourceId = async (detectionModelId, predictionResourceId) => {
+  const pool = await getPool();
+  await pool.request()
+    .input('id',  sql.Int,          detectionModelId)
+    .input('res', sql.VarChar(200), predictionResourceId)
+    .query(`UPDATE ${TABLE} SET prediction_resource_id = @res WHERE detection_model_id = @id`);
+};
+
+// Ciclo 5 (A4) — fecha del último error (last_training_error_at, migración 019). UPDATE aparte y
+// best-effort: si la migración 019 no está aplicada, el mensaje de error (last_training_error)
+// se graba igual — solo falta la fecha.
+const setTrainingErrorAtBestEffort = async (detectionModelId, clear = false) => {
+  try {
+    const pool = await getPool();
+    await pool.request()
+      .input('id', sql.Int, detectionModelId)
+      .query(`UPDATE ${TABLE} SET last_training_error_at = ${clear ? 'NULL' : 'SYSUTCDATETIME()'} WHERE detection_model_id = @id`);
+  } catch (err) {
+    console.warn(`[aiModelRepo] no se pudo grabar last_training_error_at (¿falta la migración 019?) — detection_model_id=${detectionModelId}:`, err.message);
+  }
 };
 
 // Cableado 2026-08-03 (flujo automático spec v1.4) — marca `trained_at` de forma
@@ -262,7 +306,7 @@ const setActiveVersion = async (categoryId, detectionModelId) => {
 // migración 006 (precision_score/recall_score/mean_ap/metrics_json), que sigue sin aplicarse
 // en la BD real (ver modelTrainingService.js) — si `saveMetrics()` falla por columna
 // inexistente, `trained_at` nunca avanzaría, y el conteo "+15 fotos desde el último
-// entrenamiento" (annotationSyncService.checkAndUpdateThreshold) quedaría roto (recontaría
+// entrenamiento" (annotationSyncService.evaluarEntrenamiento) quedaría roto (recontaría
 // siempre desde el mismo baseline viejo, re-disparando training en cada foto nueva). Esta
 // función se llama SIEMPRE que un training termina (Completed), tenga o no métricas
 // persistibles.
@@ -290,6 +334,7 @@ const clearTrainingErrorBestEffort = async (detectionModelId) => {
   } catch (err) {
     console.error(`[aiModelRepo] no se pudo limpiar last_training_error (¿falta la migración 009?) — detection_model_id=${detectionModelId}:`, err.message);
   }
+  await setTrainingErrorAtBestEffort(detectionModelId, true);
 };
 
 const markTrained = async (detectionModelId) => {
@@ -345,6 +390,7 @@ const setTrainingErrorBestEffort = async (detectionModelId, errorMessage) => {
   } catch (err) {
     console.error(`[aiModelRepo] no se pudo persistir last_training_error (¿falta la migración 009?) — detection_model_id=${detectionModelId}:`, err.message);
   }
+  await setTrainingErrorAtBestEffort(detectionModelId);
 };
 
 // Variante que NO cambia el status — usada cuando el training SÍ completó pero la publicación
@@ -362,6 +408,7 @@ const setTrainingError = async (detectionModelId, errorMessage) => {
       OUTPUT INSERTED.*
       WHERE detection_model_id = @id
     `);
+  await setTrainingErrorAtBestEffort(detectionModelId);
   return r.recordset[0] ?? null;
 };
 
@@ -394,6 +441,8 @@ const markPublished = async (detectionModelId, { modelVersion, lastPublishName }
 };
 
 module.exports = {
+  claimForTraining,
+  updatePredictionResourceId,
   findByCategoryId,
   findPublishedByCategoryId,
   listAll,

@@ -41,7 +41,14 @@ function normalizeName(name) {
     || 'sin-nombre';
 }
 
-module.exports = { normalizeName };
+// Ciclo 5 (A2): nombre del tag de Custom Vision para una categoría — 1 proyecto = 1 categoría
+// = 1 tag. Ej: "Desodorantes Corporales" → "DESODORANTES_CORPORALES". Lo usan
+// annotationSyncService (al sincronizar) y scripts/a2-migrar-tags-categoria.js (migración).
+function toCvTagName(name) {
+  return normalizeName(name).toUpperCase().replace(/-/g, '_');
+}
+
+module.exports = { normalizeName, toCvTagName };
 
 // ─── Tests de autovalidación (solo al ejecutar directamente) ─────────────────
 // Ejecutar con: node src/utils/categoryNameNormalizer.js

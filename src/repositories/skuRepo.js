@@ -108,6 +108,73 @@ const findSkuByEan = async (ean) => {
   return r.recordset[0] ?? null;
 };
 
+// Ciclo 5 · B3 — búsqueda en lote por EAN (planogramas: ~180 códigos por PDF). Recibe las
+// variantes ya calculadas (con y sin ceros a la izquierda, ver utils/gtin.dbVariants) y consulta
+// en tandas de 500 parámetros (SQL Server admite hasta 2100 por consulta).
+const findSkusByEans = async (eans) => {
+  const unique = [...new Set((eans ?? []).filter(Boolean))];
+  if (!unique.length) return [];
+  const pool = await getPool();
+  const out = [];
+  for (let i = 0; i < unique.length; i += 500) {
+    const chunk = unique.slice(i, i + 500);
+    const req = pool.request();
+    chunk.forEach((e, k) => req.input(`e${k}`, sql.VarChar(18), e));
+    const r = await req.query(`
+      SELECT SKU_ID, EAN, Product_dsc, status
+      FROM RETSC_OP_SKUS
+      WHERE EAN IN (${chunk.map((_, k) => `@e${k}`).join(', ')})
+    `);
+    out.push(...r.recordset);
+  }
+  return out;
+};
+
+// Ciclo 5 · B4 — SKUs por id (validar los que asigna la pantalla de revisión de planogramas).
+const findSkusByIds = async (ids) => {
+  const unique = [...new Set((ids ?? []).map(Number).filter(Boolean))];
+  if (!unique.length) return [];
+  const pool = await getPool();
+  const out = [];
+  for (let i = 0; i < unique.length; i += 500) {
+    const chunk = unique.slice(i, i + 500);
+    const req = pool.request();
+    chunk.forEach((id, k) => req.input(`i${k}`, sql.Int, id));
+    const r = await req.query(`
+      SELECT SKU_ID, EAN, Product_dsc, status
+      FROM RETSC_OP_SKUS
+      WHERE SKU_ID IN (${chunk.map((_, k) => `@i${k}`).join(', ')})
+    `);
+    out.push(...r.recordset);
+  }
+  return out;
+};
+
+// Ciclo 5 · B4 — buscador de la pantalla de revisión de planogramas: por EAN (exacto, con y sin
+// ceros a la izquierda; o que contenga los dígitos) o por descripción (todas las palabras).
+const searchSkus = async ({ eanVariants = [], digits = null, words = [], limit = 20 }) => {
+  const pool = await getPool();
+  const req = pool.request().input('limit', sql.Int, Math.min(Math.max(Number(limit) || 20, 1), 50));
+  const conds = [];
+  if (eanVariants.length) {
+    eanVariants.forEach((e, k) => req.input(`e${k}`, sql.VarChar(18), e));
+    conds.push(`EAN IN (${eanVariants.map((_, k) => `@e${k}`).join(', ')})`);
+  }
+  if (digits) { req.input('digits', sql.VarChar(20), `%${digits}%`); conds.push('EAN LIKE @digits'); }
+  if (words.length) {
+    words.forEach((w, k) => req.input(`w${k}`, sql.NVarChar(60), `%${w}%`));
+    conds.push(`(${words.map((_, k) => `Product_dsc LIKE @w${k}`).join(' AND ')})`);
+  }
+  if (!conds.length) return [];
+  const r = await req.query(`
+    SELECT TOP (@limit) SKU_ID, EAN, Product_dsc, status
+    FROM RETSC_OP_SKUS
+    WHERE ${conds.join(' OR ')}
+    ORDER BY CASE WHEN status = 'ACTIVE' THEN 0 ELSE 1 END, Product_dsc
+  `);
+  return r.recordset;
+};
+
 const insertSku = async (data) => {
   const pool = await getPool();
   const r = await pool
@@ -341,6 +408,9 @@ const listGlobalProducts = async (filters = {}) => {
 
 module.exports = {
   findSkuByEan,
+  findSkusByEans,
+  findSkusByIds,
+  searchSkus,
   insertSku,
   updateSku,
   findEnterpriseSku,
