@@ -159,4 +159,28 @@ const updateQualityMetrics = async (photoId, { qualityErrorCode, width, height, 
   return r.recordset[0] ?? null;
 };
 
-module.exports = { findByHash, findByHashGlobal, insert, listCategoryIdsByVisit, findByVisitId, updateQualityMetrics };
+// Una foto puntual por Photo_id — usado por "eliminar foto de visita" para resolver
+// visit_id/ENTERPRISE_ID/URL_blob antes de borrar (scoping + limpieza del blob).
+const findById = async (photoId) => {
+  const pool = await getPool();
+  const r = await pool.request()
+    .input('id', sql.Int, photoId)
+    .query(`SELECT * FROM ${TABLE} WHERE Photo_id = @id`);
+  return r.recordset[0] ?? null;
+};
+
+// Borra la fila de la foto. El caller (visitPhotoService.deleteVisitPhoto) es responsable de
+// borrar antes las detecciones hijas (shelfPhotoDetectionRepo.deleteByPhotoId) — hay una FK
+// (FK_RETSC_EX_SHELFPHOTO_DETECTION_photo) que rechaza este DELETE si quedan detecciones.
+const deleteById = async (photoId) => {
+  const pool = await getPool();
+  const r = await pool.request()
+    .input('id', sql.Int, photoId)
+    .query(`DELETE FROM ${TABLE} WHERE Photo_id = @id`);
+  return r.rowsAffected[0];
+};
+
+module.exports = {
+  findByHash, findByHashGlobal, insert, listCategoryIdsByVisit, findByVisitId,
+  updateQualityMetrics, findById, deleteById,
+};

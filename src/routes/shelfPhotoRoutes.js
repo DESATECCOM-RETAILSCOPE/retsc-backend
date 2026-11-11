@@ -180,6 +180,38 @@ router.post('/visit',
 
 /**
  * @swagger
+ * /api/shelf-photos/visit/{photoId}:
+ *   delete:
+ *     summary: Borra una foto de VISITA ya subida (popup "ver fotos", ShelfCaptureScreen)
+ *     tags: [ShelfPhotos]
+ *     security:
+ *       - bearerAuth: []
+ *     description: >-
+ *       Solo mientras la visita sigue OPEN, y solo el usuario dueño de esa visita. Borra
+ *       primero las detecciones de la foto (si ya corrió el pipeline) y después la fila de
+ *       la foto; el blob en storage se borra al final, sin bloquear la respuesta si falla.
+ *     parameters:
+ *       - in: path
+ *         name: photoId
+ *         required: true
+ *         schema: { type: integer }
+ *         description: Photo_id (RETSC_EX_SHELFPHOTO)
+ *     responses:
+ *       200:
+ *         description: Foto borrada
+ *       400:
+ *         description: Photo ID inválido
+ *       403:
+ *         description: La foto pertenece a la visita de otro usuario (ERR_VISITA_AJENA)
+ *       404:
+ *         description: Foto o visita no encontrada
+ *       409:
+ *         description: La visita ya está cerrada (ERR_VISITA_CERRADA)
+ */
+router.delete('/visit/:photoId', canUploadVisitPhoto, c.deleteVisitPhoto);
+
+/**
+ * @swagger
  * /api/shelf-photos/unidentified:
  *   get:
  *     summary: Productos detectados sin identificar (sección 8.4, guía Fotos de Visita v1.9)

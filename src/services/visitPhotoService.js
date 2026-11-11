@@ -38,7 +38,7 @@
 
 const crypto = require('crypto');
 
-const { uploadToContainer }    = require('./blobStorageService');
+const { uploadToContainer, deleteBlob } = require('./blobStorageService');
 const { hashBuffer }           = require('../utils/imageHasher');
 const { validateImageQuality } = require('../utils/imageQualityValidator');
 const visitRepo             = require('../repositories/visitRepo');
@@ -46,6 +46,7 @@ const categoryRepo          = require('../repositories/categoryRepo');
 const enterpriseRepo        = require('../repositories/enterpriseRepo');
 const retailerRepo          = require('../repositories/retailerRepo');
 const shelfPhotoRepo        = require('../repositories/shelfPhotoRepo');
+const shelfPhotoDetectionRepo  = require('../repositories/shelfPhotoDetectionRepo');
 const detectionPipelineService = require('./detectionPipelineService');
 
 // Convierte una descripción de catálogo (nombre de empresa, PDV, categoría) en un segmento
@@ -212,4 +213,36 @@ async function uploadVisitPhoto({ buffer, visitId, categoryId, shelfunitId, qual
   };
 }
 
-module.exports = { uploadVisitPhoto };
+// Borra una foto de visita (ShelfCaptureScreen — popup "ver fotos", mientras la visita sigue
+// abierta). Mismas reglas que uploadVisitPhoto: solo el dueño de la visita, y solo mientras
+// está OPEN (una visita CLOSED ya es historial — no se le tocan las fotos). Borra primero las
+// detecciones hijas (FK_RETSC_EX_SHELFPHOTO_DETECTION_photo las referencia) y después la fila
+// de la foto; el blob se borra al final y nunca bloquea el borrado si falla (ver
+// blobStorageService.deleteBlob).
+async function deleteVisitPhoto({ photoId, requestedBy }) {
+  const photoIdInt = parseIntOrThrow(photoId, 'photoId', 'ERR_PHOTO_ID_REQUERIDO');
+
+  const photo = await shelfPhotoRepo.findById(photoIdInt);
+  if (!photo) {
+    throw svcError(`Foto ${photoIdInt} no encontrada.`, 404, 'ERR_FOTO_NO_ENCONTRADA');
+  }
+
+  const visit = await visitRepo.findById(photo.visit_id);
+  if (!visit) {
+    throw svcError(`Visita ${photo.visit_id} no encontrada.`, 404, 'ERR_VISITA_NO_ENCONTRADA');
+  }
+  if (visit.User_id !== requestedBy) {
+    throw svcError('No puedes borrar fotos de la visita de otro usuario.', 403, 'ERR_VISITA_AJENA');
+  }
+  if (visit.Status !== 'OPEN') {
+    throw svcError(`La visita ${visit.Visit_id} ya está ${visit.Status} — no se pueden borrar sus fotos.`, 409, 'ERR_VISITA_CERRADA');
+  }
+
+  await shelfPhotoDetectionRepo.deleteByPhotoId(photoIdInt);
+  await shelfPhotoRepo.deleteById(photoIdInt);
+  await deleteBlob(photo.URL_blob);
+
+  return { photoId: photoIdInt, deleted: true };
+}
+
+module.exports = { uploadVisitPhoto, deleteVisitPhoto };

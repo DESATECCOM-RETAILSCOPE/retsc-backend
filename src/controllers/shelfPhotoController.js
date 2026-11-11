@@ -4,6 +4,7 @@
 //   - uploadPhoto        → fotos GLOBALES de entrenamiento (Issue 7.2, sin enterprise/visita)
 //   - uploadVisitPhoto   → fotos de VISITA real, Pasos 1-2 de la guía "Fotos de Visita" v1.9
 //                          (María Royo), amarradas a un Visit_id/enterprise/PDV concretos
+//   - deleteVisitPhoto   → borra una foto de visita (ShelfCaptureScreen, popup "ver fotos")
 //   - listUnidentified   → sección 8.4 de la guía: productos no identificados para el
 //                          dashboard web ("aquí te falta inteligencia...")
 //
@@ -12,7 +13,10 @@
 
 const fs                      = require('fs').promises;
 const { uploadShelfPhoto }    = require('../services/shelfPhotoUploadService');
-const { uploadVisitPhoto: uploadVisitPhotoSvc } = require('../services/visitPhotoService');
+const {
+  uploadVisitPhoto: uploadVisitPhotoSvc,
+  deleteVisitPhoto: deleteVisitPhotoSvc,
+} = require('../services/visitPhotoService');
 const shelfPhotoDetectionRepo  = require('../repositories/shelfPhotoDetectionRepo');
 const { ROLES, normalizeRole } = require('../config/roles');
 
@@ -109,6 +113,25 @@ const uploadVisitPhoto = async (req, res) => {
   }
 };
 
+// DELETE /api/shelf-photos/visit/:photoId
+// Borra una foto de visita ya subida — popup "ver fotos" de ShelfCaptureScreen (mobile),
+// mientras la visita sigue abierta. Mismos roles que la subida (canUploadVisitPhoto en la
+// ruta); el service valida además que sea el dueño de la visita y que siga OPEN.
+const deleteVisitPhoto = async (req, res) => {
+  try {
+    const photoId = parseInt(req.params.photoId, 10);
+    if (isNaN(photoId)) {
+      return res.status(400).json({ success: false, message: 'Photo ID inválido.' });
+    }
+
+    const result = await deleteVisitPhotoSvc({ photoId, requestedBy: req.user.userId });
+    return res.json({ success: true, ...result });
+
+  } catch (err) {
+    return handleError(res, err);
+  }
+};
+
 // GET /api/shelf-photos/unidentified
 // Sección 8.4 de la guía — "productos no identificados, posibles productos nuevos en
 // góndola". Visibilidad pasiva del dashboard web: ADMIN/ADMIN_DTC ven cualquier enterprise
@@ -133,4 +156,4 @@ const listUnidentified = async (req, res) => {
   }
 };
 
-module.exports = { uploadPhoto, uploadVisitPhoto, listUnidentified };
+module.exports = { uploadPhoto, uploadVisitPhoto, deleteVisitPhoto, listUnidentified };

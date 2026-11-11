@@ -162,6 +162,17 @@ const deleteByIds = async (detectionIds) => {
   return r.rowsAffected[0];
 };
 
+// Borra TODAS las detecciones de una foto — paso obligatorio antes de poder borrar la fila
+// de RETSC_EX_SHELFPHOTO (FK_RETSC_EX_SHELFPHOTO_DETECTION_photo la referencia). Usado por
+// "eliminar foto de visita" (visitPhotoService.deleteVisitPhoto).
+const deleteByPhotoId = async (photoId) => {
+  const pool = await getPool();
+  const r = await pool.request()
+    .input('photoId', sql.Int, photoId)
+    .query(`DELETE FROM ${TABLE} WHERE Photo_id = @photoId`);
+  return r.rowsAffected[0];
+};
+
 // ─── Lectura ─────────────────────────────────────────────────────────────────
 
 const findByPhotoId = async (photoId) => {
@@ -250,6 +261,7 @@ module.exports = {
   updateIdentification,
   updateIdentifications,
   deleteByIds,
+  deleteByPhotoId,
   findByPhotoId,
   shareDeGondolaByVisit,
   countUnidentifiedByVisit,

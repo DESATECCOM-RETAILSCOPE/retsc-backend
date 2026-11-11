@@ -257,7 +257,34 @@ async function downloadFromContainer({ containerName, blobPath }) {
   return fs.readFile(fullPath);
 }
 
+// Borra un blob a partir de la URL guardada en DB (la misma que devuelve uploadToContainer).
+// Usado por "eliminar foto de visita" (ShelfCaptureScreen). Nunca lanza: si el blob ya no
+// existe o falla el borrado, se loguea y se sigue — la fila de RETSC_EX_SHELFPHOTO es la
+// fuente de verdad para el usuario, un blob huérfano no le rompe nada.
+async function deleteBlob(url) {
+  if (!url) return;
+  const mode = getMode();
+
+  if (mode === 'azure') {
+    try {
+      const { containerName, blobPath } = parseAzureBlobUrl(url);
+      await getAzureContainerByName(containerName).getBlockBlobClient(blobPath).deleteIfExists();
+    } catch (err) {
+      console.warn(`[blobStorage] no se pudo borrar blob (${url}): ${err.message}`);
+    }
+    return;
+  }
+
+  // mock: uploadToContainer devuelve '/blob-mock/<containerName>/<blobPath...>'
+  try {
+    const relative = url.replace(/^\/blob-mock\//, '');
+    await fs.unlink(path.join(getMockBasePath(), relative));
+  } catch {
+    // ya no existe o no se pudo borrar — no es razón para fallar el delete de la foto
+  }
+}
+
 module.exports = {
   uploadImage, uploadImagesBatch, createMarker, prefixExists, ensureContainerExists,
-  uploadToContainer, downloadFromContainer, signBlobUrl, signBlobUrls,
+  uploadToContainer, downloadFromContainer, signBlobUrl, signBlobUrls, deleteBlob,
 };
