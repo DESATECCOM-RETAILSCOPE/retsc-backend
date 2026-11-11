@@ -227,9 +227,9 @@ async function deleteVisitPhoto({ photoId, requestedBy }) {
     throw svcError(`Foto ${photoIdInt} no encontrada.`, 404, 'ERR_FOTO_NO_ENCONTRADA');
   }
 
-  const visit = await visitRepo.findById(photo.visit_id);
+  const visit = await visitRepo.findById(photo.Visit_id);
   if (!visit) {
-    throw svcError(`Visita ${photo.visit_id} no encontrada.`, 404, 'ERR_VISITA_NO_ENCONTRADA');
+    throw svcError(`Visita ${photo.Visit_id} no encontrada.`, 404, 'ERR_VISITA_NO_ENCONTRADA');
   }
   if (visit.User_id !== requestedBy) {
     throw svcError('No puedes borrar fotos de la visita de otro usuario.', 403, 'ERR_VISITA_AJENA');
