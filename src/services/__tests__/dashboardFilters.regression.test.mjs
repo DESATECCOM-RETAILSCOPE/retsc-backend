@@ -95,3 +95,11 @@ test('Modelo: sin empresa (global por categoría); DTC no necesita elegir empres
 test('Pantalla desconocida → error de programación', () => {
   assert.throws(() => resolveFilters(req(cliente), 'otra', { now: NOW }));
 });
+
+test('Fecha por defecto en hora de Costa Rica (UTC-6)', () => {
+  const f = resolveFilters(req(cliente), 'cumplimiento', { now: new Date('2026-11-10T02:00:00Z') });
+  assert.equal(f.hasta, '2026-11-09');
+  assert.equal(f.hastaExclusive, '2026-11-10');
+  const g = resolveFilters(req(cliente), 'cumplimiento', { now: new Date('2026-11-10T06:00:00Z') });
+  assert.equal(g.hasta, '2026-11-10');
+});

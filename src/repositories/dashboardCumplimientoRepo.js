@@ -21,6 +21,15 @@
 //     reprocesada pesa varias veces en promedios, conteos y totales. Cada fila sigue
 //     siendo un snapshot congelado de su visita: se elige el último, no se recalcula.
 //
+//   · Exclusiones (revisión de María, 11-nov-2026):
+//       - visitas de prueba: RETSC_EX_VISIT.Notes que empieza con 'Visita de prueba';
+//       - snapshots de visitas SIN NINGUNA detección en las fotos de esa categoría: no
+//         son un 0 % de cumplimiento, son visitas que no se procesaron. Una visita con
+//         detecciones pero sin productos del surtido sí cuenta (0 % real).
+//   · Fechas en hora de Costa Rica: Visit_start se guarda en UTC (GETDATE() en Azure
+//     SQL). Filtros, agrupaciones y la fecha que se muestra usan la hora local.
+//   · Rankings: faltantes y prioritarios son el PROMEDIO por visita, no la suma.
+//
 // Recibe los filtros ya validados por utils/dashboardFilters.resolveFilters.
 
 const { getPool, sql } = require('../config/db');
@@ -28,6 +37,12 @@ const { getPool, sql } = require('../config/db');
 const COMPLIANCE = 'RETSC_EX_ASSORTMENT_COMPLIANCE';
 const SHARE      = 'RETSC_EX_ASSORTMENT_COMPLIANCE_SHARE';
 const VISIT      = 'RETSC_EX_VISIT';
+const PHOTO      = 'RETSC_EX_SHELFPHOTO';
+const DETECTION  = 'RETSC_EX_SHELFPHOTO_DETECTION';
+
+// Visit_start (UTC) en hora de Costa Rica (UTC-6, sin horario de verano).
+const VISIT_LOCAL = "CAST(v.Visit_start AT TIME ZONE 'UTC' AT TIME ZONE 'Central America Standard Time' AS DATETIME2(0))";
+const VISIT_DATE  = `CAST(${VISIT_LOCAL} AS DATE)`;
 const RETAILER   = 'RETSC_OP_RETAILER';
 const CHAINS     = 'RETSC_OP_SMKTCHAINS';
 
@@ -36,9 +51,9 @@ const WEEK_START = (expr) =>
   `DATEADD(DAY, -((DATEPART(WEEKDAY, ${expr}) + @@DATEFIRST - 2) % 7), ${expr})`;
 
 const PERIOD_EXPR = {
-  dia:    'CAST(v.Visit_start AS DATE)',
-  semana: `CAST(${WEEK_START('CAST(v.Visit_start AS DATE)')} AS DATE)`,
-  mes:    'DATEFROMPARTS(YEAR(v.Visit_start), MONTH(v.Visit_start), 1)',
+  dia:    VISIT_DATE,
+  semana: `CAST(${WEEK_START(VISIT_DATE)} AS DATE)`,
+  mes:    `DATEFROMPARTS(YEAR(${VISIT_DATE}), MONTH(${VISIT_DATE}), 1)`,
 };
 
 const DIMENSIONES = ['marca', 'fabricante', 'subcategoria', 'presentacion'];
@@ -56,6 +71,13 @@ const LATEST = `
              ) AS rn
       FROM ${COMPLIANCE} x
       WHERE x.enterprise_id = @enterpriseId
+        AND EXISTS (
+          SELECT 1
+          FROM ${PHOTO} ph
+          INNER JOIN ${DETECTION} d ON d.Photo_id = ph.Photo_id
+          WHERE ph.Visit_id = x.visit_id
+            AND ph.CATEGORY_ID = x.category
+        )
     ) t
     WHERE t.rn = 1
   )
@@ -67,8 +89,9 @@ const BASE_WHERE = `
   AND (@category IS NULL OR c.category = @category)
   AND (@chain    IS NULL OR c.Supermarketchain_id = @chain)
   AND (@format   IS NULL OR c.Format = @format)
-  AND v.Visit_start >= @desde
-  AND v.Visit_start <  @hastaExclusive
+  AND ${VISIT_LOCAL} >= @desde
+  AND ${VISIT_LOCAL} <  @hastaExclusive
+  AND (v.Notes IS NULL OR v.Notes NOT LIKE 'Visita de prueba%')
 `;
 
 async function baseRequest(f) {
@@ -104,7 +127,7 @@ async function tendencia(f, { agrupar }) {
 // Tabla por visita debajo de la tendencia (anexo 1, detalle). Más reciente primero.
 async function visitas(f) {
   const r = await (await baseRequest(f)).query(`${LATEST}
-    SELECT CAST(v.Visit_start AS DATE) AS fecha_visita,
+    SELECT ${VISIT_DATE} AS fecha_visita,
            c.visit_id,
            v.Retailer_id,
            rt.Retailer_dsc AS tienda,
@@ -137,8 +160,8 @@ async function rankingTiendas(f, { limit } = {}) {
            c.Format AS formato,
            COUNT(DISTINCT c.visit_id) AS visitas,
            CAST(AVG(CAST(c.cumplimiento_pct AS DECIMAL(9,4))) AS DECIMAL(5,1)) AS cumplimiento_promedio,
-           SUM(c.faltantes) AS faltantes,
-           SUM(c.prioritarios_faltantes) AS prioritarios_faltantes
+           CAST(AVG(CAST(c.faltantes AS DECIMAL(9,2))) AS DECIMAL(9,1)) AS faltantes_promedio,
+           CAST(AVG(CAST(c.prioritarios_faltantes AS DECIMAL(9,2))) AS DECIMAL(9,1)) AS prioritarios_promedio
     FROM c
     INNER JOIN ${VISIT} v ON v.Visit_id = c.visit_id
     LEFT JOIN ${RETAILER} rt ON rt.Retailer_id = v.Retailer_id
@@ -158,8 +181,8 @@ async function rankingCadenas(f) {
            c.Format AS formato,
            COUNT(DISTINCT c.visit_id) AS visitas,
            CAST(AVG(CAST(c.cumplimiento_pct AS DECIMAL(9,4))) AS DECIMAL(5,1)) AS cumplimiento_promedio,
-           SUM(c.faltantes) AS faltantes,
-           SUM(c.prioritarios_faltantes) AS prioritarios_faltantes
+           CAST(AVG(CAST(c.faltantes AS DECIMAL(9,2))) AS DECIMAL(9,1)) AS faltantes_promedio,
+           CAST(AVG(CAST(c.prioritarios_faltantes AS DECIMAL(9,2))) AS DECIMAL(9,1)) AS prioritarios_promedio
     FROM c
     INNER JOIN ${VISIT} v ON v.Visit_id = c.visit_id
     LEFT JOIN ${CHAINS} ch ON ch.Supermarketchain_id = c.Supermarketchain_id
@@ -173,7 +196,7 @@ async function rankingCadenas(f) {
 // Evolución de exceso y prioritarios faltantes (anexo 3): % sobre esperados, por visita.
 async function excesoPrioritarios(f) {
   const r = await (await baseRequest(f)).query(`${LATEST}
-    SELECT CAST(v.Visit_start AS DATE) AS fecha_visita,
+    SELECT ${VISIT_DATE} AS fecha_visita,
            c.visit_id,
            c.productos_esperados,
            CAST(c.en_exceso_fuera_surtido * 100.0 / NULLIF(c.productos_esperados, 0) AS DECIMAL(5,1)) AS pct_exceso_fuera_surtido,

@@ -65,8 +65,11 @@ function addDays(isoDate, days) {
   return d.toISOString().slice(0, 10);
 }
 
+// Fecha de hoy en Costa Rica (UTC-6, sin horario de verano). Las visitas se guardan
+// en UTC y el dashboard trabaja en hora local.
+const CR_OFFSET_MS = 6 * 60 * 60 * 1000;
 function todayIso(now) {
-  return (now ?? new Date()).toISOString().slice(0, 10);
+  return new Date((now ?? new Date()).getTime() - CR_OFFSET_MS).toISOString().slice(0, 10);
 }
 
 // Resuelve la empresa según el rol. Devuelve un Enterprise_id o lanza 400/403.

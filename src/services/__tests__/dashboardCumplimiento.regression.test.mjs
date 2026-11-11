@@ -27,7 +27,7 @@ stub('repositories/dashboardCumplimientoRepo.js', {
     return [{ periodo: new Date('2026-08-31T00:00:00Z'), visitas: 3, cumplimiento_promedio: 87.4, cumplimiento_minimo: 80, cumplimiento_maximo: 92.5 }]; },
   visitas: async (f) => { calls.push(['visitas', f]); return []; },
   rankingTiendas: async (f, p) => { calls.push(['rankingTiendas', f, p]);
-    return [{ tienda: 'Auto Mercado Moravia', cadena: 'Auto Mercado', formato: 'AUTOMERCADO', visitas: 12, cumplimiento_promedio: 94.2, faltantes: 18, prioritarios_faltantes: 2 }]; },
+    return [{ tienda: 'Auto Mercado Moravia', cadena: 'Auto Mercado', formato: 'AUTOMERCADO', visitas: 12, cumplimiento_promedio: 94.2, faltantes_promedio: 18.5, prioritarios_promedio: 2 }]; },
   rankingCadenas: async (f) => { calls.push(['rankingCadenas', f]); return []; },
   excesoPrioritarios: async (f) => { calls.push(['excesoPrioritarios', f]); return []; },
   composicion: async (f, p) => { calls.push(['composicion', f, p]);
@@ -104,8 +104,8 @@ test('ranking-tiendas con export=csv: nombre de archivo y contenido', async () =
   assert.match(res.headers['content-disposition'],
     /filename="cumplimiento_ranking-tiendas_unilever_2026-07-01_2026-09-30\.csv"/);
   const body = res.chunks.join('');
-  assert.ok(body.startsWith('\uFEFFTienda;Cadena;Formato;Visitas;Cumplimiento promedio (%);Faltantes;Prioritarios faltantes\r\n'));
-  assert.ok(body.includes('Auto Mercado Moravia;Auto Mercado;AUTOMERCADO;12;94,2;18;2\r\n'));
+  assert.ok(body.startsWith('\uFEFFTienda;Cadena;Formato;Visitas;Cumplimiento promedio (%);Faltantes promedio por visita;Prioritarios faltantes promedio por visita\r\n'));
+  assert.ok(body.includes('Auto Mercado Moravia;Auto Mercado;AUTOMERCADO;12;94,2;18,5;2\r\n'));
   assert.ok(res.ended);
 });
 

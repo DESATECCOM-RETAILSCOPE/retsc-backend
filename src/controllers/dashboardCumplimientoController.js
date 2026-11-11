@@ -93,8 +93,8 @@ const rankingTiendas = cardHandler({
     { key: 'formato',                header: 'Formato' },
     { key: 'visitas',                header: 'Visitas' },
     { key: 'cumplimiento_promedio',  header: 'Cumplimiento promedio (%)' },
-    { key: 'faltantes',              header: 'Faltantes' },
-    { key: 'prioritarios_faltantes', header: 'Prioritarios faltantes' },
+    { key: 'faltantes_promedio',     header: 'Faltantes promedio por visita' },
+    { key: 'prioritarios_promedio',  header: 'Prioritarios faltantes promedio por visita' },
   ],
 });
 
@@ -106,8 +106,8 @@ const rankingCadenas = cardHandler({
     { key: 'formato',                header: 'Formato' },
     { key: 'visitas',                header: 'Visitas' },
     { key: 'cumplimiento_promedio',  header: 'Cumplimiento promedio (%)' },
-    { key: 'faltantes',              header: 'Faltantes' },
-    { key: 'prioritarios_faltantes', header: 'Prioritarios faltantes' },
+    { key: 'faltantes_promedio',     header: 'Faltantes promedio por visita' },
+    { key: 'prioritarios_promedio',  header: 'Prioritarios faltantes promedio por visita' },
   ],
 });
 
