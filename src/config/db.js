@@ -31,6 +31,17 @@ const debugConfig = () => {
   console.log('[DB DEBUG] SQL_PASSWORD:', process.env.SQL_PASSWORD ? `SET (${process.env.SQL_PASSWORD.length} chars)` : 'NOT SET');
 };
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Reintentos con backoff ante un primer connect frío (caso real, 2026-11-19: 5 días sin
+// tráfico → el primer login del día falló con "operation timed out for an unknown reason"
+// — un TimeoutError del pool (tarn), no un error de credenciales — y el reintento manual del
+// usuario 90s después conectó al toque). Sin esto, ese error crudo del driver se mandaba tal
+// cual al usuario (ver authController.js: `message: err.message`), obligándolo a reintentar
+// él mismo. 3 intentos cubre un cold-start típico sin dejar una request colgada
+// indefinidamente si la base realmente está caída.
+const CONNECT_ATTEMPTS = 3;
+
 const getPool = async () => {
   if (pool && pool.connected) return pool;
 
@@ -40,24 +51,33 @@ const getPool = async () => {
     pool = null;
   }
 
-  console.log('[DB DEBUG] Intentando conectar a MSSQL...');
-  debugConfig();
+  let lastErr;
+  for (let attempt = 1; attempt <= CONNECT_ATTEMPTS; attempt++) {
+    console.log(`[DB DEBUG] Intentando conectar a MSSQL (intento ${attempt}/${CONNECT_ATTEMPTS})...`);
+    debugConfig();
 
-  try {
-    pool = await sql.connect(config);
-    pool.on('error', (err) => {
-      console.error('❌ MSSQL pool error:', err.message);
+    try {
+      pool = await sql.connect(config);
+      pool.on('error', (err) => {
+        console.error('❌ MSSQL pool error:', err.message);
+        pool = null;
+      });
+      console.log('✅ Conectado a MSSQL exitosamente');
+      return pool;
+    } catch (err) {
+      lastErr = err;
       pool = null;
-    });
-    console.log('✅ Conectado a MSSQL exitosamente');
-  } catch (err) {
-    console.error('❌ Error conectando a MSSQL:', err.message);
-    console.error('[DB DEBUG] Error completo:', err);
-    pool = null;
-    throw err;
+      console.error(`❌ Error conectando a MSSQL (intento ${attempt}/${CONNECT_ATTEMPTS}):`, err.message);
+      if (attempt < CONNECT_ATTEMPTS) {
+        const waitMs = 2000 * attempt;
+        console.log(`[DB DEBUG] Reintentando en ${waitMs}ms — probable cold start de la base...`);
+        await sleep(waitMs);
+      }
+    }
   }
 
-  return pool;
+  console.error('[DB DEBUG] Error completo (último intento):', lastErr);
+  throw lastErr;
 };
 
 module.exports = { getPool, sql };
