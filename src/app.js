@@ -24,6 +24,7 @@ const readinessRoutes                   = require('./routes/readinessRoutes');
 const planogramRoutes                   = require('./routes/planogramRoutes');
 const authMiddleware                    = require('./middlewares/authMiddleware');
 const jobRepo                  = require('./repositories/jobRepo');
+const admRoutes        = require('./routes/admRoutes');
 
 const path = require('path');
 
@@ -56,6 +57,10 @@ app.use('/api/retailers',                  authMiddleware, retailerRoutes);
 app.use('/api/sessions',                   authMiddleware, sessionsRoutes);
 app.use('/api/dashboard',                  authMiddleware, dashboardRoutes);
 app.use('/api/readiness',                  authMiddleware, readinessRoutes);
+// Módulo administrativo (contratos y datos de facturación; luego OC, facturas y pagos).
+// Requiere sesión. Debe montarse ANTES del handler 404 de más abajo: si quedara después,
+// el 404 atraparía /api/adm/* primero y siempre respondería "Ruta no encontrada".
+app.use('/api/adm',                        authMiddleware, admRoutes);
 // SIN authMiddleware a propósito — ver header de reportRoutes.js (se abre desde el
 // navegador del sistema, token de corta duración por query string en vez de Bearer).
 app.use('/api/reports',                    reportRoutes);
