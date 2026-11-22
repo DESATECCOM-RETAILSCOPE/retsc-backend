@@ -1,6 +1,6 @@
 /**
  * admRoutes.js — Rutas del módulo administrativo (/api/adm): contrato, datos de facturación,
- *   facturas y pagos.
+ *   facturas, pagos, cuentas por cobrar, notas de cobro y bitácora.
  *
  * Para qué sirve: declara qué rutas existen y qué roles pueden usarlas. El control de
  *   acceso real vive aquí y en el servicio (admScope); ocultar botones en la pantalla
@@ -10,8 +10,7 @@
  *   //       los datos de facturación. Hoy: ADMIN y GERENCIA (información financiera).
  *   //       Se puede cambiar sin tocar código con la variable ADM_CLIENT_VIEW_ROLES.
  * TODO conocidos:
- *   // TODO: agregar aquí las rutas de OC, notas de cobro, documentos, antigüedad y
- *   //       bitácora en los pasos siguientes del módulo (facturas y pagos ya están).
+ *   // TODO: agregar aquí las rutas de OC y documentos en los pasos siguientes del módulo.
  *
  * NOTA: este router se monta en app.js con authMiddleware:
  *         app.use('/api/adm', authMiddleware, admRoutes);
@@ -26,6 +25,9 @@ const contractController = require('../controllers/admContractController');
 const billingController = require('../controllers/admBillingProfileController');
 const invoiceController = require('../controllers/admInvoiceController');
 const paymentController = require('../controllers/admPaymentController');
+const receivablesController = require('../controllers/admReceivablesController');
+const noteController = require('../controllers/admNoteController');
+const auditController = require('../controllers/admAuditController');
 
 // Roles de la empresa cliente que pueden VER contrato y datos de facturación.
 // Mismo estilo que otros routers (shelf-photos, annotations): lista separada por comas
@@ -328,5 +330,118 @@ router.post('/invoices/:id/payments', dtcOnly, paymentController.createPayment);
  *       422: { description: Falta el motivo o el pago ya está ANULADO }
  */
 router.post('/payments/:id/void', dtcOnly, paymentController.voidPayment);
+
+/**
+ * @swagger
+ * /api/adm/aging:
+ *   get:
+ *     summary: Antigüedad de saldos por empresa y moneda (solo DTC)
+ *     description: >
+ *       Lee RETSC_ADM_V_AGING con el nombre de la empresa. Ordenado por empresa y moneda.
+ *       Con ?export=csv descarga un CSV (mismo formato que el dashboard: UTF-8 con BOM, separador ";", coma decimal) llamado
+ *       cuentas-por-cobrar-AAAA-MM-DD.csv (fecha de hoy en Costa Rica).
+ *     tags: [Administración]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: query, name: enterpriseId, schema: { type: integer }, description: Opcional (DTC ve todas las empresas) }
+ *       - { in: query, name: currency, schema: { type: string, enum: [CRC, USD] } }
+ *       - { in: query, name: export, schema: { type: string, enum: [csv] } }
+ *     responses:
+ *       200: { description: "{ success, aging: [{ enterpriseId, enterpriseName, currency, vigente, vencido1a30, vencido31a60, vencido61a90, vencidoMas90, saldoTotal, facturasConSaldo }] } o el archivo text/csv" }
+ *       401: { description: Sin token o token inválido }
+ *       403: { description: Rol sin permiso }
+ *       422: { description: "Filtro inválido. { success:false, message, field }" }
+ */
+router.get('/aging', dtcOnly, receivablesController.getAging);
+
+/**
+ * @swagger
+ * /api/adm/receivables:
+ *   get:
+ *     summary: Facturas con saldo para la pantalla de cuentas por cobrar (solo DTC)
+ *     description: >
+ *       Endpoint extra (no está en la tabla de la spec). Solo facturas con saldo, con el nombre de la
+ *       empresa y la última nota de cobro. Banderas: overdue (días vencida > 0), dueSoon (vence entre hoy
+ *       y hoy + 7 días) y followUpDue (próximo contacto hoy o antes), con "hoy" en hora de Costa Rica.
+ *       Orden: followUpDue primero y luego vencimiento ascendente.
+ *     tags: [Administración]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: query, name: enterpriseId, schema: { type: integer }, description: Opcional }
+ *       - { in: query, name: currency, schema: { type: string, enum: [CRC, USD] } }
+ *       - { in: query, name: filter, schema: { type: string, enum: [overdue, dueSoon, followUp] } }
+ *     responses:
+ *       200: { description: "{ success, receivables: [{ invoiceId, enterpriseId, enterpriseName, contractId, invoiceNumber, dueDate, currency, totalAmount, balance, paymentStatus, daysOverdue, agingBucket, nextContactDate, lastNote, overdue, dueSoon, followUpDue }] }" }
+ *       403: { description: Rol sin permiso }
+ *       422: { description: Filtro inválido }
+ */
+router.get('/receivables', dtcOnly, receivablesController.listReceivables);
+
+/**
+ * @swagger
+ * /api/adm/invoices/{id}/notes:
+ *   get:
+ *     summary: Notas de seguimiento de cobro de una factura (solo DTC)
+ *     description: Más recientes primero.
+ *     tags: [Administración]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: integer } }
+ *     responses:
+ *       200: { description: "{ success, notes: [{ noteId, invoiceId, note, nextContactDate, createdUserId, createdAt }] }" }
+ *       403: { description: Rol sin permiso }
+ *       404: { description: Factura no encontrada }
+ *   post:
+ *     summary: Agregar una nota de seguimiento de cobro (solo DTC)
+ *     description: Las notas no se auditan (la bitácora no admite la entidad NOTE); la nota guarda quién y cuándo.
+ *     tags: [Administración]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: integer } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [note]
+ *             properties:
+ *               note: { type: string, maxLength: 500 }
+ *               nextContactDate: { type: string, format: date }
+ *     responses:
+ *       201: { description: "{ success, note }" }
+ *       403: { description: Rol sin permiso }
+ *       404: { description: Factura no encontrada }
+ *       422: { description: "Validación. { success:false, message, field }" }
+ */
+router.get('/invoices/:id/notes', dtcOnly, noteController.listNotes);
+router.post('/invoices/:id/notes', dtcOnly, noteController.createNote);
+
+/**
+ * @swagger
+ * /api/adm/audit:
+ *   get:
+ *     summary: Bitácora del módulo administrativo (solo DTC)
+ *     description: >
+ *       Orden por Audit_id descendente. Old_value y New_value llegan como objetos, con Billing_email,
+ *       Tax_id, Billing_address y Legal_name enmascarados como "***". Fechas from/to en hora de Costa
+ *       Rica, ambas incluidas. Para la página siguiente, enviar ?beforeId= con nextBeforeId.
+ *     tags: [Administración]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: query, name: entityType, schema: { type: string, enum: [CONTRACT, PO, INVOICE, PAYMENT, DOCUMENT, BILLING_PROFILE] } }
+ *       - { in: query, name: entityId, schema: { type: integer } }
+ *       - { in: query, name: action, schema: { type: string, enum: [CREATE, UPDATE, STATUS_CHANGE, VOID, DOWNLOAD] } }
+ *       - { in: query, name: from, schema: { type: string, format: date } }
+ *       - { in: query, name: to, schema: { type: string, format: date } }
+ *       - { in: query, name: userId, schema: { type: integer } }
+ *       - { in: query, name: limit, schema: { type: integer, default: 50, maximum: 200 } }
+ *       - { in: query, name: beforeId, schema: { type: integer }, description: Trae filas con Audit_id menor }
+ *     responses:
+ *       200: { description: "{ success, entries: [{ auditId, entityType, entityId, action, oldValue, newValue, userId, userName, createdAt, ipAddress }], nextBeforeId }" }
+ *       403: { description: Rol sin permiso }
+ *       422: { description: Filtro inválido (por ejemplo entityType=NOTE) }
+ */
+router.get('/audit', dtcOnly, auditController.listAudit);
 
 module.exports = router;

@@ -65,6 +65,17 @@ const findById = async (contractId) => {
   return r.recordset[0] ?? null;
 };
 
+// Cuántas facturas tiene el contrato, en CUALQUIER estado (ANULADA incluida). La usa la
+// guardia que impide cambiar la moneda de un contrato que ya facturó.
+const countInvoices = async (contractId) => {
+  const pool = await getPool();
+  const r = await pool
+    .request()
+    .input('contractId', sql.Int, contractId)
+    .query('SELECT COUNT(*) AS total FROM RETSC_ADM_INVOICE WHERE Contract_id = @contractId');
+  return Number(r.recordset[0].total);
+};
+
 // Crea un contrato y su fila de bitácora (CREATE) en una sola transacción.
 // Si el INSERT falla (por ejemplo, ya hay un contrato ACTIVO), se hace rollback y el
 // error sube al servicio, que lo traduce a un 422.
@@ -189,6 +200,7 @@ module.exports = {
   findActiveByEnterprise,
   listByEnterprise,
   findById,
+  countInvoices,
   createWithAudit,
   updateWithAudit,
 };

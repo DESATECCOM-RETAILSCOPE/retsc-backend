@@ -5,8 +5,6 @@
  *   y 8) y traduce los rechazos de la base a mensajes claros en español (422).
  * Dependencias externas pendientes: ninguna.
  * TODO conocidos:
- *   // TODO: cuando existan facturas (paso 5), impedir cambiar moneda, método de pago o
- *   //       plazo de un contrato que ya tiene facturas emitidas.
  *   // TODO: confirmar con María si el plazo de crédito de OC_FACTURA debe restringirse
  *   //       a 30, 60, 90 o 120 (valores usuales de la spec). Hoy se acepta 0 a 180.
  *
@@ -16,6 +14,12 @@
  * NOTA: "solo un contrato ACTIVO por empresa" lo garantiza la base con un índice único
  *   filtrado. Aquí NO se consulta antes de escribir (evita carreras entre dos peticiones):
  *   se deja que la base decida y se traduce su error.
+ * NOTA: guardia de facturas — un contrato que ya tiene facturas (cualquier estado, ANULADA
+ *   incluida) NO puede cambiar de MONEDA, porque factura, OC y pago deben tener la misma
+ *   moneda (spec, sección 8). El PLAZO (Credit_days) sí se puede cambiar: cada factura guarda
+ *   su propia copia del plazo al registrarse (sección 8, "Plazo congelado"), así que cambiarlo
+ *   no mueve facturas ya emitidas. El MÉTODO DE PAGO tampoco se bloquea: la spec no define
+ *   qué pasa con él cuando ya hay facturas. Confirmar con María.
  */
 
 const contractRepo = require('../repositories/admContractRepo');
@@ -218,6 +222,18 @@ const update = async (user, idRaw, body, ipAddress) => {
     }
   }
   if (Object.keys(changes).length === 0) return toDTO(current);
+
+  // Guardia de facturas: si la moneda realmente cambia y el contrato ya tiene facturas, se
+  // rechaza (ver NOTA del encabezado). Solo se consulta cuando hace falta.
+  // OPTIMIZAR: la cuenta se hace antes de la transacción de edición; una factura registrada
+  //   justo entre la cuenta y el UPDATE no la detectaría. El riesgo es mínimo (lo hacen solo
+  //   usuarios DTC) y la factura igual exige la moneda del contrato al registrarse.
+  if ('Currency' in changes && (await contractRepo.countInvoices(contractId)) > 0) {
+    throw fieldError(
+      'currency',
+      'No se puede cambiar la moneda: el contrato ya tiene facturas registradas. Finalice este contrato y cree uno nuevo con la otra moneda.',
+    );
+  }
 
   try {
     const row = await contractRepo.updateWithAudit(contractId, changes, { userId: user.userId, ipAddress });
